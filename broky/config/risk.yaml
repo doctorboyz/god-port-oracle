@@ -1,0 +1,57 @@
+# Risk Management Configuration
+# Starting small, growing gradually
+
+risk:
+  # Position sizing
+  max_risk_per_trade: 0.02     # 2% of equity per trade
+  max_concurrent_positions: 2
+
+  # Per-phase limits (based on backtest results on H1)
+  phases:
+    backtest:
+      capital: 1000
+      max_lot: 0.10
+      risk_per_trade: 0.03
+      max_positions: 2
+    forward:
+      capital: 1000
+      max_lot: 0.05
+      risk_per_trade: 0.02
+      max_positions: 1
+    paper:
+      capital: 1000
+      max_lot: 0.01
+      risk_per_trade: 0.02
+      max_positions: 1
+    live_start:
+      capital: 1000      # Minimum $1000 for proper risk management on H1
+      max_lot: 0.01
+      risk_per_trade: 0.02
+      max_positions: 1
+    live_growth:
+      capital: 1000
+      max_lot: 0.05
+      risk_per_trade: 0.02
+      max_positions: 2
+
+  # Circuit breaker
+  circuit_breaker:
+    daily_loss_limit: 0.05     # 5% daily max loss
+    consecutive_loss_limit: 5  # Stop after 5 consecutive losses (was 3, too aggressive for 44% WR)
+    cooldown_minutes: 15       # Cooldown after consecutive losses
+    flash_crash_drop: 0.10     # 10% drop in 5 minutes = Level 3
+
+  # Stop loss / Take profit (tuned from backtest)
+  sl_tp:
+    sl_method: atr             # atr = ATR-based, fixed = fixed pips
+    atr_multiplier: 1.5        # SL = 1.5 * ATR (best practice for XAUUSD trend trading)
+    tp_method: risk_reward      # risk_reward = fixed RR ratio
+    risk_reward_ratio: 2.5     # TP = 2.5x SL distance (best from grid search)
+    spread_buffer: 2.5          # Extra pips for spread on SL
+    trailing_stop: true
+    trailing_atr_multiplier: 2.0  # Trailing stop at 2x ATR after entry
+
+  # Slippage
+  slippage:
+    max_slippage_pct: 0.005   # 0.5% max slippage
+    reject_if_exceeded: true

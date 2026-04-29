@@ -1,0 +1,73 @@
+# Broky Indicator Configuration
+# Weights and parameters for technical indicators
+# v3: Best practice — 1 indicator per category, no redundancy
+# Trend 35% | Momentum 35% | Volatility 10% | Volume 15%
+# ADX filter: minimum ADX = 20 (no trades in ranging markets)
+
+indicators:
+  macd:
+    fast_period: 12
+    slow_period: 26
+    signal_period: 9
+    weight: 0.35           # Sole momentum indicator
+
+  ema_cross:
+    fast_period: 9
+    slow_period: 21
+    weight: 0.15           # Short-term trend direction
+
+  ema_trend:
+    fast_period: 50
+    slow_period: 200
+    weight: 0.05           # Long-term trend filter
+
+  adx:
+    period: 14
+    trending_threshold: 25   # ADX > 25 = strong trend
+    forming_threshold: 20    # ADX 20-25 = trend forming
+    minimum_for_trade: 20    # ADX < 20 = ranging, no trade
+    weight: 0.15           # Trend strength
+
+  bollinger:
+    period: 20
+    std_dev: 2.0
+    weight: 0.10           # Volatility (ADX-filtered, reduced to prevent overtrading)
+
+  volume:
+    ma_period: 20
+    weight: 0.15           # Confirmation
+
+  atr:
+    period: 14
+    weight: 0.00           # ATR used for position sizing, not scoring
+
+# Confidence thresholds (tuned from backtest)
+# v3: Raised to 0.60 to reduce overtrading (was 0.55)
+thresholds:
+  min_confidence: 0.60
+  strong_signal: 0.75
+
+# Session-specific adjustments
+sessions:
+  asian:
+    hours: "00:00-08:00"
+    lot_multiplier: 0.5
+    spread_buffer: 3
+  london:
+    hours: "08:00-16:00"
+    lot_multiplier: 1.0
+    spread_buffer: 2
+  ny:
+    hours: "13:00-22:00"
+    lot_multiplier: 1.0
+    spread_buffer: 2
+  overlap:
+    hours: "13:00-16:00"
+    lot_multiplier: 1.2
+    spread_buffer: 1
+
+# Multi-timeframe alignment
+timeframes:
+  primary: M5
+  secondary: H1
+  trend: D1

@@ -1,0 +1,21 @@
+# MT5 Trading System
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+data/results/*.json
+data/results/*.html
+data/broky.db
+data/paper_trades.json
+*.log
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

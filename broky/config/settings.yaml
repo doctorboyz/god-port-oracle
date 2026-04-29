@@ -1,0 +1,88 @@
+# Broky Settings
+# Main configuration for the trading analysis engine
+
+system:
+  name: broky
+  version: "0.1.0"
+  phase: backtest              # backtest | forward | paper | live
+  log_level: INFO
+
+data:
+  # XAUUSD Premium Data
+  historical_dir: data/xau-data
+  primary_timeframe: H1       # Backtest shows H1 is optimal (M5 too few signals)
+  secondary_timeframe: H4
+  trend_timeframe: D1
+
+  # Supported timeframes and row counts
+  timeframes:
+    M1: 200000
+    M5: 200000
+    M15: 200000
+    M30: 200000
+    H1: 100345
+    H4: 26816
+    D1: 5213
+
+  # Data columns (Premium CSV format, no header)
+  columns:
+    - Date
+    - Open
+    - High
+    - Low
+    - Close
+    - Volume
+
+backtest:
+  # Walk-forward optimization
+  train_ratio: 0.70
+  test_ratio: 0.30
+  min_history_months: 6
+  walk_forward_steps: 10
+
+  # Best parameters from grid search (H1, 3-year data)
+  best_config:
+    risk_reward_ratio: 2.5
+    atr_multiplier: 1.0
+    min_confidence: 0.45
+    profit_factor: 1.89
+    max_drawdown_pct: 4.0
+    win_rate: 0.44
+
+  # Monte Carlo validation
+  monte_carlo_simulations: 1000
+
+  # Performance thresholds (must pass all to proceed)
+  min_profit_factor: 1.5
+  max_drawdown_pct: 0.20
+  min_win_rate: 0.55
+  min_sharpe: 1.0
+
+  # Reporting
+  report_dir: data/results
+  report_formats:
+    - json
+    - html
+    - markdown
+
+forward:
+  # Live data source
+  data_source: mt5             # mt5 | twelve_data | file
+  mt5_bridge_host: "0.0.0.0"
+  mt5_bridge_port: 5005
+  symbol: "XAUUSD"
+
+  # Forward test duration before going live
+  min_weeks: 4
+
+  # Session classification (UTC hours)
+  sessions:
+    asian: [0, 8]
+    london: [8, 16]
+    ny: [13, 22]
+    overlap: [13, 16]
+
+database:
+  path: data/broky.db
+  wal_mode: true
+  journal_mode: WAL

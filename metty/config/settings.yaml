@@ -1,0 +1,61 @@
+# Metty Settings
+# MT5 execution bridge configuration
+
+system:
+  name: metty
+  version: "0.1.0"
+  phase: paper                  # paper | live
+  log_level: INFO
+
+bridge:
+  host: "0.0.0.0"
+  port: 5005
+  timeout_seconds: 5
+  reconnect_attempts: 3
+  reconnect_delay_seconds: 2
+
+  # Bridge startup
+  startup_script: "/Users/doctorboyz/MT5/run_bridge.sh"
+  pm2_process_name: "mt5-bridge"
+
+  # Wine configuration
+  wineprefix: "$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
+  wine_path: "$HOME/.mt5_bridge_bin/wine"
+
+broker:
+  name: "Exness"
+  server: "Exness-MT5"
+  symbol: "XAUUSD"
+  digits: 2                    # XAUUSD has 2 decimal places
+  point: 0.01                  # 1 point = 0.01 for XAUUSD
+  spread_typical: 25           # Typical spread in points (2.5 pips)
+  fill_policy: "IOC"           # Immediate or Cancel
+
+  # Account
+  login: ""                    # Set in .env
+  password: ""                 # Set in .env
+  server: ""                   # Set in .env
+
+execution:
+  # Safety limits
+  max_slippage_pct: 0.005     # 0.5% max slippage
+  max_lot: 0.05               # Maximum lot size
+  min_lot: 0.01               # Minimum lot size
+  max_positions: 2            # Maximum concurrent positions
+  max_daily_orders: 20        # Maximum orders per day
+
+  # Paper trading
+  paper_mode: true             # Start in paper mode
+  paper_log: data/paper_trades.json
+
+notifications:
+  telegram:
+    enabled: true
+    bot_token_env: "TELEGRAM_BOT_TOKEN_XAUUSD"
+    chat_id_env: "TELEGRAM_CHAT_ID"
+    notify_on:
+      - trade_opened
+      - trade_closed
+      - daily_summary
+      - error
+      - circuit_breaker
