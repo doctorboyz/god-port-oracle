@@ -1,0 +1,74 @@
+# MT5 Bridge Containers on x86_64 VPS
+# Uses gmag11/MetaTrader5-Docker as base, extended with our custom RPyC bridge
+#
+# gmag11 provides: Wine + MT5 terminal + Python 3.9 + VNC
+# We add: custom RPyC bridge server (mt5_bridge_server.py) + numpy fix
+#
+# Container names are short: mt5a, mt5b, mt5c
+# Bridge port 8001 inside container → mapped to 5005/5006/5007 externally
+# VNC port 3000 inside container → mapped to 5900/5901/5902 externally
+#
+# First-time setup:
+#   1. docker compose -f docker-compose.vps.yml up -d
+#   2. Wait ~3 min for gmag11 initialization
+#   3. Login to MT5 via VNC for each account (first time only)
+#   4. Bridge auto-starts after container restart
+#
+# DO NOT use on macOS ARM — Wine crashes under Rosetta emulation
+
+services:
+  mt5a:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    container_name: mt5a
+    environment:
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_A} /server:${MT5_SERVER_A:-Exness-MT5Trial17}
+      - CUSTOM_USER=mt5user
+      - PASSWORD=mt5password
+    ports:
+      - "5900:3000"  # VNC web interface
+      - "5005:8001"  # RPyC bridge
+    volumes:
+      - mt5-config-a:/config
+    restart: unless-stopped
+
+  mt5b:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    container_name: mt5b
+    environment:
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_B} /server:${MT5_SERVER_B:-Exness-MT5Trial17}
+      - CUSTOM_USER=mt5user
+      - PASSWORD=mt5password
+    ports:
+      - "5901:3000"  # VNC web interface
+      - "5006:8001"  # RPyC bridge
+    volumes:
+      - mt5-config-b:/config
+    restart: unless-stopped
+
+  mt5c:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    container_name: mt5c
+    environment:
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_C} /server:${MT5_SERVER_C:-Exness-MT5Trial7}
+      - CUSTOM_USER=mt5user
+      - PASSWORD=mt5password
+    ports:
+      - "5902:3000"  # VNC web interface
+      - "5007:8001"  # RPyC bridge
+    volumes:
+      - mt5-config-c:/config
+    restart: unless-stopped
+
+volumes:
+  mt5-config-a:
+    driver: local
+  mt5-config-b:
+    driver: local
+  mt5-config-c:
+    driver: local

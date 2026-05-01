@@ -1,53 +1,104 @@
 # Metty Settings
-# MT5 execution bridge configuration
+# Multi-account execution bridge for ML data collection
 
 system:
   name: metty
-  version: "0.1.0"
-  phase: paper                  # paper | live
+  version: "0.2.0"
+  phase: collect              # collect | paper | live
   log_level: INFO
+  poll_interval_seconds: 5    # How often to check for new candles/signals
 
-bridge:
-  host: "0.0.0.0"
-  port: 5005
-  timeout_seconds: 5
-  reconnect_attempts: 3
-  reconnect_delay_seconds: 2
+# Multi-account bridge configuration
+bridges:
+  A:
+    host: "${MT5_BRIDGE_A_HOST:-vpsdeluna}"
+    port: 5005
+    timeout_seconds: 5
+    reconnect_attempts: 3
+    reconnect_delay_seconds: 2
+    signal_group: volume
+    account:
+      name: A
+      type: Standard
+      login: "${MT5_LOGIN_A:-463363150}"
+      server: "Exness-MT5Trial17"
+      initial_balance: 100
+      leverage: 2000
 
-  # Bridge startup
-  startup_script: "/Users/doctorboyz/MT5/run_bridge.sh"
-  pm2_process_name: "mt5-bridge"
+  B:
+    host: "${MT5_BRIDGE_B_HOST:-vpsdeluna}"
+    port: 5006
+    timeout_seconds: 5
+    reconnect_attempts: 3
+    reconnect_delay_seconds: 2
+    signal_group: ob_os
+    account:
+      name: B
+      type: Pro
+      login: "${MT5_LOGIN_B:-463363160}"
+      server: "Exness-MT5Trial17"
+      initial_balance: 500
+      leverage: 500
 
-  # Wine configuration
-  wineprefix: "$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
-  wine_path: "$HOME/.mt5_bridge_bin/wine"
+  C:
+    host: "${MT5_BRIDGE_C_HOST:-vpsdeluna}"
+    port: 5007
+    timeout_seconds: 5
+    reconnect_attempts: 3
+    reconnect_delay_seconds: 2
+    signal_group: ma
+    account:
+      name: C
+      type: RawSpread
+      login: "${MT5_LOGIN_C:-433532985}"
+      server: "Exness-MT5Trial7"
+      initial_balance: 1000
+      leverage: 500
 
+# Signal group routing
+routing:
+  volume: A           # Volume signals -> Account A
+  ob_os: B            # OB/OS signals -> Account B
+  ma: C               # MA signals -> Account C
+  sentiment: ALL      # Sentiment signals -> all accounts
+
+# Broker defaults (per-account overrides in .env)
 broker:
   name: "Exness"
   server: "Exness-MT5"
   symbol: "XAUUSD"
-  digits: 2                    # XAUUSD has 2 decimal places
-  point: 0.01                  # 1 point = 0.01 for XAUUSD
-  spread_typical: 25           # Typical spread in points (2.5 pips)
-  fill_policy: "IOC"           # Immediate or Cancel
+  digits: 2
+  point: 0.01
+  spread_typical: 25
+  fill_policy: "IOC"
 
-  # Account
-  login: ""                    # Set in .env
-  password: ""                 # Set in .env
-  server: ""                   # Set in .env
-
+# Execution limits
 execution:
-  # Safety limits
-  max_slippage_pct: 0.005     # 0.5% max slippage
-  max_lot: 0.05               # Maximum lot size
-  min_lot: 0.01               # Minimum lot size
-  max_positions: 2            # Maximum concurrent positions
-  max_daily_orders: 20        # Maximum orders per day
+  max_slippage_pct: 0.005
+  max_lot: 0.05
+  min_lot: 0.01
+  max_positions_per_account: 2
+  max_daily_orders_per_account: 20
+  risk_per_trade_pct: 2.0
 
-  # Paper trading
-  paper_mode: true             # Start in paper mode
-  paper_log: data/paper_trades.json
+# Data collection settings
+collection:
+  db_path: "${DB_PATH:-data/oracle.db}"
+  timeframes:
+    - M5
+    - M15
+    - H1
+    - H4
+    - D1
+  min_trades_for_ml: 200    # Don't train ML until this many trades collected
 
+# Circuit breaker (per account)
+circuit_breaker:
+  max_consecutive_losses: 5
+  max_daily_loss_pct: 5.0
+  cooldown_minutes: 15
+
+# Notifications
 notifications:
   telegram:
     enabled: true
