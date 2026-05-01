@@ -4,6 +4,7 @@ set -e
 # MT5 Bridge Entrypoint — 3-phase startup
 #
 # Phase 1: gmag11 initialization (installs Wine, MT5, Python — takes ~2-3 min)
+# Phase 1.5: Fix numpy + install rpyc (needs Xvfb running from Phase 1)
 # Phase 2: Start MT5 terminal (user must login manually via VNC the first time)
 # Phase 3: Start custom RPyC bridge server in Wine Python
 #
@@ -21,15 +22,36 @@ echo "[Phase 1] Running gmag11 initialization..."
 /original_start.sh &
 
 # Wait for gmag11 initialization to complete (~2-3 minutes)
-# gmag11 creates Wine prefix, installs MT5 terminal, sets up Python
 echo "[Phase 1] Waiting for initialization (120s)..."
 sleep 120
 
+# Phase 1.5: Fix Python packages after gmag11 init completes
+# These can't be done at Docker build time because:
+# - Wine needs Xvfb to run pip (not available during build)
+# - Debian 12 blocks system-wide pip installs (PEP 668)
+echo "[Phase 1.5] Fixing Python packages..."
+
+# Downgrade numpy in Wine Python — numpy 2.x is incompatible with MetaTrader5
+echo "[Phase 1.5] Downgrading numpy in Wine Python (2.x incompatible with MT5)..."
+DISPLAY=:99 WINEPREFIX=/config/.wine wine python -m pip install 'numpy<2' --force-reinstall || {
+    echo "[Phase 1.5] WARNING: numpy downgrade failed, bridge may not work correctly"
+}
+
+# Install rpyc in Linux Python for the health check
+echo "[Phase 1.5] Installing rpyc in Linux Python..."
+pip3 install --no-cache-dir --break-system-packages 'rpyc>=5.2.0' || {
+    echo "[Phase 1.5] WARNING: rpyc install failed, health check may not work"
+}
+
+# Also need rpyc in Wine Python for the bridge server
+echo "[Phase 1.5] Installing rpyc in Wine Python (for bridge server)..."
+DISPLAY=:99 WINEPREFIX=/config/.wine wine python -m pip install 'rpyc>=5.2.0' || {
+    echo "[Phase 1.5] WARNING: rpyc Wine install failed"
+}
+
+echo "[Phase 1.5] Python package fixes complete."
+
 # Phase 2: Start MT5 terminal
-# After gmag11 init, MT5 terminal should be installed at the expected path.
-# Login credentials come from MT5_CMD_OPTIONS env var (set by docker-compose).
-# NOTE: First-time login must be done manually via VNC — MT5 doesn't accept
-# passwords via command line for new accounts.
 MT5_FILE="/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
 if [ -f "${MT5_FILE}" ]; then

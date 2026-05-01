@@ -10,19 +10,16 @@
 #       ↕ Wine Python
 #   MetaTrader5 → Exness broker
 #
+# Note: numpy downgrade and rpyc install happen at runtime (in entrypoint.sh)
+# because Wine needs Xvfb running to execute pip, and Debian 12 blocks
+# system-wide pip installs during build.
+#
 # Usage:
 #   docker compose -f docker-compose.vps.yml up -d
 #   Then login to MT5 via VNC (first time only)
 #   Bridge auto-starts on container restart
 
 FROM ghcr.io/gmag11/metatrader5-docker:2.3
-
-# Downgrade numpy — numpy 2.x is incompatible with MetaTrader5
-# Must run under Wine since MT5 Python is a Windows Python
-RUN wine python -m pip install 'numpy<2' --force-reinstall || true
-
-# Install rpyc for bridge server (Linux Python)
-RUN pip3 install --no-cache-dir 'rpyc>=5.2.0' || true
 
 # Copy our custom RPyC bridge server (runs under Wine Python)
 COPY mt5_bridge_server.py /app/mt5_bridge_server.py
