@@ -10,14 +10,24 @@ set -e
 #
 # The bridge server runs as Wine Python (not Linux Python) because
 # MetaTrader5 package only works under Wine where it can talk to MT5 terminal.
+#
+# IMPORTANT: gmag11 runs as user 'abc' (uid 911). Wine prefix at
+# /config/.wine is owned by abc. All Wine commands must run as abc.
 
 export DISPLAY=:99
 export WINEPREFIX=/config/.wine
+export WINEDEBUG=-all
+
+# Run a command as user abc (gmag11's default user)
+as_abc() {
+    sudo -u abc DISPLAY=:99 WINEPREFIX=/config/.wine WINEDEBUG=-all "$@"
+}
 
 echo "=== MT5 Bridge Container Starting ==="
 
 # Phase 1: Run gmag11's start.sh to initialize everything
 # This handles: Xvfb, Wine setup, MT5 install, Python install, pip packages
+# gmag11 runs as user abc via s6-overlay
 echo "[Phase 1] Running gmag11 initialization..."
 /original_start.sh &
 
@@ -33,19 +43,13 @@ echo "[Phase 1.5] Fixing Python packages..."
 
 # Downgrade numpy in Wine Python — numpy 2.x is incompatible with MetaTrader5
 echo "[Phase 1.5] Downgrading numpy in Wine Python (2.x incompatible with MT5)..."
-DISPLAY=:99 WINEPREFIX=/config/.wine wine python -m pip install 'numpy<2' --force-reinstall || {
+as_abc wine python -m pip install 'numpy<2' --force-reinstall || {
     echo "[Phase 1.5] WARNING: numpy downgrade failed, bridge may not work correctly"
 }
 
-# Install rpyc in Linux Python for the health check
-echo "[Phase 1.5] Installing rpyc in Linux Python..."
-pip3 install --no-cache-dir --break-system-packages 'rpyc>=5.2.0' || {
-    echo "[Phase 1.5] WARNING: rpyc install failed, health check may not work"
-}
-
-# Also need rpyc in Wine Python for the bridge server
+# Install rpyc in Wine Python for the bridge server
 echo "[Phase 1.5] Installing rpyc in Wine Python (for bridge server)..."
-DISPLAY=:99 WINEPREFIX=/config/.wine wine python -m pip install 'rpyc>=5.2.0' || {
+as_abc wine python -m pip install 'rpyc>=5.2.0' || {
     echo "[Phase 1.5] WARNING: rpyc Wine install failed"
 }
 
@@ -56,7 +60,7 @@ MT5_FILE="/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
 if [ -f "${MT5_FILE}" ]; then
     echo "[Phase 2] Starting MT5 terminal..."
-    WINEPREFIX="${WINEPREFIX}" WINEDEBUG=-all wine "${MT5_FILE}" ${MT5_CMD_OPTIONS:-} &
+    as_abc wine "${MT5_FILE}" ${MT5_CMD_OPTIONS:-} &
     sleep 30
     echo "[Phase 2] MT5 terminal started."
 else
@@ -70,7 +74,7 @@ fi
 # needs to communicate with MT5 terminal through Windows IPC.
 # The bridge listens on port 8001 inside the container (mapped to 5005/5006/5007 externally).
 echo "[Phase 3] Starting RPyC bridge server on port 8001..."
-DISPLAY=:99 WINEPREFIX=/config/.wine wine python /app/mt5_bridge_server.py 8001 &
+as_abc wine python /app/mt5_bridge_server.py 8001 &
 
 # Give bridge server time to start
 sleep 10
