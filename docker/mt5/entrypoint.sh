@@ -34,6 +34,43 @@ echo "=== MT5 Bridge Container Starting ==="
 # we need to start them manually.
 echo "[Phase 0] Starting VNC services..."
 
+# Configure nginx: gmag11 uses a custom template at /defaults/default.conf
+# that proxies port 3000 → KasmVNC on port 6900/6901
+NGINX_CONFIG=/etc/nginx/sites-available/default
+CPORT="${CUSTOM_PORT:-3000}"
+CHPORT="${CUSTOM_HTTPS_PORT:-3001}"
+SFOLDER="${SUBFOLDER:-/}"
+CUSER="${CUSTOM_USER:-abc}"
+
+# Generate SSL cert if missing
+if [ ! -f "/config/ssl/cert.pem" ]; then
+    mkdir -p /config/ssl
+    openssl req -new -x509 -days 3650 -nodes \
+        -out /config/ssl/cert.pem -keyout /config/ssl/cert.key \
+        -subj "/C=US/ST=CA/L=Carlsbad/O=LSIO/CN=*" 2>/dev/null
+    chmod 600 /config/ssl/cert.key
+    chown -R abc:abc /config/ssl
+fi
+
+# Copy and configure nginx template
+cp /defaults/default.conf ${NGINX_CONFIG}
+sed -i "s/3000/$CPORT/g" ${NGINX_CONFIG}
+sed -i "s/3001/$CHPORT/g" ${NGINX_CONFIG}
+sed -i "s|SUBFOLDER|$SFOLDER|g" ${NGINX_CONFIG}
+
+# Set up basic auth if PASSWORD is set
+if [ ! -z "${PASSWORD+x}" ]; then
+    printf "${CUSER}:$(openssl passwd -apr1 ${PASSWORD})\n" > /etc/nginx/.htpasswd
+    sed -i 's/#//g' ${NGINX_CONFIG}
+fi
+
+# Create XDG runtime dir for abc
+if [ ! -d "/config/.XDG" ]; then
+    mkdir -p /config/.XDG
+    chown abc:abc /config/.XDG
+fi
+export XDG_RUNTIME_DIR=/config/.XDG
+
 # Start nginx (provides web interface on port 3000)
 nginx &
 echo "[Phase 0] nginx started."
