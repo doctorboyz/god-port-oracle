@@ -3,7 +3,7 @@ set -e
 
 # MT5 Bridge Entrypoint — 3-phase startup
 #
-# Phase 1: gmag11 initialization (installs Wine, MT5, Python — takes ~2-3 min)
+# Phase 1: gmag11 initialization (installs Wine, MT5, Python — takes 2-5 min)
 # Phase 1.5: Fix numpy + install rpyc (needs Xvfb running from Phase 1)
 # Phase 2: Start MT5 terminal (user must login manually via VNC the first time)
 # Phase 3: Start custom RPyC bridge server in Wine Python
@@ -23,17 +23,36 @@ as_abc() {
     sudo -u abc DISPLAY=:99 WINEPREFIX=/config/.wine WINEDEBUG=-all "$@"
 }
 
+MT5_FILE="/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+MAX_WAIT=600  # Maximum wait time for gmag11 init (10 minutes)
+WAIT_INTERVAL=10
+
 echo "=== MT5 Bridge Container Starting ==="
 
 # Phase 1: Run gmag11's start.sh to initialize everything
 # This handles: Xvfb, Wine setup, MT5 install, Python install, pip packages
-# gmag11 runs as user abc via s6-overlay
 echo "[Phase 1] Running gmag11 initialization..."
 /original_start.sh &
 
-# Wait for gmag11 initialization to complete (~2-3 minutes)
-echo "[Phase 1] Waiting for initialization (120s)..."
-sleep 120
+# Wait for gmag11 initialization to complete by checking for MT5 terminal
+# gmag11 downloads and installs MT5 terminal as part of its init — when the
+# terminal file exists, initialization is complete.
+echo "[Phase 1] Waiting for MT5 terminal to be installed (up to ${MAX_WAIT}s)..."
+elapsed=0
+while [ ! -f "${MT5_FILE}" ] && [ ${elapsed} -lt ${MAX_WAIT} ]; do
+    sleep ${WAIT_INTERVAL}
+    elapsed=$((elapsed + WAIT_INTERVAL))
+    echo "[Phase 1] Still waiting... (${elapsed}s elapsed)"
+done
+
+if [ ! -f "${MT5_FILE}" ]; then
+    echo "[Phase 1] ERROR: MT5 terminal not found after ${MAX_WAIT}s"
+    echo "[Phase 1] Searching for terminal64.exe..."
+    find /config/.wine -name "terminal64.exe" -type f 2>/dev/null || echo "[Phase 1] Not found anywhere"
+    echo "[Phase 1] Container will keep running. Try restarting after MT5 installs."
+else
+    echo "[Phase 1] MT5 terminal found at ${MT5_FILE} (${elapsed}s)"
+fi
 
 # Phase 1.5: Fix Python packages after gmag11 init completes
 # These can't be done at Docker build time because:
@@ -56,17 +75,13 @@ as_abc wine python -m pip install 'rpyc>=5.2.0' || {
 echo "[Phase 1.5] Python package fixes complete."
 
 # Phase 2: Start MT5 terminal
-MT5_FILE="/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
-
 if [ -f "${MT5_FILE}" ]; then
     echo "[Phase 2] Starting MT5 terminal..."
     as_abc wine "${MT5_FILE}" ${MT5_CMD_OPTIONS:-} &
     sleep 30
     echo "[Phase 2] MT5 terminal started."
 else
-    echo "[Phase 2] WARNING: MT5 terminal not found at ${MT5_FILE}"
-    echo "[Phase 2] Searching for terminal64.exe..."
-    find "${WINEPREFIX}" -name "terminal64.exe" -type f 2>/dev/null || echo "[Phase 2] Not found"
+    echo "[Phase 2] WARNING: MT5 terminal not found, cannot start."
 fi
 
 # Phase 3: Start custom RPyC bridge server
