@@ -81,34 +81,30 @@ class MT5Service(rpyc.Service):
         import MetaTrader5 as mt5
         return _numpy_to_list(mt5.copy_ticks_from(symbol, date_from, count, flags))
 
-    def exposed_order_send(self, request):
-        import MetaTrader5 as mt5
-        # RPyC passes dicts, but mt5.order_send() needs a proper request object.
-        # Construct the request inside Wine Python where MT5 types are available.
-        req = {
-            'action': request.get('action', mt5.TRADE_ACTION_DEAL),
-            'symbol': request['symbol'],
-            'volume': request.get('volume', 0.01),
-            'type': request.get('type', mt5.ORDER_TYPE_BUY),
-            'price': request.get('price', 0.0),
-            'sl': request.get('sl', 0.0),
-            'tp': request.get('tp', 0.0),
-            'deviation': request.get('deviation', 20),
-            'magic': request.get('magic', 0),
-            'comment': request.get('comment', ''),
-            'type_time': request.get('type_time', mt5.ORDER_TIME_GTC),
-            'type_filling': request.get('type_filling', mt5.ORDER_FILLING_IOC),
-        }
-        result = mt5.order_send(req)
-        return _to_dict(result)
+    def exposed_order_send(self, action, symbol, volume, order_type, price,
+                           sl=0.0, tp=0.0, deviation=20, magic=0,
+                           comment='', type_time=0, type_filling=2,
+                           position=0):
+        """Send a trade order. All params passed as arguments (not dict) to avoid RPyC netref issues.
 
-    def exposed_order_send_simple(self, symbol, order_type, volume, price,
-                                    sl=0.0, tp=0.0, deviation=20,
-                                    magic=0, comment=''):
-        """Simplified order_send that constructs the request internally."""
+        Args:
+            action: TRADE_ACTION_DEAL=1, TRADE_ACTION_PENDING=5, etc.
+            symbol: e.g. 'XAUUSDm'
+            volume: lot size (0.01 minimum)
+            order_type: ORDER_TYPE_BUY=0, ORDER_TYPE_SELL=1
+            price: order price
+            sl: stop loss (0 = none)
+            tp: take profit (0 = none)
+            deviation: max slippage in points
+            magic: magic number
+            comment: order comment
+            type_time: ORDER_TIME_GTC=0, ORDER_TIME_DAY=1
+            type_filling: ORDER_FILLING_IOC=2, ORDER_FILLING_FOK=0, ORDER_FILLING_RETURN=1
+            position: ticket for closing (0 = new order)
+        """
         import MetaTrader5 as mt5
         request = {
-            'action': mt5.TRADE_ACTION_DEAL,
+            'action': action,
             'symbol': symbol,
             'volume': volume,
             'type': order_type,
@@ -118,9 +114,11 @@ class MT5Service(rpyc.Service):
             'deviation': deviation,
             'magic': magic,
             'comment': comment,
-            'type_time': mt5.ORDER_TIME_GTC,
-            'type_filling': mt5.ORDER_FILLING_IOC,
+            'type_time': type_time,
+            'type_filling': type_filling,
         }
+        if position:
+            request['position'] = position
         result = mt5.order_send(request)
         return _to_dict(result)
 
