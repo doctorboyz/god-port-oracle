@@ -29,8 +29,32 @@ WAIT_INTERVAL=10
 
 echo "=== MT5 Bridge Container Starting ==="
 
+# Phase 0: Start VNC services (KasmVNC + nginx) for remote access
+# These are normally started by s6-overlay, but since we use our own entrypoint,
+# we need to start them manually.
+echo "[Phase 0] Starting VNC services..."
+
+# Start nginx (provides web interface on port 3000)
+nginx &
+echo "[Phase 0] nginx started."
+
+# Start KasmVNC (web-based VNC server)
+# Runs as user abc on display :99
+s6-setuidgid abc /usr/local/bin/Xvnc :99 \
+    -PublicIP 127.0.0.1 \
+    -disableBasicAuth \
+    -SecurityTypes None \
+    -AlwaysShared \
+    -geometry 1024x768 \
+    -sslOnly 0 \
+    -RectThreads 0 \
+    -websocketPort 6901 \
+    -interface 0.0.0.0 \
+    -Log *:stdout:10 &
+echo "[Phase 0] KasmVNC started on port 6901 (web on port 3000)."
+
 # Phase 1: Run gmag11's start.sh to initialize everything
-# This handles: Xvfb, Wine setup, MT5 install, Python install, pip packages
+# This handles: Wine setup, MT5 install, Python install, pip packages
 echo "[Phase 1] Running gmag11 initialization..."
 /original_start.sh &
 
