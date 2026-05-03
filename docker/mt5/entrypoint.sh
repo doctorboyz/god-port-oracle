@@ -29,6 +29,13 @@ WAIT_INTERVAL=10
 
 echo "=== MT5 Bridge Container Starting ==="
 
+# Fix ownership early: on existing volumes, gmag11's start.sh may have left
+# /config/.wine owned by root from a previous run. Wine refuses to use a prefix
+# not owned by the executing user, so this must happen before gmag11 init.
+# On fresh volumes this is a no-op (/config/.wine doesn't exist yet).
+echo "[Pre-init] Fixing /config ownership for user abc..."
+chown -R abc:abc /config 2>/dev/null || true
+
 # Phase 0: Start VNC services (KasmVNC + nginx) for remote access
 # These are normally started by s6-overlay, but since we use our own entrypoint,
 # we need to start them manually.
@@ -119,6 +126,11 @@ if [ ! -f "${MT5_FILE}" ]; then
 else
     echo "[Phase 1] MT5 terminal found at ${MT5_FILE} (${elapsed}s)"
 fi
+
+# Fix ownership: gmag11 start.sh runs as root and creates /config/.wine owned by root
+# on fresh volumes. Wine refuses to run if prefix isn't owned by the executing user.
+echo "[Phase 1] Fixing /config ownership for user abc..."
+chown -R abc:abc /config
 
 # Phase 1.5: Fix Python packages after gmag11 init completes
 # These can't be done at Docker build time because:
