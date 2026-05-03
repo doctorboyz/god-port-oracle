@@ -83,7 +83,46 @@ class MT5Service(rpyc.Service):
 
     def exposed_order_send(self, request):
         import MetaTrader5 as mt5
-        return _to_dict(mt5.order_send(request))
+        # RPyC passes dicts, but mt5.order_send() needs a proper request object.
+        # Construct the request inside Wine Python where MT5 types are available.
+        req = {
+            'action': request.get('action', mt5.TRADE_ACTION_DEAL),
+            'symbol': request['symbol'],
+            'volume': request.get('volume', 0.01),
+            'type': request.get('type', mt5.ORDER_TYPE_BUY),
+            'price': request.get('price', 0.0),
+            'sl': request.get('sl', 0.0),
+            'tp': request.get('tp', 0.0),
+            'deviation': request.get('deviation', 20),
+            'magic': request.get('magic', 0),
+            'comment': request.get('comment', ''),
+            'type_time': request.get('type_time', mt5.ORDER_TIME_GTC),
+            'type_filling': request.get('type_filling', mt5.ORDER_FILLING_IOC),
+        }
+        result = mt5.order_send(req)
+        return _to_dict(result)
+
+    def exposed_order_send_simple(self, symbol, order_type, volume, price,
+                                    sl=0.0, tp=0.0, deviation=20,
+                                    magic=0, comment=''):
+        """Simplified order_send that constructs the request internally."""
+        import MetaTrader5 as mt5
+        request = {
+            'action': mt5.TRADE_ACTION_DEAL,
+            'symbol': symbol,
+            'volume': volume,
+            'type': order_type,
+            'price': price,
+            'sl': sl,
+            'tp': tp,
+            'deviation': deviation,
+            'magic': magic,
+            'comment': comment,
+            'type_time': mt5.ORDER_TIME_GTC,
+            'type_filling': mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        return _to_dict(result)
 
     def exposed_positions_get(self, symbol=None, ticket=None):
         import MetaTrader5 as mt5
