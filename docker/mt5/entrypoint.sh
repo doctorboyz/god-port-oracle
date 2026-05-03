@@ -58,6 +58,11 @@ sed -i "s/3000/$CPORT/g" ${NGINX_CONFIG}
 sed -i "s/3001/$CHPORT/g" ${NGINX_CONFIG}
 sed -i "s|SUBFOLDER|$SFOLDER|g" ${NGINX_CONFIG}
 
+# Fix: KasmVNC serves both HTTP and websocket on port 6901,
+# but the default nginx template proxies HTTP to 6900.
+# Change the HTTP proxy from 6900 to 6901.
+sed -i 's|proxy_pass.*http://127.0.0.1:6900;|proxy_pass http://127.0.0.1:6901;|g' ${NGINX_CONFIG}
+
 # Set up basic auth if PASSWORD is set
 if [ ! -z "${PASSWORD+x}" ]; then
     printf "${CUSER}:$(openssl passwd -apr1 ${PASSWORD})\n" > /etc/nginx/.htpasswd
