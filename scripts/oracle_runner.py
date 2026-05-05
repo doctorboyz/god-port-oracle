@@ -149,49 +149,69 @@ def run_daily_summary(db_path: str, notifier):
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
     """Send bridge health status every 4 hours."""
-    # Login credentials per account
-    account_logins = {
-        "A": (os.environ.get("MT5_LOGIN_A", ""), os.environ.get("MT5_PASSWORD_A", ""), os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17")),
-        "B": (os.environ.get("MT5_LOGIN_B", ""), os.environ.get("MT5_PASSWORD_B", ""), os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17")),
-        "C": (os.environ.get("MT5_LOGIN_C", ""), os.environ.get("MT5_PASSWORD_C", ""), os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7")),
-    }
-
     while True:
         time.sleep(4 * 3600)  # 4 hours
         try:
+            from metty.bridge.client import MT5Bridge
+            from metty.core.models import AccountConfig, AccountName
+
             bridge_results = {}
+            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
+            account_configs = {
+                "A": AccountConfig(
+                    name=AccountName.A,
+                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
+                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
+                    balance=100.0, leverage=2000,
+                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "mt5a"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "8001")),
+                    signal_group="volume",
+                ),
+                "B": AccountConfig(
+                    name=AccountName.B,
+                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
+                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
+                    balance=500.0, leverage=500,
+                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "mt5b"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "8001")),
+                    signal_group="ob_os",
+                ),
+                "C": AccountConfig(
+                    name=AccountName.C,
+                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
+                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
+                    balance=1000.0, leverage=500,
+                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "mt5c"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "8001")),
+                    signal_group="ma",
+                ),
+            }
+
             for account in accounts:
                 account = account.strip()
-                if not account:
+                if not account or account not in account_configs:
                     continue
                 try:
-                    import rpyc
-
-                    host = os.environ.get(f"MT5_BRIDGE_{account}_HOST", f"mt5{account.lower()}")
-                    port = int(os.environ.get(f"MT5_BRIDGE_{account}_PORT", "8001"))
-                    try:
-                        conn = rpyc.connect(host, port, config={"sync_request_timeout": 10})
-                        conn.root.exposed_initialize()
-                        login_info = account_logins.get(account)
-                        if login_info and login_info[0]:
-                            conn.root.exposed_login(int(login_info[0]), login_info[1], login_info[2])
-                        tick = conn.root.exposed_symbol_info_tick("XAUUSD")
-                        acct = conn.root.exposed_account_info()
-                        conn.close()
-                        price = tick.get("bid", 0) if tick else 0
-                        equity = acct.get("equity", 0) if acct else 0
-                        balance = acct.get("balance", 0) if acct else 0
-                        bridge_results[account] = {
-                            "connected": True,
-                            "symbol": "XAUUSD",
-                            "price": price,
-                            "equity": equity,
-                            "balance": balance,
-                        }
-                    except Exception:
-                        bridge_results[account] = {"connected": False}
-                except Exception:
+                    config = account_configs[account]
+                    bridge = MT5Bridge(config)
+                    info = bridge.fetch_account_info_sync()
+                    symbol = symbol_map.get(account, "XAUUSD")
+                    candles = bridge.fetch_candles_sync(symbol, "M5", 1)
+                    price = float(candles["close"].iloc[-1]) if candles is not None and not candles.empty else 0
+                    equity = info.equity if info else 0
+                    balance = info.balance if info else 0
+                    bridge_results[account] = {
+                        "connected": True,
+                        "symbol": symbol,
+                        "price": price,
+                        "equity": equity,
+                        "balance": balance,
+                    }
+                    logger.info("[BridgeStatus] %s: connected, %s=%.2f, equity=%.2f, balance=%.2f",
+                                account, symbol, price, equity, balance)
+                except Exception as e:
                     bridge_results[account] = {"connected": False}
+                    logger.warning("[BridgeStatus] %s: disconnected (%s)", account, e)
 
             notifier.send_bridge_status(bridge_results)
         except Exception as e:
