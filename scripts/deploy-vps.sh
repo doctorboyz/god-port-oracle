@@ -33,7 +33,8 @@ rsync -avz --delete \
     --exclude='.git' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
-    --exclude='data/' \
+    --exclude='data/xau-data' \
+    --exclude='data/forward_test_results.json' \
     --exclude='.env' \
     --exclude='ψ/' \
     --exclude='.claude/' \
