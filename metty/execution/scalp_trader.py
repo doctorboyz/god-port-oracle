@@ -55,13 +55,13 @@ class ScalpRiskConfig:
     risk_per_trade: float = 0.01       # 1% (conservative for high freq)
     atr_multiplier: float = 1.0        # Tight SL: 1x ATR (M1 ATR ~1-3 pts)
     risk_reward_ratio: float = 1.5     # Smaller TP target
-    min_confidence: float = 0.55       # Lower threshold (M1 is noisier)
+    min_confidence: float = 0.45       # Lower threshold (M1 needs more trades)
     max_holding_bars: int = 20         # 20 min max hold
     cooldown_bars: int = 3             # 3 min cooldown
     spread_buffer: float = 1.5          # Tighter buffer
     consecutive_loss_limit: int = 5    # Same as swing
     daily_loss_limit_pct: float = 0.03  # 3% (tighter than 5% for scalping)
-    max_spread_points: float = 30      # Skip if spread > 30 pts
+    max_spread_points: float = 35      # Skip if spread > 35 pts
     bar_seconds: int = 60              # M1 = 60s
 
 
@@ -423,8 +423,8 @@ class ScalpTrader:
             timestamp = timestamp.to_pydatetime().replace(tzinfo=timezone.utc)
         session = self._classify_session(timestamp)
 
-        # Session gate: only trade London + Overlap
-        if session not in ("london", "overlap"):
+        # Session gate: only trade during liquid sessions (London, Overlap, NY)
+        if session not in ("london", "overlap", "ny"):
             return {
                 "action": "hold",
                 "reason": f"scalp blocked: {session} session",

@@ -16,6 +16,8 @@ Environment variables:
     DB_PATH: path to SQLite database (default: /app/data/oracle.db)
     SCALP_ENABLED: 1=enable scalp mode (default: 0)
     SCALP_INTERVAL: seconds between scalp cycles (default: 60)
+    M5_SCALP_ENABLED: 1=enable M5 scalp mode (default: 0)
+    M5_SCALP_INTERVAL: seconds between M5 scalp cycles (default: 300)
     TG_BOT_TOKEN: Telegram Bot API token (optional)
     TG_CHAT_ID: Telegram chat ID (optional)
 """
@@ -128,6 +130,38 @@ def run_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool):
         trader.shutdown()
 
 
+def run_m5_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool):
+    """Run M5 scalp trader (6-EMA Ribbon Cloud) in a loop."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from metty.execution.m5_scalp_trader import M5ScalpTrader, M5ScalpRiskConfig
+
+    risk = M5ScalpRiskConfig(
+        risk_per_trade=float(os.environ.get("M5_SCALP_RISK_PER_TRADE", "0.015")),
+        max_spread_points=float(os.environ.get("M5_SCALP_SPREAD_MAX", "30")),
+    )
+    trader = M5ScalpTrader(
+        account=account,
+        db_path=Path(db_path),
+        dry_run=dry_run,
+        risk_config=risk,
+        event_bus=_event_bus,
+    )
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    logger.info("[M5Scalp:%s] Starting %s M5 scalp trader (interval=%ds)", account, mode, interval)
+
+    while True:
+        try:
+            result = trader.run_once()
+            action = result.get("action", "unknown")
+            logger.info("[M5Scalp:%s] %s: %s", account, mode, result)
+        except Exception as e:
+            logger.error("[M5Scalp:%s] M5 scalp error: %s", account, e)
+
+        time.sleep(interval)
+
+
 def run_daily_summary(db_path: str, notifier):
     """Send daily summary every 24h at 00:00 UTC."""
     from metty.notify.telegram_bot import TelegramNotifier
@@ -145,6 +179,47 @@ def run_daily_summary(db_path: str, notifier):
             notifier.send_daily_summary(db_path=Path(db_path))
         except Exception as e:
             logger.error("[DailySummary] Failed: %s", e)
+
+
+def run_daily_learning(db_path: str, notifier=None):
+    """Run daily learning loop at 00:05 UTC (5 min after midnight).
+
+    Analyzes yesterday's trades, adjusts indicator weights, sends
+    Telegram summary, and saves vault report.
+    """
+    from broky.performance.learning_loop import run_daily_learning as _run_learning
+
+    while True:
+        now = datetime.now(timezone.utc)
+        # Seconds until 00:05 UTC
+        target_seconds = 5 * 60  # 00:05
+        current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        if current_seconds < target_seconds:
+            seconds_until = target_seconds - current_seconds
+        else:
+            seconds_until = 86400 - (current_seconds - target_seconds)
+
+        logger.info("[DailyLearning] Sleeping %ds until next 00:05 UTC", seconds_until)
+        time.sleep(seconds_until)
+
+        try:
+            result = _run_learning(
+                db_path=Path(db_path),
+                notifier=notifier,
+            )
+            report = result.get("report")
+            adj = result.get("adjustment")
+            if adj and not adj.skipped:
+                logger.info(
+                    "[DailyLearning] Weights adjusted: %d changes",
+                    sum(1 for a in adj.adjustments if a.delta != 0),
+                )
+            elif adj and adj.skipped:
+                logger.info("[DailyLearning] Skipped: %s", adj.skip_reason)
+            else:
+                logger.info("[DailyLearning] No adjustment data")
+        except Exception as e:
+            logger.error("[DailyLearning] Failed: %s", e)
 
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
@@ -281,6 +356,13 @@ def main():
     else:
         logger.info("Scalp mode DISABLED (set SCALP_ENABLED=1 to enable)")
 
+    m5_scalp_enabled = os.environ.get("M5_SCALP_ENABLED", "0") == "1"
+    m5_scalp_interval = int(os.environ.get("M5_SCALP_INTERVAL", "300"))
+    if m5_scalp_enabled:
+        logger.info("M5 Scalp mode ENABLED | M5 Scalp interval: %ds", m5_scalp_interval)
+    else:
+        logger.info("M5 Scalp mode DISABLED (set M5_SCALP_ENABLED=1 to enable)")
+
     threads = []
 
     for account in accounts:
@@ -316,6 +398,16 @@ def main():
                 )
                 threads.append(t)
 
+            # M5 Scalp trader (parallel thread, 6-EMA Ribbon Cloud)
+            if m5_scalp_enabled:
+                t = threading.Thread(
+                    target=run_m5_scalp_trader,
+                    args=(account, db_path, m5_scalp_interval, dry_run),
+                    name=f"m5-scalp-{account}",
+                    daemon=True,
+                )
+                threads.append(t)
+
     # Notification threads (only if Telegram is enabled)
     if notifier.enabled:
         t = threading.Thread(
@@ -333,6 +425,15 @@ def main():
             daemon=True,
         )
         threads.append(t)
+
+    # Daily learning thread (always runs — adjusts weights, sends Telegram if available)
+    t = threading.Thread(
+        target=run_daily_learning,
+        args=(db_path, notifier if notifier.enabled else None),
+        name="daily-learning",
+        daemon=True,
+    )
+    threads.append(t)
 
     # Start all threads
     for t in threads:
