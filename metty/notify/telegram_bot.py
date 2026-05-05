@@ -222,7 +222,7 @@ class TelegramNotifier:
 
         Args:
             bridge_results: dict mapping account name to status dict:
-                {"connected": bool, "symbol": str, "price": float, "equity": float}
+                {"connected": bool, "symbol": str, "price": float, "equity": float, "balance": float}
         """
         lines = [f"🏥 <b>Bridge Status</b> — "
                   f"{datetime.now(timezone.utc).strftime('%H:%M UTC')}"]
@@ -231,7 +231,11 @@ class TelegramNotifier:
             if status.get("connected"):
                 price = status.get("price", 0)
                 symbol = status.get("symbol", "?")
-                lines.append(f"  mt5{account.lower()} ({account}): ✅ {symbol} | {price:.2f}")
+                equity = status.get("equity", 0)
+                balance = status.get("balance", 0)
+                equity_str = f" | Eq=${equity:.2f}" if equity else ""
+                balance_str = f" Bal=${balance:.2f}" if balance else ""
+                lines.append(f"  mt5{account.lower()} ({account}): ✅ {symbol} {price:.2f}{equity_str}{balance_str}")
             else:
                 lines.append(f"  mt5{account.lower()} ({account}): ❌ disconnected")
 

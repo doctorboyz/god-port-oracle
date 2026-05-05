@@ -149,6 +149,13 @@ def run_daily_summary(db_path: str, notifier):
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
     """Send bridge health status every 4 hours."""
+    # Login credentials per account
+    account_logins = {
+        "A": (os.environ.get("MT5_LOGIN_A", ""), os.environ.get("MT5_PASSWORD_A", ""), os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17")),
+        "B": (os.environ.get("MT5_LOGIN_B", ""), os.environ.get("MT5_PASSWORD_B", ""), os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17")),
+        "C": (os.environ.get("MT5_LOGIN_C", ""), os.environ.get("MT5_PASSWORD_C", ""), os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7")),
+    }
+
     while True:
         time.sleep(4 * 3600)  # 4 hours
         try:
@@ -158,21 +165,28 @@ def run_bridge_status(db_path: str, notifier, accounts: list):
                 if not account:
                     continue
                 try:
-                    from metty.bridge.client import MT5Bridge
-                    from metty.core.models import AccountConfig, AccountName
                     import rpyc
 
                     host = os.environ.get(f"MT5_BRIDGE_{account}_HOST", f"mt5{account.lower()}")
                     port = int(os.environ.get(f"MT5_BRIDGE_{account}_PORT", "8001"))
                     try:
                         conn = rpyc.connect(host, port, config={"sync_request_timeout": 10})
-                        tick = conn.root.get_tick("XAUUSD")
+                        conn.root.exposed_initialize()
+                        login_info = account_logins.get(account)
+                        if login_info and login_info[0]:
+                            conn.root.exposed_login(int(login_info[0]), login_info[1], login_info[2])
+                        tick = conn.root.exposed_symbol_info_tick("XAUUSD")
+                        acct = conn.root.exposed_account_info()
                         conn.close()
                         price = tick.get("bid", 0) if tick else 0
+                        equity = acct.get("equity", 0) if acct else 0
+                        balance = acct.get("balance", 0) if acct else 0
                         bridge_results[account] = {
                             "connected": True,
                             "symbol": "XAUUSD",
                             "price": price,
+                            "equity": equity,
+                            "balance": balance,
                         }
                     except Exception:
                         bridge_results[account] = {"connected": False}
