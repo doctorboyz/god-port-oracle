@@ -16,6 +16,9 @@ dependencies = [
     "rpyc>=5.2.0",
     "matplotlib>=3.8.0",
     "tabulate>=0.9.0",
+    "python-dotenv>=1.0.0",
+    "finnhub-python>=2.4.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +48,15 @@ metty = "metty.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "broky", "broky.data", "broky.indicators", "broky.signals", "broky.signals.groups",
+    "broky.risk", "broky.backtest", "broky.core", "broky.config", "broky.ml",
+    "broky.performance", "broky.forward",
+    "metty", "metty.bridge", "metty.core", "metty.execution", "metty.config", "metty.notify",
+    "shared",
+]
 
 [tool.ruff]
 line-length = 100
