@@ -94,18 +94,26 @@ class StrategyValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare):
-        # Check for NaN guards: "x is not np.nan", "pd.isna(x)", "pd.notna(x)"
+        # Check for NaN guards in comparisons: "x == np.nan"
         for op, comparator in zip(node.ops, node.comparators):
-            # Detect pd.isna / pd.notna / math.isnan / np.isnan calls
             if isinstance(comparator, ast.Call):
-                func = comparator.func
-                if isinstance(func, ast.Attribute):
-                    if func.attr in ("isna", "notna", "isnan"):
-                        self._has_nan_guard = True
-                elif isinstance(func, ast.Name):
-                    if func.id in ("isnan", "isna", "notna"):
-                        self._has_nan_guard = True
+                self._check_nan_call(comparator)
         self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call):
+        # Check for NaN guards anywhere: pd.isna(x), pd.notna(x), np.isnan(x)
+        self._check_nan_call(node)
+        self.generic_visit(node)
+
+    def _check_nan_call(self, node: ast.Call):
+        """Detect pd.isna/pd.notna/np.isnan/math.isnan calls."""
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if func.attr in ("isna", "notna", "isnan"):
+                self._has_nan_guard = True
+        elif isinstance(func, ast.Name):
+            if func.id in ("isnan", "isna", "notna"):
+                self._has_nan_guard = True
 
     def visit_Return(self, node: ast.Return):
         # Check if return value includes TP/SL fields
