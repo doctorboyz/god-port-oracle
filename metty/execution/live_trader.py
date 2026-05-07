@@ -31,6 +31,7 @@ from broky.risk.position_sizing import (
     calculate_stop_loss,
     calculate_take_profit,
 )
+from broky.risk.sizing import SIZING_METHODS, fixed_fraction_size, kelly_size, risk_per_trade_size, volatility_adjusted_size
 from broky.signals.generator import generate_signal
 from metty.core.db import (
     close_live_trade,
@@ -39,6 +40,7 @@ from metty.core.db import (
     insert_live_trade,
 )
 from shared.events import Event, EventBus, EventType
+from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
 from shared.models import Signal, SignalType, TradingMode
 
 logger = logging.getLogger(__name__)
@@ -58,13 +60,14 @@ class RiskConfig:
     risk_per_trade: float = 0.02
     atr_multiplier: float = 2.0
     risk_reward_ratio: float = 2.5
-    min_confidence: float = 0.60
+    min_confidence: float = 0.45
     max_holding_bars: int = 36  # 3 hours on M5
     cooldown_bars: int = 12  # 1 hour cooldown after exit
     spread_buffer: float = 2.0
     consecutive_loss_limit: int = 3
     daily_loss_limit_pct: float = 0.05
     bar_seconds: int = 300  # M5 = 300s, M1 = 60s
+    sizing_method: str = "risk_per_trade"  # risk_per_trade, kelly, volatility_adjusted, fixed_fraction
 
 
 class LiveTrader:
@@ -94,10 +97,17 @@ class LiveTrader:
         self.db_path = db_path
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
+        self.learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
+        self.max_positions = int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))
         self.account_id = ACCOUNT_IDS.get(self.account, 3)
         self.risk = risk_config or RiskConfig(
             risk_per_trade=ACCOUNT_RISK.get(self.account, 0.02),
         )
+        # Override sizing method from env if set
+        env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
+        if env_sizing and env_sizing in SIZING_METHODS:
+            self.risk.sizing_method = env_sizing
+        self._sizing_fn = SIZING_METHODS[self.risk.sizing_method]
         self.circuit_breaker = CircuitBreaker(
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
@@ -236,6 +246,7 @@ class LiveTrader:
                 else datetime.now(timezone.utc),
                 d1_trend=d1_trend,
                 min_confidence=self.risk.min_confidence,
+                learning_mode=self.learning_mode,
             )
             return signal
         except Exception as e:
@@ -306,6 +317,39 @@ class LiveTrader:
         elapsed = (datetime.now(timezone.utc) - self._last_exit_time).total_seconds()
         cooldown_seconds = self.risk.cooldown_bars * self.risk.bar_seconds
         return elapsed < cooldown_seconds
+
+    def _calculate_lots(self, equity: float, price: float, sl: float, atr: float) -> float:
+        """Calculate position size using the configured sizing method."""
+        if self.risk.sizing_method == "risk_per_trade":
+            return risk_per_trade_size(
+                equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE,
+            )
+        elif self.risk.sizing_method == "kelly":
+            # Use last 50 closed trades for Kelly estimation
+            from metty.core.db import get_closed_trades
+            closed = get_closed_trades(self.account_id, self.db_path, limit=50)
+            if len(closed) < 10:
+                return risk_per_trade_size(
+                    equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE,
+                )
+            wins = [t for t in closed if t.get("pnl", 0) > 0]
+            losses = [t for t in closed if t.get("pnl", 0) <= 0]
+            win_rate = len(wins) / len(closed) if closed else 0.5
+            avg_win = sum(t["pnl"] for t in wins) / len(wins) if wins else 1.0
+            avg_loss = abs(sum(t["pnl"] for t in losses) / len(losses)) if losses else 1.0
+            return kelly_size(
+                equity, win_rate, avg_win, avg_loss, price, sl, CONTRACT_SIZE,
+            )
+        elif self.risk.sizing_method == "volatility_adjusted":
+            return volatility_adjusted_size(
+                equity, self.risk.risk_per_trade, price, sl, atr, CONTRACT_SIZE,
+            )
+        elif self.risk.sizing_method == "fixed_fraction":
+            return fixed_fraction_size(0.01)
+        else:
+            return risk_per_trade_size(
+                equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE,
+            )
 
     def _monitor_positions(self, candles: dict[str, pd.DataFrame]) -> list[dict]:
         """Check open trades for exit conditions (SL/TP hit, max holding)."""
@@ -425,11 +469,9 @@ class LiveTrader:
                     "pnl_pct": round(pnl_pct, 4),
                 })
 
-                logger.info(
-                    "Trade #%d closed: %s %s @ %.2f → %.2f (%s, PnL=%.2f)",
-                    trade["id"], direction, trade["symbol"],
-                    entry_price, exit_price, exit_reason, pnl,
-                )
+                log_trade(logger, "CLOSED", account=self.account, direction=direction,
+                         price=exit_price, pnl=pnl, ticket=str(trade.get("ticket", "")),
+                         reason=exit_reason)
 
                 if self.event_bus:
                     self.event_bus.publish(Event(
@@ -476,7 +518,7 @@ class LiveTrader:
         )
         d1_trend = self._determine_d1_trend(candles.get("D1"))
 
-        # 4. Risk checks
+        # 4. Risk checks (learning mode: bypass all blockers for data collection)
         if signal.signal_type == SignalType.HOLD:
             return {
                 "action": "hold",
@@ -484,44 +526,56 @@ class LiveTrader:
                 "signal": signal,
             }
 
-        can_trade, cb_reason = self.circuit_breaker.can_open_trade()
-        if not can_trade:
-            if self.event_bus:
-                self.event_bus.publish(Event(
-                    type=EventType.CIRCUIT_BREAKER_TRIGGERED,
-                    data={
-                        "account": self.account, "reason": cb_reason,
-                        "consecutive_losses": self.circuit_breaker.state.consecutive_losses,
-                        "daily_loss_pct": self.circuit_breaker.state.daily_loss_pct,
-                    },
-                ))
+        # 4b. Position limit check (always enforced, even in learning mode)
+        open_trades = get_open_trades(self.account_id, self.db_path)
+        if len(open_trades) >= self.max_positions:
+            log_position(logger, "LIMIT", account=self.account, count=len(open_trades), max=self.max_positions)
             return {
                 "action": "hold",
-                "reason": f"circuit breaker: {cb_reason}",
+                "reason": f"position limit ({len(open_trades)}/{self.max_positions})",
                 "signal": signal,
             }
 
-        if self._check_cooldown():
-            return {
-                "action": "hold",
-                "reason": "cooldown after last exit",
-                "signal": signal,
-            }
+        if not self.learning_mode:
+            can_trade, cb_reason = self.circuit_breaker.can_open_trade()
+            if not can_trade:
+                log_circuit_break(logger, "BLOCKED", account=self.account, reason=cb_reason)
+                if self.event_bus:
+                    self.event_bus.publish(Event(
+                        type=EventType.CIRCUIT_BREAKER_TRIGGERED,
+                        data={
+                            "account": self.account, "reason": cb_reason,
+                            "consecutive_losses": self.circuit_breaker.state.consecutive_losses,
+                            "daily_loss_pct": self.circuit_breaker.state.daily_loss_pct,
+                        },
+                    ))
+                return {
+                    "action": "hold",
+                    "reason": f"circuit breaker: {cb_reason}",
+                    "signal": signal,
+                }
 
-        calendar = self._get_calendar()
-        if should_avoid_trading(calendar):
-            return {
-                "action": "hold",
-                "reason": "high-impact news nearby",
-                "signal": signal,
-            }
+            if self._check_cooldown():
+                return {
+                    "action": "hold",
+                    "reason": "cooldown after last exit",
+                    "signal": signal,
+                }
 
-        if self._check_existing_position():
-            return {
-                "action": "hold",
-                "reason": "position already open",
-                "signal": signal,
-            }
+            calendar = self._get_calendar()
+            if should_avoid_trading(calendar):
+                return {
+                    "action": "hold",
+                    "reason": "high-impact news nearby",
+                    "signal": signal,
+                }
+
+            if self._check_existing_position():
+                return {
+                    "action": "hold",
+                    "reason": "position already open",
+                    "signal": signal,
+                }
 
         # 5. Calculate SL/TP/lots
         try:
@@ -540,9 +594,7 @@ class LiveTrader:
         )
 
         equity = self._get_equity()
-        lots = calculate_position_size(
-            equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE,
-        )
+        lots = self._calculate_lots(equity, price, sl, atr_val)
 
         # 6. Execute or dry-run
         ts_str = (
@@ -570,10 +622,9 @@ class LiveTrader:
                 strategy_id=self.strategy_id,
                 db_path=self.db_path,
             )
-            logger.info(
-                "[DRY-RUN] %s signal: %s @ %.2f SL=%.2f TP=%.2f lots=%.2f conf=%.2f (%s)",
-                direction, signal.symbol, price, sl, tp, lots, signal.confidence, signal.reason,
-            )
+            log_trade(logger, "OPENED", account=self.account, direction=direction,
+                     price=price, lots=lots, sl=sl, tp=tp,
+                     confidence=signal.confidence, reason=signal.reason)
             if self.event_bus:
                 self.event_bus.publish(Event(
                     type=EventType.TRADE_OPENED,
@@ -646,10 +697,8 @@ class LiveTrader:
             )
 
             if order_result and order_result.success:
-                logger.info(
-                    "ORDER FILLED: %s %s @ %.2f SL=%.2f TP=%.2f lots=%.2f ticket=%s",
-                    direction, signal.symbol, price, sl, tp, lots, ticket,
-                )
+                log_trade(logger, "FILLED", account=self.account, direction=direction,
+                         price=price, lots=lots, sl=sl, tp=tp, ticket=ticket)
                 if self.event_bus:
                     self.event_bus.publish(Event(
                         type=EventType.TRADE_OPENED,

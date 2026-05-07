@@ -8,8 +8,10 @@ from shared.models import (
     ScalingAction,
     ScalingDecision,
     SessionType,
+    TradingMode,
 )
 from shared.events import EventBus, Event
+from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
 
 __all__ = [
     "MarketData",
@@ -21,6 +23,11 @@ __all__ = [
     "ScalingAction",
     "ScalingDecision",
     "SessionType",
+    "TradingMode",
     "EventBus",
     "Event",
+    "log_trade",
+    "log_signal",
+    "log_position",
+    "log_circuit_break",
 ]

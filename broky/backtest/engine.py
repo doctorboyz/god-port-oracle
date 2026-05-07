@@ -43,6 +43,7 @@ class BacktestResult:
     total_pnl: float = 0.0
     total_pnl_pct: float = 0.0
     max_drawdown_pct: float = 0.0
+    liquidated: bool = False
     profit_factor: float = 0.0
     sharpe_ratio: float = 0.0
     avg_trade_pnl: float = 0.0
@@ -75,6 +76,7 @@ class BacktestEngine:
         contract_size: float = 100.0,
         max_holding_bars: int = 48,
         cooldown_bars: int = 12,
+        slippage_bps: float = 0.0,
     ):
         self.initial_equity = initial_equity
         self.risk_per_trade = risk_per_trade
@@ -85,6 +87,7 @@ class BacktestEngine:
         self.contract_size = contract_size  # oz per lot for XAUUSD
         self.max_holding_bars = max_holding_bars  # Max bars before forced exit (48 H1 bars = 48h)
         self.cooldown_bars = cooldown_bars  # Min bars between trades (12h on H1)
+        self.slippage_bps = slippage_bps  # Basis points of slippage (e.g., 3 = 0.03%)
 
     def run(
         self,
@@ -118,6 +121,7 @@ class BacktestEngine:
         position: Optional[BacktestTrade] = None
         consecutive_wins = 0
         consecutive_losses = 0
+        liquidated = False
         max_consecutive_wins = 0
         max_consecutive_losses = 0
         gross_profit = 0.0
@@ -159,6 +163,13 @@ class BacktestEngine:
                     peak_equity = max(peak_equity, equity)
                     position = None
 
+                # Liquidation check: stop if equity drops to zero
+                if equity <= 0:
+                    equity = 0
+                    liquidated = True
+                    equity_curve.append(equity)
+                    break
+
             # Open new position if none and circuit breaker allows
             if position is None:
                 # Cooldown: wait N bars after last exit before re-entering
@@ -196,6 +207,7 @@ class BacktestEngine:
                         current_price=current_price,
                         timestamp=candle_ts,
                         d1_trend=d1_trend,
+                        min_confidence=self.min_confidence,
                     )
 
                     if signal.signal_type != SignalType.HOLD and signal.confidence >= self.min_confidence:
@@ -208,13 +220,14 @@ class BacktestEngine:
                             current_price, sl, direction.value,
                             self.risk_reward_ratio,
                         )
+                        entry_price = self._apply_slippage(current_price, direction.value)
                         lots = calculate_position_size(
                             equity, self.risk_per_trade,
-                            current_price, sl, self.contract_size,
+                            entry_price, sl, self.contract_size,
                         )
                         position = BacktestTrade(
                             entry_idx=i,
-                            entry_price=current_price,
+                            entry_price=entry_price,
                             direction=direction,
                             lot_size=lots,
                             stop_loss=sl,
@@ -258,9 +271,10 @@ class BacktestEngine:
                 max_consecutive_losses=max_consecutive_losses,
                 trades=trades,
                 equity_curve=equity_curve,
+                liquidated=liquidated,
             )
 
-        return BacktestResult(equity_curve=equity_curve)
+        return BacktestResult(equity_curve=equity_curve, liquidated=liquidated)
 
     def _compute_d1_trend(
         self,
@@ -302,6 +316,20 @@ class BacktestEngine:
         except Exception:
             return None
 
+    def _apply_slippage(self, price: float, direction: str) -> float:
+        """Apply slippage to entry/exit price.
+
+        For BUY: price goes up (pay more)
+        For SELL: price goes down (receive less)
+        """
+        if self.slippage_bps <= 0:
+            return price
+        slip_factor = self.slippage_bps / 10000.0
+        if direction.upper() in ("BUY", SignalType.BUY.value):
+            return price * (1 + slip_factor)
+        else:
+            return price * (1 - slip_factor)
+
     def _check_exit(
         self,
         position: BacktestTrade,
@@ -323,15 +351,16 @@ class BacktestEngine:
         # Time-based exit: force close if held too long
         bars_held = idx - position.entry_idx
         if self.max_holding_bars > 0 and bars_held >= self.max_holding_bars:
+            exit_price = self._apply_slippage(current_price, "SELL" if position.direction == SignalType.BUY else "BUY")
             position.exit_idx = idx
-            position.exit_price = current_price
+            position.exit_price = exit_price
             position.exit_reason = "max_holding"
             if position.direction == SignalType.BUY:
-                position.pnl = (current_price - position.entry_price) * position.lot_size * self.contract_size
-                position.pnl_pct = (current_price - position.entry_price) / position.entry_price * 100
+                position.pnl = (exit_price - position.entry_price) * position.lot_size * self.contract_size
+                position.pnl_pct = (exit_price - position.entry_price) / position.entry_price * 100
             else:
-                position.pnl = (position.entry_price - current_price) * position.lot_size * self.contract_size
-                position.pnl_pct = (position.entry_price - current_price) / position.entry_price * 100
+                position.pnl = (position.entry_price - exit_price) * position.lot_size * self.contract_size
+                position.pnl_pct = (position.entry_price - exit_price) / position.entry_price * 100
             equity += position.pnl
             closed = True
             return position, equity, closed
