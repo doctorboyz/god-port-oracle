@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-from shared.models import Signal, SignalType, SessionType, ScalingDecision, ScalingAction
+from shared.models import Signal, SignalType, SessionType, MarketRegime, ScalingDecision, ScalingAction, TradingMode
 from broky.indicators.ema import calculate_ema, calculate_ema_cross
 from broky.indicators.macd import calculate_macd
 from broky.indicators.bollinger import calculate_bollinger
@@ -16,34 +19,77 @@ from broky.indicators.adx import calculate_adx
 from broky.indicators.volume import calculate_volume_ratio
 from broky.signals.scaling import calculate_scaling_action, calculate_entry_and_change
 
+logger = logging.getLogger(__name__)
 
-# Indicator weights — best practice: 1 indicator per category, no redundancy
+# Indicator weights — loaded from JSON config if available, else defaults
 # Trend: EMA Cross + ADX = 35% | Momentum: MACD = 35%
 # Volatility: Bollinger = 10% | Confirmation: Volume = 15%
-# RSI + Stochastic removed — both momentum, redundant with MACD
-INDICATOR_WEIGHTS = {
-    "ema_cross": 0.15,   # Trend direction (short-term EMA 9/21)
-    "ema_trend": 0.05,   # Long-term trend (EMA 50/200) — direction filter
-    "adx": 0.15,         # Trend strength
-    "macd": 0.35,        # Momentum (sole momentum indicator)
-    "bollinger": 0.10,   # Volatility (ADX-filtered, reduced to prevent overtrading)
-    "volume": 0.15,      # Confirmation
+_DEFAULT_WEIGHTS: dict[str, float] = {
+    "ema_cross": 0.15,
+    "ema_trend": 0.05,
+    "adx": 0.15,
+    "macd": 0.35,
+    "bollinger": 0.10,
+    "volume": 0.15,
 }
+
+_WEIGHTS_FILE = Path(__file__).parent.parent / "config" / "indicator_weights.json"
+
+
+def _load_weights() -> dict[str, float]:
+    """Load indicator weights from JSON config, falling back to defaults."""
+    if _WEIGHTS_FILE.exists():
+        try:
+            data = json.loads(_WEIGHTS_FILE.read_text(encoding="utf-8"))
+            weights = data.get("weights", data)
+            # Validate: all expected keys present
+            if all(k in weights for k in _DEFAULT_WEIGHTS):
+                return {k: float(weights[k]) for k in _DEFAULT_WEIGHTS}
+            logger.warning("Weights file missing keys, using defaults")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning("Failed to load weights: %s, using defaults", e)
+    return dict(_DEFAULT_WEIGHTS)
+
+
+INDICATOR_WEIGHTS = _load_weights()
 
 # Session multipliers — adjust confidence based on trading session liquidity
 # NOTE: Disabled for now (all 1.0) — session filtering needs separate threshold tuning
 # Will be enabled after forward testing validates the adjustment
 SESSION_CONFIDENCE_MULTIPLIER = {
-    SessionType.OVERLAP: 1.0,    # Best liquidity: no change (future: boost to 1.1)
+    SessionType.OVERLAP: 1.1,    # Best liquidity: boost confidence
     SessionType.LONDON: 1.0,     # Good liquidity: no change
     SessionType.NY: 1.0,         # Good liquidity: no change
-    SessionType.ASIAN: 1.0,     # Low liquidity: no change (future: reduce to 0.85)
+    SessionType.ASIAN: 0.70,     # Low liquidity: strong reduction
 }
 
 # Confidence thresholds (tuned from H1 backtest scan)
 # v3: Raised to 0.60 to reduce overtrading (was 0.55 → 604 trades, MaxDD 51%)
 MIN_CONFIDENCE = 0.60
 STRONG_SIGNAL = 0.75
+
+
+def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -> str:
+    """Classify market regime based on ADX and Bollinger Band width.
+
+    Args:
+        latest_adx: Current ADX value.
+        boll_bandwidth: Bollinger Band bandwidth (upper - lower) / middle. Optional.
+
+    Returns:
+        Regime string: 'trending', 'ranging', or 'volatile'.
+    """
+    if latest_adx >= 25:
+        # Strong trend — check for volatility
+        if boll_bandwidth is not None and boll_bandwidth > 0.04:
+            return MarketRegime.VOLATILE.value
+        return MarketRegime.TRENDING.value
+    elif latest_adx >= 20:
+        # Trend forming — classify as ranging (choppy)
+        return MarketRegime.RANGING.value
+    else:
+        # No trend — ranging
+        return MarketRegime.RANGING.value
 
 
 def classify_session(timestamp: datetime) -> SessionType:
@@ -146,7 +192,7 @@ def calculate_indicator_scores(
 
     # Bollinger Bands — with ADX filter
     # When ADX > 25 (strong trend), Bollinger mean-reversion is unreliable
-    # Reduce Bollinger weight (not zero) — let it confirm trend direction instead
+    # When ADX 20-25 (trend forming), reduce Bollinger to mild signal (false signal zone)
     boll = calculate_bollinger(close, period=20, std_dev=2.0)
     latest_close = close.iloc[-1]
     latest_lower = boll.lower.iloc[-1]
@@ -158,6 +204,14 @@ def calculate_indicator_scores(
                 scores["bollinger"] = -0.5  # Above upper = trend continuation (not reversal)
             elif latest_close < latest_lower:
                 scores["bollinger"] = 0.5   # Below lower = trend continuation
+            else:
+                scores["bollinger"] = 0.0
+        elif 20 <= latest_adx < 25:
+            # Trend forming: reduce Bollinger from ±1.0 to ±0.3 (choppy zone = false signals)
+            if latest_close < latest_lower:
+                scores["bollinger"] = 0.3   # Mild buy (not full confidence)
+            elif latest_close > latest_upper:
+                scores["bollinger"] = -0.3  # Mild sell
             else:
                 scores["bollinger"] = 0.0
         elif latest_close < latest_lower:
@@ -276,16 +330,17 @@ def calculate_signal_confidence(scores: dict[str, float], weighted_score: float)
     return confidence
 
 
-def score_to_signal_type(score: float) -> SignalType:
+def score_to_signal_type(score: float, learning_mode: bool = False) -> SignalType:
     """Convert a weighted score to a signal type.
 
     Args:
         score: Weighted score from -1 to +1.
+        learning_mode: If True, use lower threshold for more signals.
 
     Returns:
         BUY if score > threshold, SELL if score < -threshold, else HOLD.
     """
-    threshold = 0.3
+    threshold = 0.05 if learning_mode else 0.3
     if score > threshold:
         return SignalType.BUY
     if score < -threshold:
@@ -315,6 +370,9 @@ def generate_signal(
     timeframe: str = "M5",
     timestamp: Optional[datetime] = None,
     d1_trend: Optional[str] = None,
+    min_confidence: float = MIN_CONFIDENCE,
+    strategy_id: str = "",
+    learning_mode: bool = False,
 ) -> Signal:
     """Generate a trading signal by combining indicator scores with JPMorgan scaling rules.
 
@@ -350,6 +408,13 @@ def generate_signal(
 
     scores, latest_adx = calculate_indicator_scores(close, high, low, volume)
 
+    # Classify market regime
+    boll = calculate_bollinger(close, period=20, std_dev=2.0)
+    boll_bw = None
+    if pd.notna(boll.upper.iloc[-1]) and pd.notna(boll.middle.iloc[-1]) and boll.middle.iloc[-1] != 0:
+        boll_bw = (boll.upper.iloc[-1] - boll.lower.iloc[-1]) / boll.middle.iloc[-1]
+    regime = classify_regime(latest_adx, boll_bw)
+
     # Minimum ADX filter: do not trade in ranging markets (ADX < 20)
     if latest_adx < 20:
         return Signal(
@@ -361,21 +426,36 @@ def generate_signal(
             timeframe=timeframe,
             indicators=scores,
             reason=f"ADX={latest_adx:.1f} < 20 — ranging market, no trade",
+            regime=regime,
         )
 
     weighted_score = calculate_weighted_score(scores)
-    signal_type = score_to_signal_type(weighted_score)
+    signal_type = score_to_signal_type(weighted_score, learning_mode=learning_mode)
     confidence = calculate_signal_confidence(scores, weighted_score)
 
+    # Build reason string from active indicators
+    active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
+    reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
+
     # Multi-timeframe trend filter: trade WITH the big trend, not against it
-    # Soft filter: reduce confidence of counter-trend signals instead of blocking
+    # Hard filter: block counter-trend signals entirely (better WR at cost of fewer trades)
+    # Learning mode: record but don't block — we need data on counter-trend trades too
     if d1_trend is not None:
         if d1_trend == "bullish" and signal_type == SignalType.SELL:
-            confidence *= 0.5  # Counter-trend SELL: half confidence
-            scores["_d1_soft"] = -0.5
+            if learning_mode:
+                reason += f" (learning: counter-trend SELL in bullish D1)"
+            else:
+                signal_type = SignalType.HOLD
+                reason += f" (counter-trend SELL in bullish D1)"
         elif d1_trend == "bearish" and signal_type == SignalType.BUY:
-            confidence *= 0.5  # Counter-trend BUY: half confidence
-            scores["_d1_soft"] = -0.5
+            if learning_mode:
+                reason += f" (learning: counter-trend BUY in bearish D1)"
+            else:
+                signal_type = SignalType.HOLD
+                reason += f" (counter-trend BUY in bearish D1)"
+
+    # Regime label included in signal output (no confidence reduction — volatile regime filter hurts PF)
+    reason += f" [{regime}]"
 
     # Apply session-based confidence multiplier
     session = classify_session(timestamp)
@@ -383,10 +463,6 @@ def generate_signal(
     if session_mult != 1.0:
         confidence *= session_mult
         confidence = min(confidence, 1.0)  # Cap at 1.0
-
-    # Build reason string from active indicators
-    active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
-    reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
 
     # If we have an existing position, check JPMorgan scaling rules
     if entry_price is not None and entry_price > 0:
@@ -403,10 +479,14 @@ def generate_signal(
                 signal_type = SignalType.SELL
                 reason += " (scaling override)"
 
-    # Only produce actionable signals above minimum confidence
-    if confidence < MIN_CONFIDENCE and signal_type != SignalType.HOLD:
-        signal_type = SignalType.HOLD
-        reason += f" (confidence {confidence:.2f} below {MIN_CONFIDENCE})"
+    # Confidence filter — in learning mode, emit signal regardless so we can
+    # analyze which confidence levels actually produce wins
+    if confidence < min_confidence and signal_type != SignalType.HOLD:
+        if learning_mode:
+            reason += f" (learning: confidence {confidence:.2f} below {min_confidence})"
+        else:
+            signal_type = SignalType.HOLD
+            reason += f" (confidence {confidence:.2f} below {min_confidence})"
 
     return Signal(
         symbol="XAUUSD",
@@ -417,4 +497,6 @@ def generate_signal(
         timeframe=timeframe,
         indicators=scores,
         reason=reason,
+        regime=regime,
+        strategy_id=strategy_id,
     )

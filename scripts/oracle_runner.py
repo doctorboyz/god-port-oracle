@@ -363,6 +363,16 @@ def main():
     else:
         logger.info("M5 Scalp mode DISABLED (set M5_SCALP_ENABLED=1 to enable)")
 
+    swing_disabled_accounts = [a.strip().upper() for a in os.environ.get("SWING_DISABLED_ACCOUNTS", "").split(",") if a.strip()]
+    if swing_disabled_accounts:
+        logger.info("Swing DISABLED for accounts: %s", swing_disabled_accounts)
+
+    learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
+    if learning_mode:
+        logger.info("LEARNING MODE ENABLED — all blockers bypassed, max trades for data collection")
+    else:
+        logger.info("LEARNING MODE DISABLED (set LEARNING_MODE=1 to enable)")
+
     threads = []
 
     for account in accounts:
@@ -380,13 +390,16 @@ def main():
             threads.append(t)
 
         if phase in ("trade", "both"):
-            t = threading.Thread(
-                target=run_trader,
-                args=(account, db_path, trade_interval, dry_run),
-                name=f"trader-{account}",
-                daemon=True,
-            )
-            threads.append(t)
+            if account in swing_disabled_accounts:
+                logger.info("[Trader:%s] SKIPPED — swing disabled for this account", account)
+            else:
+                t = threading.Thread(
+                    target=run_trader,
+                    args=(account, db_path, trade_interval, dry_run),
+                    name=f"trader-{account}",
+                    daemon=True,
+                )
+                threads.append(t)
 
             # Scalp trader (parallel thread, M1)
             if scalp_enabled:

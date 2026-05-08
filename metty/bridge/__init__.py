@@ -1,0 +1,1 @@
+"""Metty bridge — MT5 connection management for multi-account execution."""

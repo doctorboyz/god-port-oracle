@@ -17,7 +17,9 @@ def resample_timeframe(
     """Resample OHLCV data to a higher timeframe.
 
     Args:
-        df: DataFrame with OHLCV columns, DatetimeIndex.
+        df: DataFrame with OHLCV columns and DatetimeIndex (or 'timestamp' column).
+            Accepts both Title Case (Open, High, Low, Close, Volume) and
+            lowercase (open, high, low, close, volume) column names.
         target_timeframe: Target timeframe (M15, H1, H4, D1).
 
     Returns:
@@ -32,12 +34,38 @@ def resample_timeframe(
 
     pandas_freq = TIMEFRAME_MAP[target_timeframe]
 
-    resampled = df.resample(pandas_freq).agg({
-        "Open": "first",
-        "High": "max",
-        "Low": "min",
-        "Close": "last",
-        "Volume": "sum",
-    }).dropna()
+    # Work on a copy
+    df = df.copy()
+
+    # Ensure DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        for col in ("timestamp", "time", "Date", "date"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col])
+                df = df.set_index(col)
+                break
+
+    # Normalize column names to Title Case for resampling
+    col_map = {}
+    for lower, title in [("open", "Open"), ("high", "High"), ("low", "Low"),
+                         ("close", "Close"), ("volume", "Volume")]:
+        if lower in df.columns and title not in df.columns:
+            col_map[lower] = title
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    # Only resample columns that exist
+    agg_map = {}
+    for col, func in [("Open", "first"), ("High", "max"), ("Low", "min"),
+                      ("Close", "last"), ("Volume", "sum")]:
+        if col in df.columns:
+            agg_map[col] = func
+
+    resampled = df.resample(pandas_freq).agg(agg_map).dropna()
+
+    # Restore original column name casing if we renamed
+    reverse_map = {v: k for k, v in col_map.items()}
+    if reverse_map:
+        resampled = resampled.rename(columns=reverse_map)
 
     return resampled

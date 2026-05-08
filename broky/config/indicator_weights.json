@@ -1,0 +1,12 @@
+{
+  "weights": {
+    "ema_cross": 0.15,
+    "ema_trend": 0.05,
+    "adx": 0.15,
+    "macd": 0.35,
+    "bollinger": 0.10,
+    "volume": 0.15
+  },
+  "updated_at": "2026-05-05T00:00:00+00:00",
+  "source": "initial"
+}

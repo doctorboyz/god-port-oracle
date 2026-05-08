@@ -1,0 +1,23 @@
+{
+  "experiment_name": "xgboost_v1",
+  "description": "",
+  "horizon_bars": 12,
+  "threshold_pct": 0.15,
+  "test_ratio": 0.2,
+  "objective": "multi:softprob",
+  "num_class": 3,
+  "max_depth": 3,
+  "learning_rate": 0.05,
+  "n_estimators": 300,
+  "subsample": 0.8,
+  "colsample_bytree": 0.8,
+  "min_child_weight": 5,
+  "gamma": 0.1,
+  "reg_alpha": 0.0,
+  "reg_lambda": 1.0,
+  "cv_folds": 5,
+  "min_samples": 200,
+  "group_filter": null,
+  "feature_selection": null,
+  "model_dir": "models"
+}

@@ -1,0 +1,1 @@
+"""Metty execution — order routing, data collection, and main loop."""

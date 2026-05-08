@@ -19,3 +19,16 @@ data/paper_trades.json
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.DS_Store
+.claude/
+.synapse/
+data/xau-data/
+data/forward_test_results.json
+models/*.pt
+models/*.pth
+models/*.bin
+ψ/inbox/
+ψ/outbox/
+ψ/goals/
+ψ/learn/
+ψ/.DS_Store

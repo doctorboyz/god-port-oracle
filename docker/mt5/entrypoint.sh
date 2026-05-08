@@ -70,6 +70,10 @@ if [ ! -d "/config/.XDG" ]; then
 fi
 export XDG_RUNTIME_DIR=/config/.XDG
 
+# Create X11 socket directory (KasmVNC needs this as root before dropping privileges)
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+
 nginx &
 echo "[Phase 0] nginx started."
 
@@ -84,7 +88,17 @@ s6-setuidgid abc /usr/local/bin/Xvnc :99 \
     -websocketPort 6901 \
     -interface 0.0.0.0 \
     -Log *:stdout:10 &
-echo "[Phase 0] KasmVNC started on port 6901 (web on port 3000)."
+KASMVNC_PID=$!
+echo "[Phase 0] KasmVNC started on port 6901 (web on port 3000), PID=${KASMVNC_PID}."
+
+# Wait for KasmVNC to be ready
+for i in $(seq 1 10); do
+    if ss -tlnp | grep -q 6901; then
+        echo "[Phase 0] KasmVNC is listening on port 6901."
+        break
+    fi
+    sleep 1
+done
 
 # Phase 1: Run gmag11's start.sh and WAIT for it to fully complete.
 # gmag11's start.sh runs as root and creates /config/.wine owned by root.

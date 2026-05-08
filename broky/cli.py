@@ -77,11 +77,30 @@ def backtest(config: str | None, timeframe: str, initial_equity: float, risk_per
 @main.command()
 @click.option("--config", default=None, help="Path to config YAML")
 @click.option("--paper", is_flag=True, help="Paper trading mode (no real orders)")
-def forward(config: str | None, paper: bool):
-    """Run forward test (paper or live)."""
+@click.option("--start", default="2025-12-01", help="Start date (ISO format)")
+@click.option("--end", default=None, help="End date (ISO format)")
+@click.option("--output", default="data/forward_test_results.json", help="Output JSON path")
+def forward(config: str | None, paper: bool, start: str, end: str | None, output: str):
+    """Run forward test with best Phase 1.5 config."""
+    from broky.forward.engine import run_forward_test
+
     mode = "paper" if paper else "live"
     click.echo(f"Forward test starting in {mode} mode...")
-    click.echo("Not yet implemented. Use backtest to validate strategy first.")
+    click.echo(f"Period: {start} → {end or 'latest'}")
+
+    result = run_forward_test(start_date=start, end_date=end or None, output=output)
+
+    click.echo(f"\n=== Forward Test Results ===")
+    click.echo(f"Period: {result.start_date} → {result.end_date}")
+    click.echo(f"Initial equity: ${result.initial_equity:.2f}")
+    click.echo(f"Final equity:   ${result.final_equity:.2f}")
+    click.echo(f"PnL: ${result.total_pnl:.2f} ({result.total_pnl_pct:+.1f}%)")
+    click.echo(f"Trades: {result.total_trades}")
+    click.echo(f"Win rate: {result.win_rate:.1%}")
+    click.echo(f"Profit factor: {result.profit_factor:.2f}")
+    click.echo(f"Max drawdown: {result.max_drawdown_pct:.1f}%")
+    click.echo(f"Sharpe ratio: {result.sharpe_ratio:.2f}")
+    click.echo(f"\nResults saved to {output}")
 
 
 @main.command()

@@ -226,6 +226,7 @@ def generate_m5_scalp_signal(
     h4_trend: Optional[str] = None,
     min_confidence: float = M5_SCALP_MIN_CONFIDENCE,
     max_spread: float = M5_SCALP_SPREAD_MAX,
+    learning_mode: bool = False,
 ) -> Signal:
     """Generate an M5 scalp signal using 6-EMA Ribbon Cloud strategy.
 
@@ -283,9 +284,9 @@ def generate_m5_scalp_signal(
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
 
-    # Session gate
+    # Session gate (learning mode: skip gate, record session in reason)
     session = classify_session_m5(timestamp.hour)
-    if session not in M5_SCALP_SESSIONS:
+    if session not in M5_SCALP_SESSIONS and not learning_mode:
         return Signal(
             symbol="XAUUSD",
             signal_type=SignalType.HOLD,
@@ -298,8 +299,8 @@ def generate_m5_scalp_signal(
             trading_mode=TradingMode.M5_SCALP,
         )
 
-    # Spread filter — require spread data for live trading
-    if spread is None:
+    # Spread filter (learning mode: skip spread block, record spread in reason)
+    if spread is None and not learning_mode:
         return Signal(
             symbol="XAUUSD",
             signal_type=SignalType.HOLD,
@@ -311,7 +312,7 @@ def generate_m5_scalp_signal(
             regime="unknown",
             trading_mode=TradingMode.M5_SCALP,
         )
-    if not check_spread(spread, max_spread):
+    if spread is not None and not check_spread(spread, max_spread) and not learning_mode:
         return Signal(
             symbol="XAUUSD",
             signal_type=SignalType.HOLD,
@@ -474,8 +475,8 @@ def generate_m5_scalp_signal(
     else:
         regime = "ranging"
 
-    # ADX threshold filter
-    if adx_val < M5_SCALP_ADX_THRESHOLD:
+    # ADX threshold filter (learning mode: skip ADX gate, record in reason)
+    if adx_val < M5_SCALP_ADX_THRESHOLD and not learning_mode:
         return Signal(
             symbol="XAUUSD",
             signal_type=SignalType.HOLD,
@@ -523,9 +524,10 @@ def generate_m5_scalp_signal(
             total_weight += weight
     weighted_score = weighted_sum / total_weight if total_weight > 0 else 0.0
 
-    # Direction and signal type
-    signal_type = SignalType.BUY if weighted_score > M5_SCALP_DIRECTION_THRESHOLD else (
-        SignalType.SELL if weighted_score < -M5_SCALP_DIRECTION_THRESHOLD else SignalType.HOLD
+    # Direction and signal type (learning mode: lower threshold to capture more signals)
+    dir_threshold = 0.05 if learning_mode else M5_SCALP_DIRECTION_THRESHOLD
+    signal_type = SignalType.BUY if weighted_score > dir_threshold else (
+        SignalType.SELL if weighted_score < -dir_threshold else SignalType.HOLD
     )
 
     # Confidence calculation
@@ -589,17 +591,28 @@ def generate_m5_scalp_signal(
     # Build reason string
     active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
     reason = f"M5 Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"M5 Score={weighted_score:+.2f}"
-    reason += f" [{regime}] ribbon={ribbon_state} quality={quality_score:.2f}"
+    reason += f" [{regime}] ribbon={ribbon_state} quality={quality_score:.2f} session={session}"
+    if learning_mode and adx_val < M5_SCALP_ADX_THRESHOLD:
+        reason += f" (learning: ADX={adx_val:.1f}<{M5_SCALP_ADX_THRESHOLD})"
+    if learning_mode and session not in M5_SCALP_SESSIONS:
+        reason += f" (learning: {session} session trade)"
+    if learning_mode and spread is None:
+        reason += " (learning: no spread data)"
+    elif spread is not None:
+        reason += f" spread={spread:.0f}"
 
     if d1_trend:
         reason += f" d1={d1_trend}"
     if h4_trend:
         reason += f" h4={h4_trend}"
 
-    # Min confidence filter
+    # Min confidence filter (learning mode: emit signal regardless, record confidence gap)
     if confidence < min_confidence and signal_type != SignalType.HOLD:
-        signal_type = SignalType.HOLD
-        reason += f" (confidence {confidence:.2f} below {min_confidence})"
+        if learning_mode:
+            reason += f" (learning: confidence {confidence:.2f} below {min_confidence})"
+        else:
+            signal_type = SignalType.HOLD
+            reason += f" (confidence {confidence:.2f} below {min_confidence})"
 
     # ATR for TP calculation (stored in indicators for trader use)
     indicators = dict(scores)

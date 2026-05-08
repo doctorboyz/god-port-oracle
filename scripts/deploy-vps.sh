@@ -51,10 +51,7 @@ case "$ACTION" in
     start)
         echo "[3/3] Starting oracle-engine on VPS..."
         ssh "$VPS_HOST" "cd $REMOTE_DIR && \
-            export DRY_RUN=$DRY_RUN && \
-            export TRADING_PHASE=$TRADING_PHASE && \
-            export M5_SCALP_ENABLED=$M5_SCALP_ENABLED && \
-            source .env 2>/dev/null; \
+            set -a && source .env 2>/dev/null && set +a && \
             docker compose -f $COMPOSE_FILE build oracle-engine && \
             docker compose -f $COMPOSE_FILE up -d oracle-engine && \
             echo 'Oracle engine started!' && \
@@ -73,10 +70,7 @@ case "$ACTION" in
     rebuild)
         echo "[3/3] Rebuilding + restarting oracle-engine on VPS..."
         ssh "$VPS_HOST" "cd $REMOTE_DIR && \
-            export DRY_RUN=$DRY_RUN && \
-            export TRADING_PHASE=$TRADING_PHASE && \
-            export M5_SCALP_ENABLED=$M5_SCALP_ENABLED && \
-            source .env 2>/dev/null; \
+            set -a && source .env 2>/dev/null && set +a && \
             docker compose -f $COMPOSE_FILE build --no-cache oracle-engine && \
             docker compose -f $COMPOSE_FILE up -d oracle-engine && \
             echo 'Oracle engine rebuilt!' && \

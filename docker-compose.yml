@@ -1,2 +1,126 @@
 services:
-  # n8n และ service อื่นๆ ของคุณจะอยู่ตรงนี้ (คงเดิมไว้)
+  mt5-account-a:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      - MT5_LOGIN=${MT5_LOGIN_A}
+      - MT5_PASSWORD=${MT5_PASSWORD_A}
+      - MT5_SERVER=${MT5_SERVER_A:-Exness-MT5Trial17}
+      - DISPLAY=:99
+    ports:
+      - "5900:3000"
+      - "5005:8001"
+    volumes:
+      - shared-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',8001)); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
+    networks:
+      - oracle-net
+
+  mt5-account-b:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      - MT5_LOGIN=${MT5_LOGIN_B}
+      - MT5_PASSWORD=${MT5_PASSWORD_B}
+      - MT5_SERVER=${MT5_SERVER_B:-Exness-MT5Trial17}
+      - DISPLAY=:99
+    ports:
+      - "5901:3000"
+      - "5006:8001"
+    volumes:
+      - shared-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',8001)); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
+    networks:
+      - oracle-net
+
+  mt5-account-c:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    environment:
+      - MT5_LOGIN=${MT5_LOGIN_C}
+      - MT5_PASSWORD=${MT5_PASSWORD_C}
+      - MT5_SERVER=${MT5_SERVER_C:-Exness-MT5Trial7}
+      - DISPLAY=:99
+    ports:
+      - "5902:3000"
+      - "5007:8001"
+    volumes:
+      - shared-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',8001)); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
+    networks:
+      - oracle-net
+
+  oracle-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Bridge hosts use Docker internal names (same network)
+      - MT5_BRIDGE_A_HOST=mt5-account-a
+      - MT5_BRIDGE_A_PORT=8001
+      - MT5_BRIDGE_B_HOST=mt5-account-b
+      - MT5_BRIDGE_B_PORT=8001
+      - MT5_BRIDGE_C_HOST=mt5-account-c
+      - MT5_BRIDGE_C_PORT=8001
+      # MT5 credentials (for programmatic login)
+      - MT5_LOGIN_A=${MT5_LOGIN_A}
+      - MT5_PASSWORD_A=${MT5_PASSWORD_A}
+      - MT5_SERVER_A=${MT5_SERVER_A:-Exness-MT5Trial17}
+      - MT5_LOGIN_B=${MT5_LOGIN_B}
+      - MT5_PASSWORD_B=${MT5_PASSWORD_B}
+      - MT5_SERVER_B=${MT5_SERVER_B:-Exness-MT5Trial17}
+      - MT5_LOGIN_C=${MT5_LOGIN_C}
+      - MT5_PASSWORD_C=${MT5_PASSWORD_C}
+      - MT5_SERVER_C=${MT5_SERVER_C:-Exness-MT5Trial7}
+      # Oracle config
+      - DB_PATH=/app/data/oracle.db
+      - TRADING_PHASE=${TRADING_PHASE:-both}
+      - DRY_RUN=${DRY_RUN:-1}
+      - ACCOUNTS=${ACCOUNTS:-A,B,C}
+      - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
+      - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+    volumes:
+      - shared-data:/app/data
+    depends_on:
+      mt5-account-a:
+        condition: service_healthy
+      mt5-account-b:
+        condition: service_healthy
+      mt5-account-c:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - oracle-net
+
+volumes:
+  shared-data:
+    driver: local
+
+networks:
+  oracle-net:
+    driver: bridge

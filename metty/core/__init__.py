@@ -1,0 +1,1 @@
+"""Metty core — models, database, and configuration."""

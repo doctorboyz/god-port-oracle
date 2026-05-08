@@ -1,8 +1,10 @@
 """RPyC bridge server running in Wine Python.
 
 Exposes MetaTrader5 module via RPyC for remote access from macOS.
-Returns dict/list instead of namedtuple/numpy for RPyC serialization.
+Returns JSON-serialized strings instead of netref dicts to avoid
+slow per-key RPyC round-trips on large data sets.
 """
+import json
 import sys
 import rpyc
 from rpyc.utils.server import ThreadedServer
@@ -36,6 +38,23 @@ def _numpy_to_list(arr):
             return [dict(zip(arr.dtype.names, row)) for row in arr]
         return arr.tolist()
     return str(arr)
+
+
+def _numpy_to_json(arr):
+    """Convert numpy structured array to JSON string for efficient transfer.
+
+    RPyC netref dicts require a round-trip per key access, making large
+    datasets (500+ candles) extremely slow. Returning JSON string avoids this.
+    """
+    if arr is None:
+        return "[]"
+    import numpy as np
+    if isinstance(arr, np.ndarray):
+        if arr.dtype.names:
+            result = [dict(zip(arr.dtype.names, row)) for row in arr]
+            return json.dumps(result, default=float)
+        return json.dumps(arr.tolist(), default=float)
+    return "[]"
 
 
 class MT5Service(rpyc.Service):
@@ -76,6 +95,11 @@ class MT5Service(rpyc.Service):
     def exposed_copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
         import MetaTrader5 as mt5
         return _numpy_to_list(mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count))
+
+    def exposed_copy_rates_from_pos_json(self, symbol, timeframe, start_pos, count):
+        """Same as copy_rates_from_pos but returns JSON string for efficient transfer."""
+        import MetaTrader5 as mt5
+        return _numpy_to_json(mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count))
 
     def exposed_copy_ticks_from(self, symbol, date_from, count, flags):
         import MetaTrader5 as mt5
