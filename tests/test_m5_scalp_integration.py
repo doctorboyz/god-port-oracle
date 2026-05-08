@@ -859,7 +859,7 @@ class TestFullCycleDryRun:
                 pass
 
         # Mock the _fetch_candles method to return our test data
-        trader._fetch_candles = lambda: candles
+        trader._fetch_candles = lambda bridge=None: candles
         # Mock spread check (bridge not available)
         trader._get_spread = lambda: 5.0
         # Mock balance check (DB not available)
@@ -890,7 +890,7 @@ class TestFullCycleDryRun:
 
         df = _build_flat_ranging_data(300)
         candles = {"M5": df}
-        trader._fetch_candles = lambda: candles
+        trader._fetch_candles = lambda bridge=None: candles
         trader._get_spread = lambda: 5.0
         trader._get_balance = lambda: 1000.0
         trader._check_existing_m5_scalp_position = lambda: False
@@ -904,7 +904,7 @@ class TestFullCycleDryRun:
     def test_dry_run_no_data_returns_skip(self):
         """Dry run with no candle data should return skip."""
         trader = M5ScalpTrader(dry_run=True)
-        trader._fetch_candles = lambda: None
+        trader._fetch_candles = lambda bridge=None: None
 
         result = trader.run_once()
         assert result["action"] == "skip"
@@ -914,7 +914,7 @@ class TestFullCycleDryRun:
         """Dry run with fewer than 200 bars should return skip."""
         trader = M5ScalpTrader(dry_run=True)
         short_df = _build_strong_bullish_data(100)
-        trader._fetch_candles = lambda: {"M5": short_df}
+        trader._fetch_candles = lambda bridge=None: {"M5": short_df}
 
         result = trader.run_once()
         assert result["action"] == "skip"
