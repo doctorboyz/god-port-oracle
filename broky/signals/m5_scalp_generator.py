@@ -30,6 +30,7 @@ from broky.indicators.adx import calculate_adx
 from broky.indicators.volume import calculate_volume_ratio
 from broky.risk.spread_filter import check_spread
 from shared.models import Signal, SignalType, TradingMode
+from broky.signals.registry import strategy
 
 # M5 Scalp indicator weights — ribbon-heavy with momentum confirmation
 M5_SCALP_WEIGHTS = {
@@ -214,6 +215,17 @@ def calculate_signal_score(
     return score
 
 
+@strategy(
+    name="m5_scalp",
+    timeframe="M5",
+    trading_mode=TradingMode.M5_SCALP,
+    description="6-EMA Ribbon Cloud M5 scalp with HTF alignment and pullback entries",
+    risk_defaults={"risk_per_trade": 0.015, "atr_multiplier": 1.0, "risk_reward_ratio": 1.5, "min_confidence": 0.50},
+    requires_spread=True,
+    requires_d1_trend=True,
+    requires_h4_trend=True,
+    min_bars=200,
+)
 def generate_m5_scalp_signal(
     close: pd.Series,
     high: pd.Series,

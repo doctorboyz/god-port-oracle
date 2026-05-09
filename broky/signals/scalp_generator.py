@@ -25,6 +25,7 @@ from broky.indicators.adx import calculate_adx
 from broky.indicators.volume import calculate_volume_ratio
 from broky.risk.spread_filter import check_spread
 from shared.models import Signal, SignalType, TradingMode
+from broky.signals.registry import strategy
 
 # M1 Scalp indicator weights
 # Momentum-heavy: MACD is king on M1, EMA cross for quick direction
@@ -74,6 +75,15 @@ def _classify_session_utc(hour: int) -> str:
     return "asian"
 
 
+@strategy(
+    name="m1_scalp",
+    timeframe="M1",
+    trading_mode=TradingMode.SCALP,
+    description="M1 scalping with session gate and spread filter",
+    risk_defaults={"risk_per_trade": 0.015, "atr_multiplier": 1.0, "risk_reward_ratio": 1.5, "min_confidence": 0.45},
+    requires_spread=True,
+    min_bars=50,
+)
 def generate_scalp_signal(
     close: pd.Series,
     high: pd.Series,

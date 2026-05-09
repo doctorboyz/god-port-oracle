@@ -54,6 +54,7 @@ PRESET_CONFIGS = {
         "max_holding_bars": 12,
         "cooldown_bars": 6,
         "slippage_bps": 3.0,
+        "strategy": "m5_scalp",
     },
     "swing_wide": {
         "risk_per_trade": 0.02,

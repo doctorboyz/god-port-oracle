@@ -11,6 +11,7 @@ from typing import Optional
 import pandas as pd
 
 from shared.models import Signal, SignalType, SessionType, MarketRegime, ScalingDecision, ScalingAction, TradingMode
+from broky.signals.registry import strategy
 from broky.indicators.ema import calculate_ema, calculate_ema_cross
 from broky.indicators.macd import calculate_macd
 from broky.indicators.bollinger import calculate_bollinger
@@ -360,6 +361,15 @@ def score_to_confidence(score: float) -> float:
     return min(abs(score), 1.0)
 
 
+@strategy(
+    name="swing",
+    timeframe="H1",
+    trading_mode=TradingMode.SWING,
+    description="EMA+MACD swing strategy with ADX filter and session confidence",
+    risk_defaults={"risk_per_trade": 0.02, "atr_multiplier": 1.5, "risk_reward_ratio": 2.0, "min_confidence": 0.60},
+    requires_d1_trend=True,
+    min_bars=50,
+)
 def generate_signal(
     close: pd.Series,
     high: pd.Series,

@@ -169,9 +169,20 @@ def validate_file(filepath: str) -> ValidationResult:
 
 
 def validate_all(files: Optional[list[str]] = None) -> list[ValidationResult]:
-    """Validate multiple files. Defaults to all signal generators."""
+    """Validate multiple files. Defaults to all registered strategies."""
     if files is None:
-        files = DEFAULT_GENERATORS
+        # Try registry-based discovery first
+        try:
+            import broky.signals  # noqa: F401 — triggers registration
+            from broky.signals.registry import StrategyRegistry
+            registered = StrategyRegistry.all()
+            if registered:
+                import inspect
+                files = [inspect.getfile(fn) for fn, _ in registered.values()]
+            else:
+                files = DEFAULT_GENERATORS
+        except (ImportError, KeyError):
+            files = DEFAULT_GENERATORS
 
     results = []
     for filepath in files:

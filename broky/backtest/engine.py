@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from shared.models import SignalType
-from broky.signals.generator import generate_signal
+from broky.signals.registry import StrategyRegistry
 from broky.risk.circuit_breaker import CircuitBreaker
 from broky.risk.position_sizing import calculate_stop_loss, calculate_take_profit, calculate_position_size
 from broky.indicators.ema import calculate_ema
@@ -77,6 +77,7 @@ class BacktestEngine:
         max_holding_bars: int = 48,
         cooldown_bars: int = 12,
         slippage_bps: float = 0.0,
+        strategy: str = "swing",
     ):
         self.initial_equity = initial_equity
         self.risk_per_trade = risk_per_trade
@@ -88,6 +89,10 @@ class BacktestEngine:
         self.max_holding_bars = max_holding_bars  # Max bars before forced exit (48 H1 bars = 48h)
         self.cooldown_bars = cooldown_bars  # Min bars between trades (12h on H1)
         self.slippage_bps = slippage_bps  # Basis points of slippage (e.g., 3 = 0.03%)
+        self.strategy = strategy
+        # Ensure strategy generators are registered before lookup
+        import broky.signals  # noqa: F401
+        self._generate_fn, self._strategy_config = StrategyRegistry.get(strategy)
 
     def run(
         self,
@@ -199,7 +204,7 @@ class BacktestEngine:
                         if len(valid_d1) > 0:
                             d1_trend = valid_d1.iloc[-1]
 
-                    signal = generate_signal(
+                    signal = self._generate_fn(
                         close=close_slice,
                         high=high_slice,
                         low=low_slice,
