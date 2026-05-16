@@ -94,9 +94,34 @@ class M5ScalpTrader:
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
         self.learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
-        self.max_positions = int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))
+        per_account_limits = {
+            "A": int(os.environ.get("MAX_POSITIONS_A", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "B": int(os.environ.get("MAX_POSITIONS_B", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "C": int(os.environ.get("MAX_POSITIONS_C", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+        }
+        self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
         self.account_id = ACCOUNT_IDS.get(self.account, 1)
         self.risk = risk_config or M5ScalpRiskConfig()
+        # Per-account strategy overrides via env vars (for testing different configs)
+        per_account_atr = {
+            "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "1.5"))),
+            "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "1.5"))),
+            "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "1.5"))),
+        }
+        per_account_rr = {
+            "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.0"))),
+            "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.0"))),
+            "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.0"))),
+        }
+        per_account_conf = {
+            "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.50"))),
+            "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.50"))),
+            "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.50"))),
+        }
+        if not risk_config:
+            self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
+            self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
+            self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:
@@ -212,22 +237,17 @@ class M5ScalpTrader:
         return None
 
     def _get_spread(self, bridge: MT5Bridge = None) -> Optional[float]:
-        """Get current spread from MT5Bridge symbol info. Reuses bridge if provided."""
+        """Get current spread from real-time bid/ask. Reuses bridge if provided."""
         try:
             symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
             symbol = symbol_map.get(self.account, "XAUUSD")
 
             if bridge:
-                info = bridge.get_symbol_info_sync(symbol)
+                return bridge.get_spread_sync(symbol)
             else:
                 config = self._get_account_config()
                 bridge = MT5Bridge(config)
-                info = bridge.get_symbol_info_sync(symbol)
-
-            if info and "spread" in info:
-                spread_val = float(info["spread"])
-                if spread_val > 0:
-                    return spread_val
+                return bridge.get_spread_sync(symbol)
         except Exception as e:
             logger.debug("[M5Scalp:%s] Spread fetch failed: %s", self.account, e)
         return None

@@ -361,6 +361,139 @@ def score_to_confidence(score: float) -> float:
     return min(abs(score), 1.0)
 
 
+# Ranging market signal constants
+_RANGING_BOLL_THRESHOLD = 0.70   # Price must be >= 70% toward a band to trigger (0.0=mid, 1.0=at band)
+_RANGING_CONFIDENCE_CAP = 0.65   # Ranging signals capped lower than trending (mean reversion inherently weaker)
+_RANGING_DIRECTION_THRESHOLD = 0.15  # Lower threshold than trending (0.30) — ranging signals are milder
+
+
+def _generate_ranging_signal(
+    close: pd.Series,
+    current_price: float,
+    timestamp: datetime,
+    timeframe: str,
+    scores: dict[str, float],
+    regime: str,
+    min_confidence: float,
+    learning_mode: bool = False,
+) -> Signal:
+    """Generate a signal for ranging markets using Bollinger mean-reversion.
+
+    In ranging (ADX < 20), trend-following indicators are unreliable. Instead:
+    - Bollinger Bands: price near lower band → BUY (oversold), near upper band → SELL (overbought)
+    - Volume: high volume confirms, low volume weakens
+    - MACD: mild momentum confirmation (not primary)
+    - Confidence is capped at 0.65 (ranging signals are inherently weaker)
+
+    Returns HOLD if no clear mean-reversion opportunity exists.
+    """
+    boll = calculate_bollinger(close, period=20, std_dev=2.0)
+    latest_upper = boll.upper.iloc[-1]
+    latest_lower = boll.lower.iloc[-1]
+    latest_middle = boll.middle.iloc[-1]
+
+    if pd.isna(latest_upper) or pd.isna(latest_lower) or pd.isna(latest_middle):
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason="ranging: Bollinger data unavailable", regime=regime,
+        )
+
+    band_range = latest_upper - latest_lower
+    if band_range <= 0:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason="ranging: Bollinger bands invalid", regime=regime,
+        )
+
+    # Position within bands: 0.0 = at lower band, 1.0 = at upper band, 0.5 = middle
+    band_position = (current_price - latest_lower) / band_range
+
+    # Direction: near lower band → BUY (expect bounce up), near upper band → SELL (expect revert down)
+    if band_position <= (1.0 - _RANGING_BOLL_THRESHOLD):
+        direction = "BUY"
+        boll_score = 1.0 - band_position  # Closer to lower band = stronger buy signal
+    elif band_position >= _RANGING_BOLL_THRESHOLD:
+        direction = "SELL"
+        boll_score = band_position  # Closer to upper band = stronger sell signal
+    else:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"ranging: price mid-band (pos={band_position:.2f})",
+            regime=regime,
+        )
+
+    # Bollinger score is the primary signal — scale to [-1, 1]
+    boll_signal = boll_score if direction == "SELL" else -boll_score
+    boll_signal = (boll_signal - 0.5) * 2  # Normalize: 0.7→0.4, 1.0→1.0
+
+    # MACD: mild confirmation (momentum direction)
+    macd_weight = 0.3
+    macd_score = scores.get("macd", 0)
+    if direction == "SELL":
+        macd_score = macd_score if macd_score < 0 else -0.3  # Want MACD bearish for sell
+    else:
+        macd_score = macd_score if macd_score > 0 else 0.3   # Want MACD bullish for buy
+
+    # Volume: confirmation only — high volume increases confidence, low volume reduces it
+    volume_score = scores.get("volume", 0)
+    if volume_score > 0:
+        vol_bonus = 0.15 if volume_score >= 1.0 else 0.10
+    elif volume_score < 0:
+        vol_bonus = -0.10
+    else:
+        vol_bonus = 0.0
+
+    # Composite confidence: Bollinger (0.50) + MACD (0.30) + Volume (0.20)
+    raw_confidence = abs(boll_signal) * 0.50 + abs(macd_score) * 0.30 + 0.20
+    raw_confidence += vol_bonus
+    raw_confidence = max(0.0, min(raw_confidence, _RANGING_CONFIDENCE_CAP))
+
+    # Direction threshold check
+    if raw_confidence < _RANGING_DIRECTION_THRESHOLD:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"ranging: conf={raw_confidence:.2f} < {_RANGING_DIRECTION_THRESHOLD}",
+            regime=regime,
+        )
+
+    signal_type = SignalType.BUY if direction == "BUY" else SignalType.SELL
+
+    # Learning mode: emit regardless of min_confidence
+    if raw_confidence < min_confidence and not learning_mode:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"ranging: conf={raw_confidence:.2f} < min={min_confidence}",
+            regime=regime,
+        )
+    if raw_confidence < min_confidence and learning_mode:
+        reason_extra = f" (learning: ranging conf={raw_confidence:.2f} below {min_confidence})"
+    else:
+        reason_extra = ""
+
+    return Signal(
+        symbol="XAUUSD",
+        signal_type=signal_type,
+        confidence=raw_confidence,
+        price=current_price,
+        timestamp=timestamp,
+        timeframe=timeframe,
+        indicators=scores,
+        reason=f"ranging {direction}: boll_pos={band_position:.2f} conf={raw_confidence:.2f}"
+               f" | macd={macd_score:+.1f} vol={volume_score:+.1f}{reason_extra} [{regime}]",
+        regime=regime,
+    )
+
+
 @strategy(
     name="swing",
     timeframe="H1",
@@ -425,27 +558,32 @@ def generate_signal(
         boll_bw = (boll.upper.iloc[-1] - boll.lower.iloc[-1]) / boll.middle.iloc[-1]
     regime = classify_regime(latest_adx, boll_bw)
 
-    # Minimum ADX filter: do not trade in ranging markets (ADX < 20)
+    # Ranging market (ADX < 20): use Bollinger mean-reversion instead of trend-following
+    # Data shows ranging WR 66.7% vs trending 46.2% — mean reversion works in ranges
     if latest_adx < 20:
-        return Signal(
-            symbol="XAUUSD",
-            signal_type=SignalType.HOLD,
-            confidence=0.0,
-            price=current_price,
+        signal = _generate_ranging_signal(
+            close=close,
+            current_price=current_price,
             timestamp=timestamp,
             timeframe=timeframe,
-            indicators=scores,
-            reason=f"ADX={latest_adx:.1f} < 20 — ranging market, no trade",
+            scores=scores,
             regime=regime,
+            min_confidence=min_confidence,
+            learning_mode=learning_mode,
         )
+        if signal.signal_type == SignalType.HOLD:
+            return signal
+        signal_type = signal.signal_type
+        confidence = signal.confidence
+        reason = signal.reason
+    else:
+        weighted_score = calculate_weighted_score(scores)
+        signal_type = score_to_signal_type(weighted_score, learning_mode=learning_mode)
+        confidence = calculate_signal_confidence(scores, weighted_score)
 
-    weighted_score = calculate_weighted_score(scores)
-    signal_type = score_to_signal_type(weighted_score, learning_mode=learning_mode)
-    confidence = calculate_signal_confidence(scores, weighted_score)
-
-    # Build reason string from active indicators
-    active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
-    reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
+        # Build reason string from active indicators
+        active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
+        reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
 
     # Multi-timeframe trend filter: trade WITH the big trend, not against it
     # Hard filter: block counter-trend signals entirely (better WR at cost of fewer trades)

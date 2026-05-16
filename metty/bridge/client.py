@@ -684,6 +684,38 @@ class PersistentMT5Bridge(MT5Bridge):
             return await self.get_symbol_info(symbol)
         return asyncio.run(_do())
 
+    def get_spread_sync(self, symbol: str = "XAUUSD") -> Optional[float]:
+        """Get current spread in points from real-time bid/ask (symbol_info_tick).
+
+        Uses symbol_info_tick (live bid/ask) instead of symbol_info (static data)
+        because symbol_info.spread is a static default, often 0.
+        """
+        async def _do():
+            if not await self.ensure_connected():
+                return None
+            return await self._get_spread(symbol)
+        return asyncio.run(_do())
+
+    async def _get_spread(self, symbol: str) -> Optional[float]:
+        """Async: compute spread from symbol_info_tick bid/ask."""
+        conn = self._ensure_connected()
+        resolved = self._resolve_symbol_name(symbol)
+        try:
+            tick_netref = await asyncio.to_thread(
+                conn.root.symbol_info_tick, resolved,
+            )
+            tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
+            bid = tick.get("bid", 0)
+            ask = tick.get("ask", 0)
+            if bid > 0 and ask > 0:
+                # Get point value from symbol info
+                info = await self.get_symbol_info(symbol)
+                point = info.get("point", 0.01) if info else 0.01
+                return round((ask - bid) / point, 0)
+        except Exception as e:
+            logger.error("Error fetching spread for %s: %s", resolved, e)
+        return None
+
     async def fetch_candles_persistent(
         self,
         symbol: str = "XAUUSD",

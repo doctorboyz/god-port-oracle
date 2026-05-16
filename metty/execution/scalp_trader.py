@@ -208,20 +208,19 @@ class ScalpTrader:
             return None
 
     def _get_spread(self) -> float:
-        """Get current spread from bridge symbol info."""
+        """Get current spread from real-time bid/ask."""
         bridge = self._get_bridge()
         if bridge is None:
             return 0.0
 
         try:
             if bridge.ensure_connected_sync():
-                info = bridge.get_symbol_info_sync("XAUUSD")
-                if info and "spread" in info:
-                    return float(info["spread"])
+                spread = bridge.get_spread_sync("XAUUSD")
+                if spread is not None and spread > 0:
+                    return spread
         except Exception as e:
             logger.warning("Spread fetch failed: %s", e)
 
-        # Fallback: estimate from last candle high-low
         return 0.0
 
     def _check_cooldown(self) -> bool:
