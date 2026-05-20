@@ -182,19 +182,25 @@ class MT5Bridge:
         """Find the correct XAUUSD symbol name for this broker.
 
         Exness uses 'XAUUSDm' (micro lot), other brokers may use 'XAUUSD'.
+        Tries all aliases, including selecting each symbol in Market Watch
+        before checking. Retries once if all attempts fail.
         """
         conn = self._ensure_connected()
-        for symbol in SYMBOL_ALIASES.get("XAUUSD", ["XAUUSD"]):
-            try:
-                info = await asyncio.to_thread(conn.root.symbol_info, symbol)
-                if info is not None:
-                    # Symbol exists — select it in Market Watch
+        for _attempt in range(2):
+            for symbol in SYMBOL_ALIASES.get("XAUUSD", ["XAUUSD"]):
+                try:
+                    # Select symbol in Market Watch first (makes it visible)
                     await asyncio.to_thread(conn.root.symbol_select, symbol, True)
-                    self._symbol = symbol
-                    logger.info("Resolved symbol: %s", symbol)
-                    return
-            except Exception:
-                continue
+                    await asyncio.sleep(0.1)  # Let MT5 register the symbol
+                    info = await asyncio.to_thread(conn.root.symbol_info, symbol)
+                    if info is not None:
+                        self._symbol = symbol
+                        logger.info("Resolved symbol: %s", symbol)
+                        return
+                except Exception:
+                    continue
+            if _attempt == 0:
+                await asyncio.sleep(0.5)  # Brief pause before retry
 
         # Fallback to XAUUSD even if not found (broker may add it on demand)
         self._symbol = "XAUUSD"
