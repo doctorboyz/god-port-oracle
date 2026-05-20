@@ -73,6 +73,7 @@ def _netref_to_dict(netref_dict, columns: list[str] | None = None) -> dict:
 
     RPyC blocks .keys() and .get() on netref dicts. Only bracket access works.
     If columns are known, extract them directly. Otherwise try common access patterns.
+    Falls back to attribute access for namedtuple-like netrefs that don't support __getitem__.
     """
     if netref_dict is None:
         return {}
@@ -82,13 +83,27 @@ def _netref_to_dict(netref_dict, columns: list[str] | None = None) -> dict:
             try:
                 result[k] = netref_dict[k]
             except (KeyError, Exception):
-                pass
+                # Bracket access failed — try attribute access (netref may wrap a namedtuple)
+                try:
+                    result[k] = getattr(netref_dict, k, None)
+                except Exception:
+                    pass
+        # If all extractions failed, log the netref type for debugging
+        if not result:
+            logger.warning(
+                "_netref_to_dict: empty result — netref type=%s, dir=%s",
+                type(netref_dict).__name__,
+                [a for a in dir(netref_dict) if not a.startswith("_")][:10],
+            )
         return result
     # No known columns — try dict() conversion
     try:
         return dict(netref_dict)
     except Exception:
-        return {}
+        try:
+            return {a: getattr(netref_dict, a) for a in dir(netref_dict) if not a.startswith("_")}
+        except Exception:
+            return {}
 
 
 def _netref_to_list(netref_list, columns: list[str] | None = None) -> list:
@@ -288,7 +303,12 @@ class MT5Bridge:
                 row = {}
                 for k in CANDLE_COLUMNS:
                     try:
-                        row[k] = item[k]
+                        v = item[k]
+                        # Force plain Python types — netrefs become stale after disconnect
+                        if k == "time":
+                            row[k] = int(v)
+                        else:
+                            row[k] = float(v)
                     except (KeyError, Exception):
                         pass
                 data.append(row)
@@ -378,8 +398,8 @@ class MT5Bridge:
                 0,                     # position (0 = new order)
             )
             result = _netref_to_dict(result_netref, columns=["retcode", "order", "price", "volume", "comment"])
-            logger.debug(
-                "order_send result: type=%s, keys=%s, retcode=%s",
+            logger.info(
+                "order_send raw: netref_type=%s, converted_keys=%s, retcode=%s",
                 type(result_netref).__name__,
                 list(result.keys()) if result else "None",
                 result.get("retcode") if result else "N/A",
@@ -577,6 +597,13 @@ class MT5Bridge:
 
         Returns dict with keys: success, ticket, price, volume, error.
         """
+        # Sanitize: convert numpy types to plain Python — rpyc can't serialize np.float64
+        lots = float(lots)
+        if stop_loss is not None:
+            stop_loss = float(stop_loss)
+        if take_profit is not None:
+            take_profit = float(take_profit)
+
         async def _do():
             if not await self.connect():
                 return {"success": False, "error": "bridge connection failed"}
@@ -595,6 +622,36 @@ class MT5Bridge:
         except Exception as e:
             logger.error("send_order_sync error: %s", e)
             return {"success": False, "error": str(e)}
+
+    def get_spread_sync(self, symbol: str = "XAUUSD") -> Optional[float]:
+        """Connect, get spread from bid/ask, and disconnect in one call."""
+        async def _do():
+            if not await self.connect():
+                return None
+            try:
+                conn = self._ensure_connected()
+                resolved = self._resolve_symbol_name(symbol)
+                tick_netref = await asyncio.to_thread(
+                    conn.root.symbol_info_tick, resolved,
+                )
+                tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
+                bid = tick.get("bid", 0)
+                ask = tick.get("ask", 0)
+                if bid > 0 and ask > 0:
+                    point = 0.01
+                    try:
+                        info = await self.get_symbol_info(symbol)
+                        if info:
+                            point = info.get("point", 0.01)
+                    except Exception:
+                        pass
+                    return round((ask - bid) / point, 0)
+            except Exception as e:
+                logger.error("Error fetching spread for %s: %s", resolved, e)
+            finally:
+                await self.disconnect()
+            return None
+        return asyncio.run(_do())
 
 
 class PersistentMT5Bridge(MT5Bridge):

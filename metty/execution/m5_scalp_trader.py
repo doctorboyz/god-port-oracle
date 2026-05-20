@@ -35,6 +35,7 @@ from broky.signals.m5_scalp_generator import (
 from metty.bridge.client import MT5Bridge
 from metty.core.db import (
     close_live_trade,
+    get_latest_signal_id,
     get_open_trades,
     init_db,
     insert_live_trade,
@@ -171,18 +172,12 @@ class M5ScalpTrader:
         }
         return account_configs.get(self.account, account_configs["A"])
 
-    def _fetch_candles(self, bridge: MT5Bridge = None) -> Optional[dict[str, pd.DataFrame]]:
-        """Fetch M5 candles from MT5Bridge. Reuses bridge if provided."""
+    def _fetch_candles(self, bridge: MT5Bridge) -> Optional[dict[str, pd.DataFrame]]:
+        """Fetch M5 candles from MT5 bridge using an already-connected bridge."""
         try:
             symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
             symbol = symbol_map.get(self.account, "XAUUSD")
-
-            if bridge:
-                m5 = bridge.fetch_candles_sync(symbol, "M5", 500)
-            else:
-                config = self._get_account_config()
-                bridge = MT5Bridge(config)
-                m5 = bridge.fetch_candles_sync(symbol, "M5", 500)
+            m5 = bridge.fetch_candles_sync(symbol, "M5", 500)
 
             if m5 is not None and not m5.empty:
                 result = {"M5": m5}
@@ -236,20 +231,14 @@ class M5ScalpTrader:
                 pass
         return None
 
-    def _get_spread(self, bridge: MT5Bridge = None) -> Optional[float]:
-        """Get current spread from real-time bid/ask. Reuses bridge if provided."""
+    def _get_spread(self, bridge: MT5Bridge) -> Optional[float]:
+        """Get current spread from real-time bid/ask using already-connected bridge."""
         try:
             symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
             symbol = symbol_map.get(self.account, "XAUUSD")
-
-            if bridge:
-                return bridge.get_spread_sync(symbol)
-            else:
-                config = self._get_account_config()
-                bridge = MT5Bridge(config)
-                return bridge.get_spread_sync(symbol)
+            return bridge.get_spread_sync(symbol)
         except Exception as e:
-            logger.debug("[M5Scalp:%s] Spread fetch failed: %s", self.account, e)
+            logger.warning("[M5Scalp:%s] Spread fetch failed: %s", self.account, e)
         return None
 
     def _classify_session(self, timestamp: datetime) -> str:
@@ -348,9 +337,17 @@ class M5ScalpTrader:
         """Run a single M5 scalping cycle."""
         self._cycle_count += 1
         logger.info("[M5Scalp:%s] Cycle #%d starting", self.account, self._cycle_count)
+        try:
+            return self._run_once_connected()
+        except Exception:
+            import traceback
+            logger.error("[M5Scalp:%s] Traceback:\n%s", self.account, traceback.format_exc())
+            raise
 
-        # Create one bridge per cycle (reuse across fetch, spread, and execution)
-        bridge = MT5Bridge(self._get_account_config())
+    def _run_once_connected(self) -> dict:
+        """Core M5 scalp logic — one bridge per cycle, reused for all calls."""
+        config = self._get_account_config()
+        bridge = MT5Bridge(config)
 
         # 1. Fetch candles
         candles = self._fetch_candles(bridge)
@@ -371,8 +368,8 @@ class M5ScalpTrader:
             if age_seconds > 1800:  # 30 minutes
                 return {"action": "skip", "reason": f"stale data ({age_seconds:.0f}s old)"}
 
-        # 2. Check for existing position (learning mode: skip, allow multiple positions)
-        if self._check_existing_m5_scalp_position() and not self.learning_mode:
+        # 2. Check for existing M5 scalp position (always enforced — prevents churn)
+        if self._check_existing_m5_scalp_position():
             return {"action": "hold", "reason": "existing M5 scalp position open"}
 
         # 2b. Position limit check (always enforced, even in learning mode)
@@ -455,17 +452,17 @@ class M5ScalpTrader:
             return {"action": "hold", "reason": "ATR not available or zero"}
 
         # 10. Calculate position size and SL
-        sl_distance = latest_atr * self.risk.atr_multiplier
+        sl_distance = float(latest_atr * self.risk.atr_multiplier)
         if signal.signal_type == SignalType.BUY:
-            stop_loss = signal.price - sl_distance
-            take_profit = signal.price + sl_distance * self.risk.risk_reward_ratio
+            stop_loss = float(signal.price - sl_distance)
+            take_profit = float(signal.price + sl_distance * self.risk.risk_reward_ratio)
         else:
-            stop_loss = signal.price + sl_distance
-            take_profit = signal.price - sl_distance * self.risk.risk_reward_ratio
+            stop_loss = float(signal.price + sl_distance)
+            take_profit = float(signal.price - sl_distance * self.risk.risk_reward_ratio)
 
         # Position sizing
         balance = self._get_balance()
-        lot_size = self._calculate_lots(balance, signal.price, stop_loss, latest_atr)
+        lot_size = float(self._calculate_lots(balance, signal.price, stop_loss, latest_atr))
 
         # 4-level TP calculation
         tp_levels = self._compute_tp_levels(signal.price, latest_atr, signal.signal_type.value)
@@ -509,11 +506,12 @@ class M5ScalpTrader:
             }
 
         # Live execution
+        ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
         log_trade(logger, "EXECUTING", account=self.account, direction=direction,
                  price=signal.price, lots=lot_size, sl=stop_loss, tp=take_profit,
                  confidence=signal.confidence)
         try:
-            # Retry order up to 3 times (bridge may need reconnect)
+            # Retry order up to 3 times using same bridge
             result = None
             for attempt in range(1, 4):
                 result = bridge.send_order_sync("XAUUSD", direction, lot_size, stop_loss, take_profit)
@@ -550,6 +548,7 @@ class M5ScalpTrader:
                 ticket=ticket,
                 trading_mode=TradingMode.M5_SCALP.value,
                 strategy_id=self.strategy_id,
+                signal_id=ref_signal_id,
                 db_path=self.db_path,
             )
 
@@ -561,7 +560,7 @@ class M5ScalpTrader:
                     self.event_bus.publish(Event(
                         type=EventType.TRADE_OPENED,
                         data={
-                            "direction": direction, "symbol": symbol, "price": signal.price,
+                            "direction": direction, "symbol": "XAUUSD", "price": signal.price,
                             "sl": stop_loss, "tp": take_profit, "lots": lot_size,
                             "confidence": signal.confidence,
                             "regime": signal.regime or "unknown", "reason": signal.reason,
