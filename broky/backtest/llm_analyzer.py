@@ -144,7 +144,7 @@ class LLMAnalyzer:
         timeout: int = 60,
     ):
         self.base_url = (base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
-        self.model = model or os.environ.get("OLLAMA_MODEL", "llama3")
+        self.model = model or os.environ.get("OLLAMA_MODEL", "glm-5.1:cloud")
         self.timeout = timeout
 
     def analyze_backtest(
@@ -256,7 +256,7 @@ def main():
     parser.add_argument("--initial-equity", type=float, default=1000.0, help="Starting equity")
     parser.add_argument("--warmup", type=int, default=50, help="Warmup candles")
     parser.add_argument("--analyze", action="store_true", help="Send results to LLM for analysis")
-    parser.add_argument("--model", default=None, help="Ollama model name (default: llama3)")
+    parser.add_argument("--model", default=None, help="Ollama model name (default: glm-5.1:cloud)")
     args = parser.parse_args()
 
     from broky.data.loader import load_timeframe

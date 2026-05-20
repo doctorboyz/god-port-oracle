@@ -35,6 +35,7 @@ from broky.risk.sizing import SIZING_METHODS, fixed_fraction_size, kelly_size, r
 from broky.signals.generator import generate_signal
 from metty.core.db import (
     close_live_trade,
+    get_latest_signal_id,
     get_open_trades,
     init_db,
     insert_live_trade,
@@ -98,11 +99,36 @@ class LiveTrader:
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
         self.learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
-        self.max_positions = int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))
+        per_account_limits = {
+            "A": int(os.environ.get("MAX_POSITIONS_A", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "B": int(os.environ.get("MAX_POSITIONS_B", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "C": int(os.environ.get("MAX_POSITIONS_C", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+        }
+        self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
         self.account_id = ACCOUNT_IDS.get(self.account, 3)
         self.risk = risk_config or RiskConfig(
             risk_per_trade=ACCOUNT_RISK.get(self.account, 0.02),
         )
+        # Per-account strategy overrides via env vars (for testing different configs)
+        per_account_atr = {
+            "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "2.0"))),
+            "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "2.0"))),
+            "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "2.0"))),
+        }
+        per_account_rr = {
+            "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.5"))),
+            "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.5"))),
+            "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.5"))),
+        }
+        per_account_conf = {
+            "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.45"))),
+            "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.45"))),
+            "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.45"))),
+        }
+        if not risk_config:
+            self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
+            self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
+            self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:
@@ -518,7 +544,7 @@ class LiveTrader:
         )
         d1_trend = self._determine_d1_trend(candles.get("D1"))
 
-        # 4. Risk checks (learning mode: bypass all blockers for data collection)
+        # 4. Risk checks
         if signal.signal_type == SignalType.HOLD:
             return {
                 "action": "hold",
@@ -536,6 +562,15 @@ class LiveTrader:
                 "signal": signal,
             }
 
+        # 4c. Existing position check (always enforced — prevents churn)
+        if self._check_existing_position():
+            return {
+                "action": "hold",
+                "reason": "position already open",
+                "signal": signal,
+            }
+
+        # 4d. Learning mode: bypass remaining risk checks for data collection
         if not self.learning_mode:
             can_trade, cb_reason = self.circuit_breaker.can_open_trade()
             if not can_trade:
@@ -570,13 +605,6 @@ class LiveTrader:
                     "signal": signal,
                 }
 
-            if self._check_existing_position():
-                return {
-                    "action": "hold",
-                    "reason": "position already open",
-                    "signal": signal,
-                }
-
         # 5. Calculate SL/TP/lots
         try:
             atr_series = calculate_atr(m5["high"], m5["low"], m5["close"], period=14)
@@ -603,6 +631,9 @@ class LiveTrader:
             else str(m5.index[-1])
         )
 
+        # Link trade to latest collector snapshot for ML training
+        ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
+
         if self.dry_run:
             trade_id = insert_live_trade(
                 account_id=self.account_id,
@@ -620,6 +651,7 @@ class LiveTrader:
                 ticket=None,
                 trading_mode=TradingMode.SWING.value,
                 strategy_id=self.strategy_id,
+                signal_id=ref_signal_id,
                 db_path=self.db_path,
             )
             log_trade(logger, "OPENED", account=self.account, direction=direction,
@@ -693,6 +725,7 @@ class LiveTrader:
                 ticket=ticket,
                 trading_mode=TradingMode.SWING.value,
                 strategy_id=self.strategy_id,
+                signal_id=ref_signal_id,
                 db_path=self.db_path,
             )
 

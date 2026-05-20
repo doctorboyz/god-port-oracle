@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir \
     pandas>=2.2.0 numpy>=1.26.0 \
     aiosqlite>=0.20.0 pydantic>=2.7.0 pyyaml>=6.0 \
     click>=8.1.0 "rpyc>=5.2.0,<6.0.0" matplotlib>=3.8.0 tabulate>=0.9.0 \
-    python-dotenv>=1.0.0 finnhub-python>=2.4.0 requests>=2.31.0
+    python-dotenv>=1.0.0 finnhub-python>=2.4.0 requests>=2.31.0 \
+    scikit-learn>=1.3.0
 
 COPY . .
 

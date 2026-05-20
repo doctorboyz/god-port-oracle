@@ -269,6 +269,7 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
     migrations = [
         ("live_trades", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("live_trades", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
+        ("live_trades", "signal_id", "INTEGER"),
         ("signals", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("signals", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
         ("feature_snapshots", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
@@ -567,6 +568,7 @@ def insert_live_trade(
     symbol: str = "XAUUSD",
     trading_mode: str = "swing",
     strategy_id: str = "",
+    signal_id: int | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a live trade record and return its ID."""
@@ -576,14 +578,37 @@ def insert_live_trade(
             """INSERT INTO live_trades
                (account_id, timestamp, direction, symbol, entry_price, stop_loss,
                 take_profit, lot_size, confidence, regime, session, d1_trend,
-                reason, trading_mode, strategy_id, ticket, is_open)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                reason, trading_mode, strategy_id, signal_id, ticket, is_open)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
             (account_id, timestamp, direction, symbol, entry_price, stop_loss,
              take_profit, lot_size, confidence, regime, session, d1_trend,
-             reason, trading_mode, strategy_id, ticket),
+             reason, trading_mode, strategy_id, signal_id, ticket),
         )
         conn.commit()
         return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_latest_signal_id(
+    account_id: int,
+    db_path: Optional[Path] = None,
+) -> int | None:
+    """Get the most recent signal_id from feature_snapshots for this account.
+
+    Feature snapshots are linked to signals. We join through signals to find
+    collector snapshots that match the account. Returns the most recent signal_id.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT fs.signal_id FROM feature_snapshots fs
+               JOIN signals s ON fs.signal_id = s.id
+               WHERE s.account_id = ?
+               ORDER BY fs.timestamp DESC LIMIT 1""",
+            (account_id,),
+        ).fetchone()
+        return row[0] if row else None
     finally:
         conn.close()
 
@@ -646,5 +671,46 @@ def get_closed_trades(
         )
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def query_trade_outcomes(
+    min_confidence: float = 0.0,
+    exclude_phantom: bool = True,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Query feature snapshots joined with live trade outcomes for ML training.
+
+    Returns one row per trade with all features + PnL outcome.
+    """
+    conn = get_connection(db_path)
+    try:
+        query = """
+            SELECT
+                fs.*,
+                lt.pnl, lt.pnl_pct, lt.exit_reason, lt.direction,
+                lt.confidence as signal_confidence, lt.regime, lt.account_id
+            FROM feature_snapshots fs
+            JOIN signals s ON fs.signal_id = s.id
+            JOIN live_trades lt ON lt.signal_id = s.id
+            WHERE lt.is_open = 0
+              AND lt.pnl IS NOT NULL
+        """
+        params: list = []
+
+        if exclude_phantom:
+            query += " AND lt.exit_reason != 'phantom'"
+
+        if min_confidence > 0:
+            query += " AND lt.confidence >= ?"
+            params.append(min_confidence)
+
+        query += " ORDER BY fs.timestamp ASC"
+
+        cursor = conn.execute(query, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return rows
     finally:
         conn.close()
