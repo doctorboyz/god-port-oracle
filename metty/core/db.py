@@ -238,6 +238,34 @@ CREATE TABLE IF NOT EXISTS ml_experiments (
     total_trades INTEGER,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Trade outcomes for ML training (linked trade + signal + features)
+CREATE TABLE IF NOT EXISTS trade_outcomes (
+    id INTEGER PRIMARY KEY,
+    trade_id INTEGER NOT NULL UNIQUE,
+    signal_id INTEGER,
+    snapshot_id INTEGER,
+    account_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL DEFAULT 'XAUUSD',
+    direction TEXT NOT NULL,
+    trading_mode TEXT NOT NULL DEFAULT 'swing',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    entry_price REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    profit REAL NOT NULL,
+    profit_pct REAL NOT NULL,
+    outcome_label TEXT NOT NULL CHECK(outcome_label IN ('WIN', 'LOSS', 'BREAKEVEN')),
+    holding_minutes INTEGER,
+    exit_reason TEXT,
+    features_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (trade_id) REFERENCES live_trades(id),
+    FOREIGN KEY (signal_id) REFERENCES signals(id),
+    FOREIGN KEY (snapshot_id) REFERENCES feature_snapshots(id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_outcomes_label ON trade_outcomes(outcome_label);
+CREATE INDEX IF NOT EXISTS idx_trade_outcomes_mode ON trade_outcomes(trading_mode, strategy_id);
 """
 
 
@@ -482,6 +510,185 @@ def query_snapshots_for_training(
         conn.close()
 
 
+def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
+    """Backfill trade_outcomes from live_trades + signals + feature_snapshots.
+
+    Links trades to signals by signal_id when available, otherwise by
+    timestamp proximity (±60s, same account). Extracts feature snapshots
+    for each linked signal.
+
+    Returns:
+        Dict with stats: {linked, skipped, total, outcomes: {WIN, LOSS, BREAKEVEN}}
+    """
+    import json
+    from datetime import datetime, timedelta
+
+    conn = get_connection(db_path)
+    stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
+
+    try:
+        # Get all closed trades with results
+        trades = conn.execute(
+            """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
+                      strategy_id, entry_price, exit_price, pnl, pnl_pct,
+                      exit_reason, signal_id, exit_time
+               FROM live_trades
+               WHERE is_open = 0 AND pnl IS NOT NULL AND exit_price IS NOT NULL
+               ORDER BY id"""
+        ).fetchall()
+
+        stats["total"] = len(trades)
+
+        for t in trades:
+            t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
+            entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
+            signal_id, exit_time = t[12], t[13]
+
+            # Skip if already in trade_outcomes
+            existing = conn.execute(
+                "SELECT id FROM trade_outcomes WHERE trade_id = ?", (t_id,)
+            ).fetchone()
+            if existing:
+                stats["skipped"] += 1
+                continue
+
+            # Determine signal_id if not directly linked
+            snapshot_id = None
+            resolved_signal_id = signal_id
+
+            if not resolved_signal_id:
+                # Match by timestamp proximity (closest signal within ±60s)
+                try:
+                    ts_dt = datetime.fromisoformat(ts)
+                    ts_lower = (ts_dt - timedelta(seconds=60)).isoformat()
+                    ts_upper = (ts_dt + timedelta(seconds=60)).isoformat()
+                except (ValueError, TypeError):
+                    stats["skipped"] += 1
+                    continue
+
+                match = conn.execute(
+                    """SELECT s.id, fs.id
+                       FROM signals s
+                       LEFT JOIN feature_snapshots fs ON fs.signal_id = s.id
+                       WHERE s.account_id = ?
+                         AND s.timestamp BETWEEN ? AND ?
+                         AND s.trading_mode = ?
+                       ORDER BY ABS(
+                           (julianday(s.timestamp) - julianday(?)) * 86400
+                       ) ASC
+                       LIMIT 1""",
+                    (acc_id, ts_lower, ts_upper, mode, ts),
+                ).fetchone()
+
+                if match:
+                    resolved_signal_id = match[0]
+                    snapshot_id = match[1]
+            else:
+                # Directly linked — find snapshot
+                snap = conn.execute(
+                    "SELECT id FROM feature_snapshots WHERE signal_id = ? LIMIT 1",
+                    (signal_id,),
+                ).fetchone()
+                if snap:
+                    snapshot_id = snap[0]
+
+            # Determine outcome label
+            if pnl > 0:
+                outcome = "WIN"
+            elif pnl < 0:
+                outcome = "LOSS"
+            else:
+                outcome = "BREAKEVEN"
+
+            # Calculate holding minutes
+            holding_minutes = None
+            if exit_time:
+                try:
+                    entry_dt = datetime.fromisoformat(ts)
+                    exit_dt = datetime.fromisoformat(exit_time)
+                    holding_minutes = int((exit_dt - entry_dt).total_seconds() / 60)
+                except (ValueError, TypeError):
+                    pass
+
+            # Get features JSON from snapshot
+            features_json = None
+            if snapshot_id:
+                snap_row = conn.execute(
+                    "SELECT * FROM feature_snapshots WHERE id = ?", (snapshot_id,)
+                ).fetchone()
+                if snap_row:
+                    columns = [desc[0] for desc in conn.execute(
+                        "SELECT * FROM feature_snapshots LIMIT 0"
+                    ).description]
+                    snap_dict = dict(zip(columns, snap_row))
+                    # Remove metadata keys
+                    for key in ["id", "signal_id", "timestamp", "timeframe", "session",
+                                "d1_trend", "trading_mode", "strategy_id"]:
+                        snap_dict.pop(key, None)
+                    features_json = json.dumps(snap_dict)
+
+            conn.execute(
+                """INSERT INTO trade_outcomes
+                   (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                    trading_mode, strategy_id, entry_price, exit_price, profit,
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
+                 mode, strategy, entry_price, exit_price, pnl, pnl_pct,
+                 outcome, holding_minutes, exit_reason, features_json),
+            )
+            stats["linked"] += 1
+            stats["outcomes"][outcome] += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return stats
+
+
+def query_trade_outcomes_for_training(
+    min_confidence: float = 0.0,
+    exclude_breakeven: bool = True,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Query trade_outcomes for ML training — returns rows with features_json parsed.
+
+    Each row has: trade_id, direction, trading_mode, outcome_label, profit,
+    profit_pct, features (dict), and all feature columns from features_json.
+    """
+    import json
+
+    conn = get_connection(db_path)
+    try:
+        query = """
+            SELECT * FROM trade_outcomes
+            WHERE features_json IS NOT NULL
+        """
+        params: list = []
+
+        if exclude_breakeven:
+            query += " AND outcome_label != 'BREAKEVEN'"
+
+        if min_confidence > 0:
+            query += " AND profit_pct >= ?"
+            params.append(min_confidence)
+
+        query += " ORDER BY created_at ASC"
+
+        cursor = conn.execute(query, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            features_str = d.pop("features_json", "{}")
+            d["features"] = json.loads(features_str) if features_str else {}
+            rows.append(d)
+        return rows
+    finally:
+        conn.close()
+
+
 def insert_ml_experiment(
     name: str,
     config: str,
@@ -711,6 +918,185 @@ def query_trade_outcomes(
         cursor = conn.execute(query, params)
         columns = [desc[0] for desc in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return rows
+    finally:
+        conn.close()
+
+
+def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
+    """Backfill trade_outcomes from live_trades + signals + feature_snapshots.
+
+    Links trades to signals by signal_id when available, otherwise by
+    timestamp proximity (±60s, same account). Extracts feature snapshots
+    for each linked signal.
+
+    Returns:
+        Dict with stats: {linked, skipped, total, outcomes: {WIN, LOSS, BREAKEVEN}}
+    """
+    import json
+    from datetime import datetime, timedelta
+
+    conn = get_connection(db_path)
+    stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
+
+    try:
+        # Get all closed trades with results
+        trades = conn.execute(
+            """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
+                      strategy_id, entry_price, exit_price, pnl, pnl_pct,
+                      exit_reason, signal_id, exit_time
+               FROM live_trades
+               WHERE is_open = 0 AND pnl IS NOT NULL AND exit_price IS NOT NULL
+               ORDER BY id"""
+        ).fetchall()
+
+        stats["total"] = len(trades)
+
+        for t in trades:
+            t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
+            entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
+            signal_id, exit_time = t[12], t[13]
+
+            # Skip if already in trade_outcomes
+            existing = conn.execute(
+                "SELECT id FROM trade_outcomes WHERE trade_id = ?", (t_id,)
+            ).fetchone()
+            if existing:
+                stats["skipped"] += 1
+                continue
+
+            # Determine signal_id if not directly linked
+            snapshot_id = None
+            resolved_signal_id = signal_id
+
+            if not resolved_signal_id:
+                # Match by timestamp proximity (closest signal within ±60s)
+                try:
+                    ts_dt = datetime.fromisoformat(ts)
+                    ts_lower = (ts_dt - timedelta(seconds=60)).isoformat()
+                    ts_upper = (ts_dt + timedelta(seconds=60)).isoformat()
+                except (ValueError, TypeError):
+                    stats["skipped"] += 1
+                    continue
+
+                match = conn.execute(
+                    """SELECT s.id, fs.id
+                       FROM signals s
+                       LEFT JOIN feature_snapshots fs ON fs.signal_id = s.id
+                       WHERE s.account_id = ?
+                         AND s.timestamp BETWEEN ? AND ?
+                         AND s.trading_mode = ?
+                       ORDER BY ABS(
+                           (julianday(s.timestamp) - julianday(?)) * 86400
+                       ) ASC
+                       LIMIT 1""",
+                    (acc_id, ts_lower, ts_upper, mode, ts),
+                ).fetchone()
+
+                if match:
+                    resolved_signal_id = match[0]
+                    snapshot_id = match[1]
+            else:
+                # Directly linked — find snapshot
+                snap = conn.execute(
+                    "SELECT id FROM feature_snapshots WHERE signal_id = ? LIMIT 1",
+                    (signal_id,),
+                ).fetchone()
+                if snap:
+                    snapshot_id = snap[0]
+
+            # Determine outcome label
+            if pnl > 0:
+                outcome = "WIN"
+            elif pnl < 0:
+                outcome = "LOSS"
+            else:
+                outcome = "BREAKEVEN"
+
+            # Calculate holding minutes
+            holding_minutes = None
+            if exit_time:
+                try:
+                    entry_dt = datetime.fromisoformat(ts)
+                    exit_dt = datetime.fromisoformat(exit_time)
+                    holding_minutes = int((exit_dt - entry_dt).total_seconds() / 60)
+                except (ValueError, TypeError):
+                    pass
+
+            # Get features JSON from snapshot
+            features_json = None
+            if snapshot_id:
+                snap_row = conn.execute(
+                    "SELECT * FROM feature_snapshots WHERE id = ?", (snapshot_id,)
+                ).fetchone()
+                if snap_row:
+                    columns = [desc[0] for desc in conn.execute(
+                        "SELECT * FROM feature_snapshots LIMIT 0"
+                    ).description]
+                    snap_dict = dict(zip(columns, snap_row))
+                    # Remove metadata keys
+                    for key in ["id", "signal_id", "timestamp", "timeframe", "session",
+                                "d1_trend", "trading_mode", "strategy_id"]:
+                        snap_dict.pop(key, None)
+                    features_json = json.dumps(snap_dict)
+
+            conn.execute(
+                """INSERT INTO trade_outcomes
+                   (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                    trading_mode, strategy_id, entry_price, exit_price, profit,
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
+                 mode, strategy, entry_price, exit_price, pnl, pnl_pct,
+                 outcome, holding_minutes, exit_reason, features_json),
+            )
+            stats["linked"] += 1
+            stats["outcomes"][outcome] += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return stats
+
+
+def query_trade_outcomes_for_training(
+    min_confidence: float = 0.0,
+    exclude_breakeven: bool = True,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Query trade_outcomes for ML training — returns rows with features_json parsed.
+
+    Each row has: trade_id, direction, trading_mode, outcome_label, profit,
+    profit_pct, features (dict), and all feature columns from features_json.
+    """
+    import json
+
+    conn = get_connection(db_path)
+    try:
+        query = """
+            SELECT * FROM trade_outcomes
+            WHERE features_json IS NOT NULL
+        """
+        params: list = []
+
+        if exclude_breakeven:
+            query += " AND outcome_label != 'BREAKEVEN'"
+
+        if min_confidence > 0:
+            query += " AND profit_pct >= ?"
+            params.append(min_confidence)
+
+        query += " ORDER BY created_at ASC"
+
+        cursor = conn.execute(query, params)
+        columns = [desc[0] for desc in cursor.description]
+        rows = []
+        for row in cursor.fetchall():
+            d = dict(zip(columns, row))
+            features_str = d.pop("features_json", "{}")
+            d["features"] = json.loads(features_str) if features_str else {}
+            rows.append(d)
         return rows
     finally:
         conn.close()
