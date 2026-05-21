@@ -176,19 +176,20 @@ class TradeOutcomeTrainer:
 
         # Expand features_json into columns
         features_df = pd.json_normalize(df["features_json"].apply(json.loads))
-        # Add metadata columns from trade_outcomes
-        meta_cols = ["trade_id", "direction", "trading_mode", "strategy_id",
-                      "outcome_label", "profit", "profit_pct", "exit_reason",
-                      "confidence", "regime"]
-        for col in meta_cols:
-            if col in df.columns:
-                features_df[col] = df[col].values
 
-        # Add label
-        features_df["pnl"] = df["profit"].values
-        features_df["pnl_pct"] = df["profit_pct"].values
+        # Transfer metadata columns
+        for col in ["trade_id", "direction", "trading_mode", "strategy_id",
+                     "outcome_label", "profit", "profit_pct", "exit_reason"]:
+            if col in df.columns:
+                features_df[col] = df[col].tolist()
+
+        # Add derived columns expected by prepare_features
+        features_df["pnl"] = df["profit"].tolist()
+        features_df["pnl_pct"] = df["profit_pct"].tolist()
         features_df["is_open"] = 0
-        features_df["account_id"] = df["account_id"].values
+        features_df["account_id"] = df["account_id"].tolist()
+        features_df["confidence"] = df["confidence"].tolist()
+        features_df["regime"] = df["regime"].tolist()
 
         logger.info("Loaded %d trade-outcome rows from trade_outcomes table", len(features_df))
         return features_df
