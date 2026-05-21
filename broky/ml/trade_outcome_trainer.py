@@ -51,6 +51,20 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
 # Categorical features that need encoding
 CATEGORICAL_COLS = ["session", "d1_trend", "price_vs_cloud"]
 
+# Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
+# BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow
+BUY_TOP_FEATURES = [
+    "dema_21", "atr", "ema_200", "ichimoku_senkou_b", "boll_bw",
+    "fear_greed_value", "atr_to_price", "ichimoku_senkou_a", "sma_10",
+    "ema_9_21_diff", "macd_hist", "ema_21", "adx", "ad_line_slope", "sma_20",
+]
+SELL_TOP_FEATURES = [
+    "dema_21", "session_strength", "price_vs_cloud", "sma_10",
+    "atr_to_price", "ema_200", "plus_di", "atr", "macd_hist",
+    "fear_greed_value", "minus_di", "ema_50", "sma_20", "mfi",
+    "tick_volume_ratio",
+]
+
 # All features used for training
 ALL_FEATURE_COLS = EXTENDED_FEATURES + CATEGORICAL_COLS
 
@@ -93,9 +107,14 @@ class TradeOutcomeConfig:
     # Exclude low-confidence trades (noise)
     exclude_low_confidence: bool = True
 
-    def get_feature_cols(self) -> list[str]:
+    def get_feature_cols(self, direction: Optional[str] = None) -> list[str]:
         if self.feature_set == "consensus":
             return CONSENSUS_FEATURES + CATEGORICAL_COLS
+        elif self.feature_set == "direction_specific" and direction:
+            if direction.upper() == "BUY":
+                return list(BUY_TOP_FEATURES)
+            else:
+                return list(SELL_TOP_FEATURES)
         elif self.feature_set == "extended":
             return ALL_FEATURE_COLS
         else:
@@ -366,7 +385,7 @@ class TradeOutcomeTrainer:
                 result = self.train_single(X_sub, y_sub, f"regime_{regime}")
                 results.append(result)
 
-        # 3. Direction-specific models
+        # 3. Direction-specific models (with direction-specific features)
         if self.config.direction_specific and "direction" in df.columns:
             for direction in df["direction"].unique():
                 mask = df["direction"] == direction
@@ -375,11 +394,17 @@ class TradeOutcomeTrainer:
                     continue
                 X_sub = X[mask].reset_index(drop=True)
                 y_sub = y[mask].reset_index(drop=True)
-                logger.info("Training direction=%s model on %d samples...", direction, len(X_sub))
+                # Filter to direction-specific features
+                dir_cols = self.config.get_feature_cols(direction=direction)
+                dir_cols_avail = [c for c in dir_cols if c in X_sub.columns]
+                if dir_cols_avail:
+                    X_sub = X_sub[dir_cols_avail]
+                logger.info("Training direction=%s model on %d samples, %d features...",
+                            direction, len(X_sub), len(X_sub.columns))
                 result = self.train_single(X_sub, y_sub, f"direction_{direction}")
                 results.append(result)
 
-        # 4. Regime x Direction models
+        # 4. Regime x Direction models (with direction-specific features)
         if self.config.regime_specific and self.config.direction_specific:
             if "regime" in df.columns and "direction" in df.columns:
                 for regime in df["regime"].unique():
@@ -389,8 +414,13 @@ class TradeOutcomeTrainer:
                             continue
                         X_sub = X[mask].reset_index(drop=True)
                         y_sub = y[mask].reset_index(drop=True)
-                        logger.info("Training %s_%s model on %d samples...",
-                                    regime, direction, len(X_sub))
+                        # Filter to direction-specific features
+                        dir_cols = self.config.get_feature_cols(direction=direction)
+                        dir_cols_avail = [c for c in dir_cols if c in X_sub.columns]
+                        if dir_cols_avail:
+                            X_sub = X_sub[dir_cols_avail]
+                        logger.info("Training %s_%s model on %d samples, %d features...",
+                                    regime, direction, len(X_sub), len(X_sub.columns))
                         result = self.train_single(
                             X_sub, y_sub, f"{regime}_{direction}",
                         )
@@ -473,7 +503,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train trade outcome models")
     parser.add_argument("--experiment", default="trade_outcome_v1")
-    parser.add_argument("--feature-set", default="extended", choices=["consensus", "extended", "all"])
+    parser.add_argument("--feature-set", default="extended", choices=["consensus", "extended", "all", "direction_specific"])
     parser.add_argument("--min-confidence", type=float, default=0.45)
     parser.add_argument("--min-samples", type=int, default=100)
     parser.add_argument("--model-type", default="gb", choices=["rf", "gb", "xgb"])

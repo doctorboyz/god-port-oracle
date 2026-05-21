@@ -36,7 +36,7 @@ class TradeOutcomePredictor:
 
     def __init__(
         self,
-        model_dir: str = "data/models/trade_outcome_v1",
+        model_dir: str = "data/models/trade_outcome_v2",
         loss_threshold: float = DEFAULT_LOSS_THRESHOLD,
     ):
         self.model_dir = Path(model_dir)
