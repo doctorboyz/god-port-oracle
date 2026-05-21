@@ -154,21 +154,32 @@ class ScalpTrader:
             logger.warning("PersistentMT5Bridge not available")
             return None
 
-    def _fetch_candles(self) -> Optional[dict[str, pd.DataFrame]]:
-        """Fetch M1 candle data from persistent bridge, fall back to CSV."""
+    def _fetch_candles(self, retries: int = 2) -> Optional[dict[str, pd.DataFrame]]:
+        """Fetch M1 candle data from persistent bridge, fall back to CSV.
+
+        Retries bridge connection on transient failures before falling back.
+        """
+        from broky.data.resampler import resample_timeframe
+        from metty.execution.historical_collector import _normalize_columns
+
         bridge = self._get_bridge()
         if bridge is not None:
-            try:
-                from broky.data.resampler import resample_timeframe
-                from metty.execution.historical_collector import _normalize_columns
+            for attempt in range(retries + 1):
+                try:
+                    if not bridge.ensure_connected_sync():
+                        logger.warning(
+                            "Bridge M1 fetch: ensure_connected_sync=False (attempt %d/%d)",
+                            attempt + 1, retries + 1,
+                        )
+                        if attempt < retries:
+                            import time as _time
+                            _time.sleep(1.0 * (attempt + 1))
+                        continue
 
-                if bridge.ensure_connected_sync():
-                    # Fetch M1 candles (primary timeframe for scalping)
                     m1 = bridge.fetch_candles_persistent_sync("XAUUSD", "M1", 500)
                     if m1 is not None and not m1.empty:
                         m1 = _normalize_columns(m1)
                         candles = {"M1": m1}
-                        # Resample for higher TFs
                         for tf in ["M5", "M15", "H1"]:
                             try:
                                 candles[tf] = _normalize_columns(
@@ -178,10 +189,23 @@ class ScalpTrader:
                                 pass
                         logger.info("Fetched M1 candles from bridge: %d bars", len(m1))
                         return candles
-            except Exception as e:
-                logger.warning("Bridge M1 fetch failed: %s", e)
+                    else:
+                        logger.warning(
+                            "Bridge M1 fetch returned empty (attempt %d/%d)",
+                            attempt + 1, retries + 1,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Bridge M1 fetch failed (attempt %d/%d): %s",
+                        attempt + 1, retries + 1, e,
+                    )
+                    if attempt < retries:
+                        import time as _time
+                        _time.sleep(1.0 * (attempt + 1))
+        else:
+            logger.warning("Bridge M1 fetch: _get_bridge() returned None for account %s", self.account)
 
-        # Fallback to CSV
+        logger.info("Falling back to CSV for M1 candles (account=%s)", self.account)
         return self._fetch_candles_csv()
 
     def _fetch_candles_csv(self) -> Optional[dict[str, pd.DataFrame]]:
