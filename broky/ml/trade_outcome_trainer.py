@@ -275,6 +275,12 @@ class TradeOutcomeTrainer:
             model = RandomForestClassifier(
                 n_estimators=200, max_depth=10, random_state=42, n_jobs=-1,
             )
+        elif self.config.model_type == "xgb":
+            from xgboost import XGBClassifier
+            model = XGBClassifier(
+                n_estimators=200, max_depth=5, learning_rate=0.05,
+                random_state=42, n_jobs=-1, eval_metric="logloss",
+            )
         else:
             model = GradientBoostingClassifier(
                 n_estimators=200, max_depth=5, random_state=42,
@@ -451,7 +457,7 @@ class TradeOutcomeTrainer:
                 "win_rate": round(r.win_rate, 4),
                 "profit_factor": r.profit_factor,
                 "feature_importance": {
-                    k: round(v, 4) for k, v in list(r.feature_importance.items())[:15]
+                    k: float(round(v, 4)) for k, v in list(r.feature_importance.items())[:15]
                 },
                 "feature_cols": r.feature_cols,
             })
@@ -470,7 +476,7 @@ def main():
     parser.add_argument("--feature-set", default="extended", choices=["consensus", "extended", "all"])
     parser.add_argument("--min-confidence", type=float, default=0.45)
     parser.add_argument("--min-samples", type=int, default=100)
-    parser.add_argument("--model-type", default="gb", choices=["rf", "gb"])
+    parser.add_argument("--model-type", default="gb", choices=["rf", "gb", "xgb"])
     parser.add_argument("--regime-specific", action="store_true", default=True)
     parser.add_argument("--direction-specific", action="store_true", default=True)
     parser.add_argument("--no-regime", action="store_true")
