@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import LabelEncoder
 
 from broky.ml.features import FeatureEngineer
@@ -84,8 +84,8 @@ class TradeOutcomeConfig:
     # Test ratio
     test_ratio: float = 0.2
 
-    # Paths
-    model_dir: str = "models"
+    # Paths (relative to working dir; use "data/models" for Docker volume persistence)
+    model_dir: str = "data/models"
 
     # Exclude phantom trades (execution artifacts)
     exclude_phantom: bool = True
@@ -137,6 +137,7 @@ class TradeOutcomeTrainer:
 
     def __init__(self, config: Optional[TradeOutcomeConfig] = None):
         self.config = config or TradeOutcomeConfig()
+        self._last_engineer: Optional[FeatureEngineer] = None
 
     def load_data(self, db_path: Optional[Path] = None) -> pd.DataFrame:
         """Load trade_outcomes with features_json expanded into columns.
@@ -240,6 +241,7 @@ class TradeOutcomeTrainer:
         # Drop any columns that still aren't numeric
         X = X.select_dtypes(include=[np.number])
 
+        self._last_engineer = engineer
         return X, y, engineer, list(X.columns)
 
     def train_single(
@@ -278,13 +280,21 @@ class TradeOutcomeTrainer:
                 n_estimators=200, max_depth=5, random_state=42,
             )
 
-        # Cross-validation
-        cv = StratifiedKFold(n_splits=min(self.config.cv_folds, 5),
-                             shuffle=True, random_state=42)
-        cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
+        # Cross-validation — prefer TimeSeriesSplit to avoid look-ahead
+        n_splits = min(self.config.cv_folds, 5)
+        try:
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            cv_scores = cross_val_score(model, X_train, y_train, cv=tscv, scoring="accuracy")
+        except ValueError:
+            # Fallback to stratified if too few samples per class
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+            cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
 
         # Train on full training set
         model.fit(X_train, y_train)
+
+        # Save model to disk for live prediction
+        self._save_model(model, name)
 
         # Test evaluation
         y_pred = model.predict(X_test)
@@ -385,6 +395,15 @@ class TradeOutcomeTrainer:
 
         return results
 
+    def _save_model(self, model: object, name: str) -> None:
+        """Save trained model to disk for live prediction."""
+        import joblib
+
+        model_dir = Path(self.config.model_dir) / self.config.experiment_name
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / f"{name}_model.pkl"
+        joblib.dump(model, model_path)
+
     def _profit_factor(self, y_true: pd.Series, y_pred: np.ndarray) -> float:
         """Calculate profit factor from predictions.
 
@@ -401,13 +420,20 @@ class TradeOutcomeTrainer:
         return round(gross_profit / gross_loss, 2)
 
     def _save_results(self, results: list[ModelResult], db_path: Optional[Path] = None) -> None:
-        """Save training results to JSON file."""
+        """Save training results and feature engineer to disk."""
+        import joblib
+
         model_dir = Path(self.config.model_dir) / self.config.experiment_name
         model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save feature engineer for consistent transforms during prediction
+        engineer_path = model_dir / "feature_engineer.joblib"
+        joblib.dump(self._last_engineer, engineer_path)
 
         summary = {
             "experiment": self.config.experiment_name,
             "config": self.config.to_dict(),
+            "categorical_cols": CATEGORICAL_COLS,
             "timestamp": pd.Timestamp.now().isoformat(),
             "models": [],
         }

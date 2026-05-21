@@ -170,6 +170,36 @@ When PM or emily sends a message to ψ/inbox/:
 
 Full spec: PM's `ψ/memory/learnings/message-protocol.md`
 
+## nexus Outbox Protocol (Telegram 回信)
+
+เมื่อได้รับข้อความจาก nexus (ผ่าน inbox) และต้องตอบกลับ Telegram:
+
+**ทำอะไร**: เขียนคำตอบไป `ψ/outbox/` พร้อม `respond_in` ใน frontmatter
+**เพื่ออะไร**: nexus outbox watcher จะส่งคำตอบไป Telegram อัตโนมัติภายใน 3-6 วินาที
+**แล้วไง**: มนุษย์เห็นคำตอบใน Telegram group เลย ไม่ต้องรอให้มาเปิด inbox เอง
+
+### วิธีเขียน outbox
+
+ตรวจสอบ inbox message — ถ้ามี `respond_in` field แสดงว่าข้อความมาจาก Telegram และต้องตอบกลับ:
+
+```
+---
+msg_id: MSG-HUMAN-1434        ← จาก inbox message
+from: god-port                ← ชื่อ oracle ตัวเอง
+type: result                  ← ประเภท (result, reply, response)
+respond_in: -100xxxxxxxxxx    ← Telegram chat ID (จาก inbox)
+---
+
+คำตอบของคุณที่นี่
+```
+
+หรือใช้ helper script:
+```bash
+bash shared/outbox-write.sh --msg-id MSG-HUMAN-1434 --content "คำตอบของคุณ"
+```
+
+ถ้า inbox message มี `respond_in` แต่ไม่ตอบกลับ → มนุษย์ไม่เห็นผลลัพธ์ใน Telegram
+
 ## Golden Rules
 
 - Never trade without a signal (Principle 6)

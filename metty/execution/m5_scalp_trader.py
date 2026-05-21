@@ -136,6 +136,20 @@ class M5ScalpTrader:
         self._last_exit_time: Optional[datetime] = None
         self._cycle_count: int = 0
         self.event_bus = event_bus
+        # ML filter — only enabled if models have decent accuracy
+        self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
+        self._ml_predictor = None
+        if self._ml_enabled:
+            try:
+                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                self._ml_predictor = TradeOutcomePredictor(
+                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                )
+                logger.info("[M5Scalp:%s] ML filter enabled: %s", self.account,
+                           "models loaded" if self._ml_predictor.enabled else "no models")
+            except Exception as e:
+                logger.warning("[M5Scalp:%s] ML filter init failed: %s", self.account, e)
+                self._ml_enabled = False
 
     def _get_account_config(self):
         """Get account config for MT5Bridge (same pattern as LiveCollector)."""
@@ -444,6 +458,22 @@ class M5ScalpTrader:
                         },
                     ))
                 return {"action": "hold", "reason": f"circuit breaker: {cb_reason}"}
+
+        # 8.5. ML filter — predict trade outcome, skip if P(LOSS) too high
+        if self._ml_enabled and self._ml_predictor is not None:
+            from broky.ml.trade_outcome_predictor import compute_features_from_candles
+
+            ml_features = compute_features_from_candles(
+                candles, str(signal.signal_type.value),
+                spread=spread_for_signal,
+                d1_trend=d1_trend or "neutral",
+                session=session,
+            )
+            regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
+            skip, ml_reason = self._ml_predictor.should_skip(ml_features, regime, str(signal.signal_type.value))
+            if skip:
+                logger.info("[M5Scalp:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                return {"action": "hold", "reason": ml_reason, "signal": signal}
 
         # 9. Calculate ATR for SL and TP levels
         atr_series = calculate_atr(m5["high"], m5["low"], m5["close"], period=10)

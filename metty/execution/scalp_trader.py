@@ -103,6 +103,20 @@ class ScalpTrader:
         self._cycle_count: int = 0
         self._bridge = None  # PersistentMT5Bridge, initialized lazily
         self.event_bus = event_bus
+        # ML filter — only enabled if models have decent accuracy
+        self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
+        self._ml_predictor = None
+        if self._ml_enabled:
+            try:
+                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                self._ml_predictor = TradeOutcomePredictor(
+                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                )
+                logger.info("[Scalp:%s] ML filter enabled: %s", self.account,
+                           "models loaded" if self._ml_predictor.enabled else "no models")
+            except Exception as e:
+                logger.warning("[Scalp:%s] ML filter init failed: %s", self.account, e)
+                self._ml_enabled = False
 
     def _get_bridge(self):
         """Get or create a persistent bridge connection."""
@@ -506,6 +520,23 @@ class ScalpTrader:
                 "reason": "scalp position already open",
                 "signal": signal,
             }
+
+        # 6.5. ML filter — predict trade outcome, skip if P(LOSS) too high
+        if self._ml_enabled and self._ml_predictor is not None:
+            from broky.ml.trade_outcome_predictor import compute_features_from_candles
+
+            ml_features = compute_features_from_candles(
+                candles, str(signal.signal_type.value),
+                spread=spread if spread > 0 else 0,
+                d1_trend="neutral",
+                session=session,
+            )
+            skip, ml_reason = self._ml_predictor.should_skip(
+                ml_features, "trending", str(signal.signal_type.value),
+            )
+            if skip:
+                logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                return {"action": "hold", "reason": ml_reason, "signal": signal}
 
         # 7. Calculate SL/TP/lots using M1 ATR
         try:
