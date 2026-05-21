@@ -139,41 +139,59 @@ class TradeOutcomeTrainer:
         self.config = config or TradeOutcomeConfig()
 
     def load_data(self, db_path: Optional[Path] = None) -> pd.DataFrame:
-        """Load feature snapshots joined with live trade outcomes.
+        """Load trade_outcomes with features_json expanded into columns.
 
-        Returns DataFrame with one row per trade, features + outcome.
+        Uses the trade_outcomes table (backfilled from live_trades + signals + feature_snapshots).
+
+        Returns DataFrame with one row per trade, features + outcome label.
         """
         from metty.core.db import get_connection
 
         conn = get_connection(db_path)
 
+        # Load trade_outcomes with features
         query = """
             SELECT
-                fs.*,
-                lt.pnl, lt.pnl_pct, lt.exit_reason, lt.direction,
-                lt.confidence, lt.regime, lt.is_open, lt.account_id
-            FROM feature_snapshots fs
-            JOIN signals s ON fs.signal_id = s.id
-            JOIN live_trades lt ON lt.signal_id = s.id
-            WHERE lt.is_open = 0
-              AND lt.pnl IS NOT NULL
+                to_.*,
+                lt.confidence, lt.regime, lt.is_open, lt.account_id,
+                lt.pnl, lt.pnl_pct, lt.exit_reason, lt.direction
+            FROM trade_outcomes to_
+            JOIN live_trades lt ON lt.id = to_.trade_id
+            WHERE to_.features_json IS NOT NULL
+              AND to_.outcome_label != 'BREAKEVEN'
         """
         params: list = []
 
         if self.config.exclude_phantom:
             query += " AND lt.exit_reason != 'phantom'"
 
-        if self.config.exclude_low_confidence:
-            query += " AND lt.confidence >= ?"
-            params.append(self.config.min_confidence)
-
-        query += " ORDER BY fs.timestamp ASC"
+        query += " ORDER BY to_.created_at ASC"
 
         df = pd.read_sql(query, conn, params=params)
         conn.close()
 
-        logger.info("Loaded %d trade-outcome rows", len(df))
-        return df
+        if df.empty:
+            logger.warning("No trade_outcome rows found — run backfill_trade_outcomes() first")
+            return df
+
+        # Expand features_json into columns
+        features_df = pd.json_normalize(df["features_json"].apply(json.loads))
+        # Add metadata columns from trade_outcomes
+        meta_cols = ["trade_id", "direction", "trading_mode", "strategy_id",
+                      "outcome_label", "profit", "profit_pct", "exit_reason",
+                      "confidence", "regime"]
+        for col in meta_cols:
+            if col in df.columns:
+                features_df[col] = df[col].values
+
+        # Add label
+        features_df["pnl"] = df["profit"].values
+        features_df["pnl_pct"] = df["profit_pct"].values
+        features_df["is_open"] = 0
+        features_df["account_id"] = df["account_id"].values
+
+        logger.info("Loaded %d trade-outcome rows from trade_outcomes table", len(features_df))
+        return features_df
 
     def prepare_features(
         self, df: pd.DataFrame, feature_cols: list[str]
