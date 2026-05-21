@@ -149,12 +149,25 @@ class TradeOutcomeTrainer:
 
         conn = get_connection(db_path)
 
-        # Load trade_outcomes with features
+        # Load trade_outcomes with explicit columns (avoid duplicate cols from JOIN)
         query = """
             SELECT
-                to_.*,
-                lt.confidence, lt.regime, lt.is_open, lt.account_id,
-                lt.pnl, lt.pnl_pct, lt.exit_reason, lt.direction
+                to_.id AS outcome_id,
+                to_.trade_id,
+                to_.direction AS to_direction,
+                to_.trading_mode,
+                to_.strategy_id,
+                to_.outcome_label,
+                to_.profit,
+                to_.profit_pct,
+                to_.exit_reason,
+                to_.features_json,
+                to_.account_id,
+                lt.confidence,
+                lt.regime,
+                lt.pnl,
+                lt.pnl_pct AS lt_pnl_pct,
+                lt.direction AS lt_direction
             FROM trade_outcomes to_
             JOIN live_trades lt ON lt.id = to_.trade_id
             WHERE to_.features_json IS NOT NULL
@@ -177,19 +190,16 @@ class TradeOutcomeTrainer:
         # Expand features_json into columns
         features_df = pd.json_normalize(df["features_json"].apply(json.loads))
 
-        # Transfer metadata columns
-        for col in ["trade_id", "direction", "trading_mode", "strategy_id",
-                     "outcome_label", "profit", "profit_pct", "exit_reason"]:
-            if col in df.columns:
-                features_df[col] = df[col].tolist()
-
-        # Add derived columns expected by prepare_features
-        features_df["pnl"] = df["profit"].tolist()
-        features_df["pnl_pct"] = df["profit_pct"].tolist()
+        # Add metadata columns
+        features_df["pnl"] = df["pnl"].values
+        features_df["pnl_pct"] = df["profit_pct"].values
+        features_df["confidence"] = df["confidence"].values
+        features_df["regime"] = df["regime"].values
+        features_df["direction"] = df["lt_direction"].values
+        features_df["trading_mode"] = df["trading_mode"].values
         features_df["is_open"] = 0
-        features_df["account_id"] = df["account_id"].tolist()
-        features_df["confidence"] = df["confidence"].tolist()
-        features_df["regime"] = df["regime"].tolist()
+        features_df["account_id"] = df["account_id"].values
+        features_df["exit_reason"] = df["exit_reason"].values
 
         logger.info("Loaded %d trade-outcome rows from trade_outcomes table", len(features_df))
         return features_df
