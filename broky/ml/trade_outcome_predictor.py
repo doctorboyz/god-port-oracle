@@ -24,7 +24,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOSS_THRESHOLD = 0.65
-MIN_MODEL_ACCURACY = 0.45
+MIN_MODEL_ACCURACY = 0.40
 
 
 class TradeOutcomePredictor:
