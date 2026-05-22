@@ -459,7 +459,8 @@ class M5ScalpTrader:
                     ))
                 return {"action": "hold", "reason": f"circuit breaker: {cb_reason}"}
 
-        # 8.5. ML filter — predict trade outcome, skip if P(LOSS) too high
+        # 8.5. ML filter — risk-scale position size based on P(LOSS) prediction
+        ml_risk_multiplier = 1.0
         if self._ml_enabled and self._ml_predictor is not None:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
@@ -470,10 +471,14 @@ class M5ScalpTrader:
                 session=session,
             )
             regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
-            skip, ml_reason = self._ml_predictor.should_skip(ml_features, regime, str(signal.signal_type.value))
-            if skip:
+            ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
+                ml_features, regime, str(signal.signal_type.value),
+            )
+            if ml_risk_multiplier == 0:
                 logger.info("[M5Scalp:%s] ML filter blocked trade: %s", self.account, ml_reason)
                 return {"action": "hold", "reason": ml_reason, "signal": signal}
+            elif ml_risk_multiplier < 1.0:
+                logger.info("[M5Scalp:%s] ML risk-scaling: %s", self.account, ml_reason)
 
         # 9. Calculate ATR for SL and TP levels
         atr_series = calculate_atr(m5["high"], m5["low"], m5["close"], period=10)
@@ -493,6 +498,10 @@ class M5ScalpTrader:
         # Position sizing
         balance = self._get_balance()
         lot_size = float(self._calculate_lots(balance, signal.price, stop_loss, latest_atr))
+        lot_size *= ml_risk_multiplier  # ML risk-scaling
+        if lot_size < 0.01:
+            logger.info("[M5Scalp:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lot_size)
+            return {"action": "hold", "reason": f"ML risk: lot too small ({lot_size:.4f})", "signal": signal}
 
         # 4-level TP calculation
         tp_levels = self._compute_tp_levels(signal.price, latest_atr, signal.signal_type.value)

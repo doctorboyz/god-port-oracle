@@ -521,7 +521,8 @@ class ScalpTrader:
                 "signal": signal,
             }
 
-        # 6.5. ML filter — predict trade outcome, skip if P(LOSS) too high
+        # 6.5. ML filter — risk-scale position size based on P(LOSS) prediction
+        ml_risk_multiplier = 1.0
         if self._ml_enabled and self._ml_predictor is not None:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
@@ -531,12 +532,14 @@ class ScalpTrader:
                 d1_trend="neutral",
                 session=session,
             )
-            skip, ml_reason = self._ml_predictor.should_skip(
+            ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
                 ml_features, "trending", str(signal.signal_type.value),
             )
-            if skip:
+            if ml_risk_multiplier == 0:
                 logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_reason)
                 return {"action": "hold", "reason": ml_reason, "signal": signal}
+            elif ml_risk_multiplier < 1.0:
+                logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_reason)
 
         # 7. Calculate SL/TP/lots using M1 ATR
         try:
@@ -558,6 +561,10 @@ class ScalpTrader:
         lots = calculate_position_size(
             equity, self.risk.risk_per_trade, signal.price, sl, CONTRACT_SIZE,
         )
+        lots *= ml_risk_multiplier  # ML risk-scaling
+        if lots < 0.01:
+            logger.info("[Scalp:%s] ML risk-scaling: lots=%.4f < 0.01, skipping", self.account, lots)
+            return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
 
         # 8. Execute or dry-run
         ts_str = (

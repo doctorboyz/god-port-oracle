@@ -202,6 +202,36 @@ class TradeOutcomePredictor:
             return True, f"ML filter: P(LOSS)={proba_loss:.0%} > {self.loss_threshold:.0%}"
         return False, f"ML filter: P(LOSS)={proba_loss:.0%} OK"
 
+    def get_risk_multiplier(
+        self,
+        features: dict[str, float | str],
+        regime: Optional[str] = None,
+        direction: Optional[str] = None,
+    ) -> tuple[float, str]:
+        """Convert P(LOSS) to position size multiplier for risk-scaling.
+
+        Instead of hard blocking trades, reduce position size based on risk:
+        - P(LOSS) < 0.50: full size (1.0) — model thinks trade will win
+        - P(LOSS) 0.50–0.85: linear scaling from 1.0 down to 0.0
+        - P(LOSS) > 0.85: skip trade (0.0) — model very confident of loss
+
+        Returns (multiplier: float 0.0-1.0, reason: str).
+        """
+        if not self.enabled:
+            return 1.0, "ML filter disabled"
+
+        proba_loss = self.predict_loss_proba(features, regime, direction)
+        if proba_loss is None:
+            return 1.0, "no model available"
+
+        if proba_loss <= 0.50:
+            return 1.0, f"ML risk: P(LOSS)={proba_loss:.0%}, full size"
+        if proba_loss >= 0.85:
+            return 0.0, f"ML risk: P(LOSS)={proba_loss:.0%}, skip"
+
+        multiplier = (0.85 - proba_loss) / 0.35
+        return round(multiplier, 2), f"ML risk: P(LOSS)={proba_loss:.0%}, {multiplier:.0%} size"
+
     def get_model_accuracy(self, name: str) -> float:
         info = self._model_info.get(name, {})
         return info.get("test_accuracy", 0)

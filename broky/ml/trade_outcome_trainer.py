@@ -19,6 +19,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import LabelEncoder
@@ -296,9 +297,15 @@ class TradeOutcomeTrainer:
             )
         elif self.config.model_type == "xgb":
             from xgboost import XGBClassifier
+            # Compute scale_pos_weight to balance class imbalance
+            # WIN=1 is positive class. weight = #neg / #pos
+            n_pos = int(y_train.sum())
+            n_neg = len(y_train) - n_pos
+            scale_weight = n_neg / max(n_pos, 1)
             model = XGBClassifier(
                 n_estimators=200, max_depth=5, learning_rate=0.05,
                 random_state=42, n_jobs=-1, eval_metric="logloss",
+                scale_pos_weight=scale_weight,
             )
         else:
             model = GradientBoostingClassifier(
@@ -328,11 +335,12 @@ class TradeOutcomeTrainer:
         # Profit factor simulation
         pf = self._profit_factor(y_test, y_pred)
 
-        # Feature importance
-        importance = dict(zip(
-            X.columns,
-            model.feature_importances_,
-        ))
+        # Feature importance (access base estimator if calibrated)
+        base_estimator = model.estimator if hasattr(model, "estimator") else model
+        if hasattr(base_estimator, "feature_importances_"):
+            importance = dict(zip(X.columns, base_estimator.feature_importances_))
+        else:
+            importance = {}
         top_importance = dict(sorted(
             importance.items(), key=lambda x: x[1], reverse=True,
         )[:20])
