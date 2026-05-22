@@ -235,7 +235,7 @@ def compute_features_from_candles(
 
     # Price
     price = float(close.iloc[-1])
-    features["spread"] = float(spread)
+    features["spread"] = float(spread) if spread is not None else 0.0
 
     # EMAs
     for period in [9, 21, 50, 200]:
