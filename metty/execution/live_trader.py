@@ -144,6 +144,20 @@ class LiveTrader:
         self._cycle_count: int = 0
         self.strategy_id = f"swing-{self.account}"
         self.event_bus = event_bus
+        # ML filter — risk-scale position size based on P(LOSS) prediction
+        self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
+        self._ml_predictor = None
+        if self._ml_enabled:
+            try:
+                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                self._ml_predictor = TradeOutcomePredictor(
+                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                )
+                logger.info("[Swing:%s] ML filter enabled: %s", self.account,
+                           "models loaded" if self._ml_predictor.enabled else "no models")
+            except Exception as e:
+                logger.warning("[Swing:%s] ML filter init failed: %s", self.account, e)
+                self._ml_enabled = False
 
     def _get_calendar(self) -> list:
         now = time.time()
@@ -605,7 +619,28 @@ class LiveTrader:
                     "signal": signal,
                 }
 
-        # 5. Calculate SL/TP/lots
+        # 5. ML filter — risk-scale position size based on P(LOSS) prediction
+        ml_risk_multiplier = 1.0
+        if self._ml_enabled and self._ml_predictor is not None:
+            from broky.ml.trade_outcome_predictor import compute_features_from_candles
+
+            ml_features = compute_features_from_candles(
+                candles, str(signal.signal_type.value),
+                spread=0.0,  # swing trader doesn't fetch spread — pass 0
+                d1_trend=d1_trend or "neutral",
+                session=session,
+            )
+            regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
+            ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
+                ml_features, regime, str(signal.signal_type.value),
+            )
+            if ml_risk_multiplier == 0:
+                logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                return {"action": "hold", "reason": ml_reason, "signal": signal}
+            elif ml_risk_multiplier < 1.0:
+                logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
+
+        # 6. Calculate SL/TP/lots
         try:
             atr_series = calculate_atr(m5["high"], m5["low"], m5["close"], period=14)
             atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 5.0
@@ -623,8 +658,12 @@ class LiveTrader:
 
         equity = self._get_equity()
         lots = self._calculate_lots(equity, price, sl, atr_val)
+        lots *= ml_risk_multiplier  # ML risk-scaling
+        if lots < 0.01:
+            logger.info("[Swing:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lots)
+            return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
 
-        # 6. Execute or dry-run
+        # 7. Execute or dry-run
         ts_str = (
             m5.index[-1].isoformat()
             if hasattr(m5.index[-1], "isoformat")
