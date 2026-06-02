@@ -65,6 +65,21 @@ def _determine_d1_trend(d1: pd.DataFrame) -> str:
     return "bearish"
 
 
+def _compute_h4_trend(h4: pd.DataFrame) -> str:
+    """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200)."""
+    if h4 is None or len(h4) < 50:
+        return "unknown"
+    try:
+        close = h4["close"]
+        ema10 = close.ewm(span=10, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        if pd.isna(ema10.iloc[-1]) or pd.isna(ema50.iloc[-1]):
+            return "unknown"
+        return "bullish" if ema10.iloc[-1] > ema50.iloc[-1] else "bearish"
+    except Exception:
+        return "unknown"
+
+
 def fetch_live_sentiment() -> dict:
     """Fetch all sentiment data and return a flat dict for feature columns.
 
@@ -235,7 +250,7 @@ class LiveCollector:
             logger.info("Connecting to MT5 bridge for account %s...", self.account)
 
             candles = {}
-            for tf in ["M5", "H1", "D1"]:
+            for tf in ["M5", "H1", "H4", "D1"]:
                 df = bridge.fetch_candles_sync("XAUUSD", tf, 500)
                 if not df.empty:
                     candles[tf] = _normalize_columns(df)
@@ -298,10 +313,12 @@ class LiveCollector:
         except Exception as e:
             logger.warning("Broky indicator computation failed: %s", e)
 
-        # Session and D1 trend
+        # Session, D1 trend, and H4 trend
         timestamp = m5.index[-1]
         full_snapshot["session"] = _classify_session(timestamp)
         full_snapshot["d1_trend"] = _determine_d1_trend(d1) if d1 is not None else "unknown"
+        h4 = candles.get("H4")
+        full_snapshot["h4_trend"] = _compute_h4_trend(h4) if h4 is not None else "unknown"
 
         # Merge sentiment data
         full_snapshot["fear_greed_value"] = sentiment.get("fear_greed_value")
@@ -358,6 +375,7 @@ class LiveCollector:
 
         session = snapshot.get("session", "unknown")
         d1_trend = snapshot.get("d1_trend", "unknown")
+        h4_trend = snapshot.get("h4_trend", "unknown")
 
         # Insert signal record
         signal_id = insert_signal(
@@ -374,7 +392,7 @@ class LiveCollector:
         )
 
         # Separate indicator values from metadata
-        metadata_keys = {"price", "session", "d1_trend"}
+        metadata_keys = {"price", "session", "d1_trend", "h4_trend"}
         indicator_values = {k: v for k, v in snapshot.items() if k not in metadata_keys}
 
         # Insert feature snapshot
@@ -385,6 +403,7 @@ class LiveCollector:
             timeframe="M5",
             session=session,
             d1_trend=d1_trend,
+            h4_trend=h4_trend,
             trading_mode="swing",
             strategy_id=f"collect-{self.account}",
             db_path=self.db_path,

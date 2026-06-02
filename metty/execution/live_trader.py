@@ -93,6 +93,7 @@ class LiveTrader:
         dry_run: bool = False,
         risk_config: Optional[RiskConfig] = None,
         event_bus: Optional[EventBus] = None,
+        notifier: Optional["TelegramNotifier"] = None,
     ):
         self.account = account.upper()
         self.db_path = db_path
@@ -141,6 +142,9 @@ class LiveTrader:
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0
         self._last_exit_time: Optional[datetime] = None
+        self._notifier = notifier
+        self._last_d1_trend: Optional[str] = None
+        self._last_h4_trend: Optional[str] = None
         self._cycle_count: int = 0
         self.strategy_id = f"swing-{self.account}"
         self.event_bus = event_bus
@@ -216,7 +220,7 @@ class LiveTrader:
             bridge = MT5Bridge(config)
             candles = {}
 
-            for tf in ["M5", "H1", "D1"]:
+            for tf in ["M5", "H1", "H4", "D1"]:
                 df = bridge.fetch_candles_sync("XAUUSD", tf, 500)
                 if not df.empty:
                     candles[tf] = _normalize_columns(df)
@@ -273,6 +277,15 @@ class LiveTrader:
         # Determine D1 trend from EMA 50/200
         d1 = candles.get("D1")
         d1_trend = self._determine_d1_trend(d1)
+        d1_trend_strength = self._compute_d1_trend_strength(d1)
+        price_momentum_24h = self._compute_price_momentum_24h(d1)
+
+        # Determine H4 trend from EMA 10/50 (faster override for D1)
+        h4 = candles.get("H4")
+        h4_trend = self._compute_h4_trend(h4)
+
+        # Detect trend flips and send Telegram alert
+        self._check_trend_flips(d1_trend, h4_trend)
 
         try:
             signal = generate_signal(
@@ -285,6 +298,9 @@ class LiveTrader:
                 if hasattr(m5.index[-1], "to_pydatetime")
                 else datetime.now(timezone.utc),
                 d1_trend=d1_trend,
+                h4_trend=h4_trend,
+                d1_trend_strength=d1_trend_strength,
+                price_momentum_24h=price_momentum_24h,
                 min_confidence=self.risk.min_confidence,
                 learning_mode=self.learning_mode,
             )
@@ -302,6 +318,101 @@ class LiveTrader:
         if pd.isna(ema200.iloc[-1]):
             return "unknown"
         return "bullish" if ema50.iloc[-1] > ema200.iloc[-1] else "bearish"
+
+    def _compute_h4_trend(self, h4: Optional[pd.DataFrame]) -> Optional[str]:
+        """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200)."""
+        if h4 is None or len(h4) < 50:
+            return None
+        try:
+            ema10 = h4["close"].ewm(span=10, adjust=False).mean()
+            ema50 = h4["close"].ewm(span=50, adjust=False).mean()
+            if pd.isna(ema10.iloc[-1]) or pd.isna(ema50.iloc[-1]):
+                return None
+            return "bullish" if ema10.iloc[-1] > ema50.iloc[-1] else "bearish"
+        except Exception:
+            return None
+
+    def _check_trend_flips(self, d1_trend: str, h4_trend: Optional[str]) -> None:
+        """Detect D1/H4 trend changes and send Telegram alert."""
+        if self._notifier is None:
+            return
+        if not self._notifier.enabled:
+            return
+
+        now = datetime.now(timezone.utc).strftime("%H:%M")
+        alerts = []
+
+        if self._last_d1_trend is not None and d1_trend != "unknown":
+            if d1_trend != self._last_d1_trend:
+                direction = "🟢 BULLISH" if d1_trend == "bullish" else "🔴 BEARISH"
+                alerts.append(
+                    f"<b>D1 Trend Flip</b> {now}\n"
+                    f"Account {self.account}: {self._last_d1_trend} → {direction}"
+                )
+
+        if self._last_h4_trend is not None and h4_trend and h4_trend != "unknown":
+            if h4_trend != self._last_h4_trend:
+                direction = "🟢 BULLISH" if h4_trend == "bullish" else "🔴 BEARISH"
+                alerts.append(
+                    f"<b>H4 Trend Flip</b> {now}\n"
+                    f"Account {self.account}: {self._last_h4_trend} → {direction}"
+                )
+
+        # Update tracking
+        if d1_trend != "unknown":
+            self._last_d1_trend = d1_trend
+        if h4_trend and h4_trend != "unknown":
+            self._last_h4_trend = h4_trend
+
+        # Send alerts (deduplicate across accounts via notifier's rate limit)
+        for msg in alerts:
+            try:
+                self._notifier.send(msg)
+            except Exception:
+                pass
+
+    def _compute_d1_trend_strength(self, d1: Optional[pd.DataFrame]) -> Optional[float]:
+        """Compute normalized D1 trend strength from EMA 50/200 spread.
+
+        Returns 0.0 (flat) to ~1.0 (very strong trend).
+        EMA50-EMA200 spread divided by price gives a normalized measure.
+        """
+        if d1 is None or len(d1) < 200:
+            return None
+        try:
+            close = d1["close"]
+            ema50 = close.ewm(span=50, adjust=False).mean()
+            ema200 = close.ewm(span=200, adjust=False).mean()
+            if pd.isna(ema200.iloc[-1]) or pd.isna(ema50.iloc[-1]):
+                return None
+            spread = abs(ema50.iloc[-1] - ema200.iloc[-1])
+            price = close.iloc[-1]
+            if price <= 0:
+                return None
+            # Normalize: 0.5% spread = moderate, 2%+ = very strong
+            strength = spread / price / 0.02
+            return float(max(0.0, min(1.0, strength)))
+        except Exception:
+            return None
+
+    def _compute_price_momentum_24h(self, d1: Optional[pd.DataFrame]) -> Optional[float]:
+        """Compute 24h price momentum as ratio of change.
+
+        Returns negative for falling price, positive for rising.
+        e.g. -0.015 = price dropped 1.5% in ~24h.
+        Uses last 2 D1 candles as proxy for 24-48h window.
+        """
+        if d1 is None or len(d1) < 2:
+            return None
+        try:
+            close = d1["close"]
+            prev = close.iloc[-2]
+            curr = close.iloc[-1]
+            if pd.isna(prev) or pd.isna(curr) or prev <= 0:
+                return None
+            return float((curr - prev) / prev)
+        except Exception:
+            return None
 
     def _classify_session(self, timestamp: datetime) -> str:
         hour = timestamp.hour
@@ -635,10 +746,18 @@ class LiveTrader:
                 ml_features, regime, str(signal.signal_type.value),
             )
             if ml_risk_multiplier == 0:
-                logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
-                return {"action": "hold", "reason": ml_reason, "signal": signal}
+                if self.learning_mode:
+                    # In learning mode, never block — allow trade with min lot
+                    # to collect diverse outcomes for ML retraining
+                    logger.info("[Swing:%s] ML would block, but learning mode: allowing min-lot trade (%s)", self.account, ml_reason)
+                    ml_risk_multiplier = 0.01  # minimal position for data collection
+                else:
+                    logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                    return {"action": "hold", "reason": ml_reason, "signal": signal}
             elif ml_risk_multiplier < 1.0:
                 logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
+            else:
+                logger.info("[Swing:%s] ML filter pass: %s", self.account, ml_reason)
 
         # 6. Calculate SL/TP/lots
         try:
@@ -660,8 +779,13 @@ class LiveTrader:
         lots = self._calculate_lots(equity, price, sl, atr_val)
         lots *= ml_risk_multiplier  # ML risk-scaling
         if lots < 0.01:
-            logger.info("[Swing:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lots)
-            return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
+            if self.learning_mode:
+                # Force minimum lot to ensure trade executes for data collection
+                logger.info("[Swing:%s] ML would skip (lot=%.4f), but learning mode: forcing min lot 0.01", self.account, lots)
+                lots = 0.01
+            else:
+                logger.info("[Swing:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lots)
+                return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
 
         # 7. Execute or dry-run
         ts_str = (
