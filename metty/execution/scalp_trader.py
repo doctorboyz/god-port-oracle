@@ -92,6 +92,13 @@ class ScalpTrader:
         self.dry_run = dry_run
         self.account_id = ACCOUNT_IDS.get(self.account, 1)
         self.risk = risk_config or ScalpRiskConfig()
+        # Per-account max spread override (Account A = XAUUSDm Standard, wider spread)
+        per_account_spread = {
+            "A": float(os.environ.get("SCALP_MAX_SPREAD_A", os.environ.get("SCALP_MAX_SPREAD", "35"))),
+            "B": float(os.environ.get("SCALP_MAX_SPREAD_B", os.environ.get("SCALP_MAX_SPREAD", "35"))),
+            "C": float(os.environ.get("SCALP_MAX_SPREAD_C", os.environ.get("SCALP_MAX_SPREAD", "35"))),
+        }
+        self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
         self.strategy_id = f"scalp-{self.account}"
         self.circuit_breaker = CircuitBreaker(
             consecutive_loss_limit=self.risk.consecutive_loss_limit,

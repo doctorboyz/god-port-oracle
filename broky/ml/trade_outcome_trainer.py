@@ -50,7 +50,7 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
 ]
 
 # Categorical features that need encoding
-CATEGORICAL_COLS = ["session", "d1_trend", "price_vs_cloud"]
+CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud"]
 
 # Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
 # BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow
@@ -98,6 +98,18 @@ class TradeOutcomeConfig:
 
     # Test ratio
     test_ratio: float = 0.2
+
+    # XGBoost hyperparameters
+    xgb_max_depth: int = 5
+    xgb_reg_lambda: float = 0.0
+    xgb_learning_rate: float = 0.05
+    xgb_scale_pos_weight: bool = True
+    xgb_n_estimators: int = 200
+
+    # RandomForest hyperparameters
+    rf_n_estimators: int = 200
+    rf_max_depth: int = 10
+    rf_min_samples_leaf: int = 1
 
     # Paths (relative to working dir; use "data/models" for Docker volume persistence)
     model_dir: str = "data/models"
@@ -239,7 +251,8 @@ class TradeOutcomeTrainer:
         # Add derived features from FeatureEngineer
         derived = [c for c in df_transformed.columns
                    if c in ("ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
-                             "price_vs_cloud_encoded", "d1_trend_encoded")
+                             "price_vs_cloud_encoded", "d1_trend_encoded",
+                             "h4_trend_encoded")
                    or c.startswith("session_")]
         available += derived
         available = list(dict.fromkeys(available))  # deduplicate preserving order
@@ -293,20 +306,25 @@ class TradeOutcomeTrainer:
         # Select model
         if self.config.model_type == "rf":
             model = RandomForestClassifier(
-                n_estimators=200, max_depth=10, random_state=42, n_jobs=-1,
+                n_estimators=self.config.rf_n_estimators,
+                max_depth=self.config.rf_max_depth,
+                min_samples_leaf=self.config.rf_min_samples_leaf,
+                random_state=42, n_jobs=-1,
             )
         elif self.config.model_type == "xgb":
             from xgboost import XGBClassifier
-            # Compute scale_pos_weight to balance class imbalance
-            # WIN=1 is positive class. weight = #neg / #pos
-            n_pos = int(y_train.sum())
-            n_neg = len(y_train) - n_pos
-            scale_weight = n_neg / max(n_pos, 1)
-            model = XGBClassifier(
-                n_estimators=200, max_depth=5, learning_rate=0.05,
+            xgb_kwargs: dict = dict(
+                n_estimators=self.config.xgb_n_estimators,
+                max_depth=self.config.xgb_max_depth,
+                learning_rate=self.config.xgb_learning_rate,
                 random_state=42, n_jobs=-1, eval_metric="logloss",
-                scale_pos_weight=scale_weight,
+                reg_lambda=self.config.xgb_reg_lambda,
             )
+            if self.config.xgb_scale_pos_weight:
+                n_pos = int(y_train.sum())
+                n_neg = len(y_train) - n_pos
+                xgb_kwargs["scale_pos_weight"] = n_neg / max(n_pos, 1)
+            model = XGBClassifier(**xgb_kwargs)
         else:
             model = GradientBoostingClassifier(
                 n_estimators=200, max_depth=5, random_state=42,
@@ -521,6 +539,14 @@ def main():
     parser.add_argument("--no-direction", action="store_true")
     parser.add_argument("--db-path", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--xgb-max-depth", type=int, default=5)
+    parser.add_argument("--xgb-reg-lambda", type=float, default=0.0)
+    parser.add_argument("--xgb-learning-rate", type=float, default=0.05)
+    parser.add_argument("--no-scale-pos-weight", action="store_true")
+    parser.add_argument("--xgb-n-estimators", type=int, default=200)
+    parser.add_argument("--rf-n-estimators", type=int, default=200)
+    parser.add_argument("--rf-max-depth", type=int, default=10)
+    parser.add_argument("--rf-min-samples-leaf", type=int, default=1)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -536,6 +562,14 @@ def main():
         model_type=args.model_type,
         regime_specific=not args.no_regime,
         direction_specific=not args.no_direction,
+        xgb_max_depth=args.xgb_max_depth,
+        xgb_reg_lambda=args.xgb_reg_lambda,
+        xgb_learning_rate=args.xgb_learning_rate,
+        xgb_scale_pos_weight=not args.no_scale_pos_weight,
+        xgb_n_estimators=args.xgb_n_estimators,
+        rf_n_estimators=args.rf_n_estimators,
+        rf_max_depth=args.rf_max_depth,
+        rf_min_samples_leaf=args.rf_min_samples_leaf,
     )
 
     trainer = TradeOutcomeTrainer(config)

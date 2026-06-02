@@ -66,7 +66,7 @@ def run_collector(account: str, db_path: str, interval: int):
         time.sleep(interval)
 
 
-def run_trader(account: str, db_path: str, interval: int, dry_run: bool):
+def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifier=None):
     """Run live trader in a loop."""
     from dotenv import load_dotenv
     load_dotenv()
@@ -80,6 +80,7 @@ def run_trader(account: str, db_path: str, interval: int, dry_run: bool):
         dry_run=dry_run,
         risk_config=risk,
         event_bus=_event_bus,
+        notifier=notifier,
     )
     mode = "DRY-RUN" if dry_run else "LIVE"
     logger.info("[Trader:%s] Starting %s trader (interval=%ds)", account, mode, interval)
@@ -395,7 +396,7 @@ def main():
             else:
                 t = threading.Thread(
                     target=run_trader,
-                    args=(account, db_path, trade_interval, dry_run),
+                    args=(account, db_path, trade_interval, dry_run, notifier),
                     name=f"trader-{account}",
                     daemon=True,
                 )

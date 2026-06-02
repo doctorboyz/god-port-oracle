@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS feature_snapshots (
     timeframe TEXT NOT NULL DEFAULT 'M5',
     session TEXT NOT NULL DEFAULT '',
     d1_trend TEXT NOT NULL DEFAULT '',
+    h4_trend TEXT NOT NULL DEFAULT '',
     trading_mode TEXT NOT NULL DEFAULT 'swing',
     strategy_id TEXT NOT NULL DEFAULT '',
 
@@ -302,6 +303,7 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("signals", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
         ("feature_snapshots", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("feature_snapshots", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
+        ("feature_snapshots", "h4_trend", "TEXT NOT NULL DEFAULT ''"),
         ("candles", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("candles", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
     ]
@@ -383,6 +385,7 @@ def insert_feature_snapshot(
     timeframe: str = "M5",
     session: str = "",
     d1_trend: str = "",
+    h4_trend: str = "",
     trading_mode: str = "swing",
     strategy_id: str = "",
     db_path: Optional[Path] = None,
@@ -391,8 +394,8 @@ def insert_feature_snapshot(
     """Insert a feature snapshot with all indicator values."""
     conn = get_connection(db_path)
     try:
-        columns = ["signal_id", "timestamp", "price", "timeframe", "session", "d1_trend", "trading_mode", "strategy_id"]
-        values: list[float | str | int | None] = [signal_id, timestamp, price, timeframe, session, d1_trend, trading_mode, strategy_id]
+        columns = ["signal_id", "timestamp", "price", "timeframe", "session", "d1_trend", "h4_trend", "trading_mode", "strategy_id"]
+        values: list[float | str | int | None] = [signal_id, timestamp, price, timeframe, session, d1_trend, h4_trend, trading_mode, strategy_id]
 
         for key, val in indicator_values.items():
             if key in _SNAPSHOT_COLUMNS:
@@ -621,9 +624,9 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                         "SELECT * FROM feature_snapshots LIMIT 0"
                     ).description]
                     snap_dict = dict(zip(columns, snap_row))
-                    # Remove metadata keys
+                    # Remove metadata keys (keep d1_trend, h4_trend for ML training)
                     for key in ["id", "signal_id", "timestamp", "timeframe", "session",
-                                "d1_trend", "trading_mode", "strategy_id"]:
+                                "trading_mode", "strategy_id"]:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)
 
@@ -1034,9 +1037,9 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                         "SELECT * FROM feature_snapshots LIMIT 0"
                     ).description]
                     snap_dict = dict(zip(columns, snap_row))
-                    # Remove metadata keys
+                    # Remove metadata keys (keep d1_trend, h4_trend for ML training)
                     for key in ["id", "signal_id", "timestamp", "timeframe", "session",
-                                "d1_trend", "trading_mode", "strategy_id"]:
+                                "trading_mode", "strategy_id"]:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)
 

@@ -119,10 +119,16 @@ class M5ScalpTrader:
             "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.50"))),
             "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.50"))),
         }
+        per_account_spread = {
+            "A": float(os.environ.get("M5_MAX_SPREAD_A", os.environ.get("M5_MAX_SPREAD", "30"))),
+            "B": float(os.environ.get("M5_MAX_SPREAD_B", os.environ.get("M5_MAX_SPREAD", "30"))),
+            "C": float(os.environ.get("M5_MAX_SPREAD_C", os.environ.get("M5_MAX_SPREAD", "30"))),
+        }
         if not risk_config:
             self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
             self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
             self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
+            self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:

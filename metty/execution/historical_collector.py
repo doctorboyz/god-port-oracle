@@ -76,6 +76,21 @@ def _determine_d1_trend(d1: pd.DataFrame) -> str:
     return "bearish"
 
 
+def _compute_h4_trend(h4: pd.DataFrame) -> str:
+    """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200)."""
+    if h4 is None or len(h4) < 50:
+        return "unknown"
+    try:
+        close = h4["close"]
+        ema10 = close.ewm(span=10, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        if pd.isna(ema10.iloc[-1]) or pd.isna(ema50.iloc[-1]):
+            return "unknown"
+        return "bullish" if ema10.iloc[-1] > ema50.iloc[-1] else "bearish"
+    except Exception:
+        return "unknown"
+
+
 def compute_broky_indicators(m5: pd.DataFrame) -> dict[str, float | None]:
     """Compute Broky original indicators not covered by signal groups.
 
@@ -248,11 +263,14 @@ class HistoricalCollector:
         broky = compute_broky_indicators(m5)
         full_snapshot.update(broky)
 
-        # Session and D1 trend
+        # Session, D1 trend, and H4 trend
         session = _classify_session(timestamp)
         d1_trend = _determine_d1_trend(d1) if d1 is not None else "unknown"
+        h4 = candles.get("H4")
+        h4_trend = _compute_h4_trend(h4) if h4 is not None else "unknown"
         full_snapshot["session"] = session
         full_snapshot["d1_trend"] = d1_trend
+        full_snapshot["h4_trend"] = h4_trend
 
         price = full_snapshot.get("price", 0.0)
         if price <= 0:
@@ -273,7 +291,7 @@ class HistoricalCollector:
         )
 
         # Separate indicator values from metadata
-        metadata_keys = {"price", "session", "d1_trend"}
+        metadata_keys = {"price", "session", "d1_trend", "h4_trend"}
         indicator_values = {k: v for k, v in full_snapshot.items() if k not in metadata_keys}
 
         # Convert NaN to None for SQLite
@@ -291,6 +309,7 @@ class HistoricalCollector:
             timeframe="M5",
             session=session,
             d1_trend=d1_trend,
+            h4_trend=h4_trend,
             db_path=self.db_path,
             **clean_values,
         )

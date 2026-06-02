@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Categorical features that need encoding
-CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend"}
+CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend"}
 
 # Numeric features organized by group
 VOLUME_FEATURES = [
@@ -94,6 +94,11 @@ class FeatureEngineer:
             trend_map = {"bullish": 1, "bearish": -1}
             result["d1_trend_encoded"] = result["d1_trend"].map(trend_map).fillna(0).astype(int)
 
+        # Encode h4_trend: bullish=1, bearish=-1, unknown=0
+        if "h4_trend" in result.columns:
+            trend_map = {"bullish": 1, "bearish": -1}
+            result["h4_trend_encoded"] = result["h4_trend"].map(trend_map).fillna(0).astype(int)
+
         # Fill NaN in numeric features with median (if fitted) or 0
         # Also force all numeric features to float dtype (SQLite may return mixed types)
         if self.fillna:
@@ -131,7 +136,7 @@ class FeatureEngineer:
             if col in df.columns:
                 cols.append(col)
         # Encoded categorical features
-        for col in ["price_vs_cloud_encoded", "d1_trend_encoded"]:
+        for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded"]:
             if col in df.columns:
                 cols.append(col)
         # One-hot session columns (use cached order if available)

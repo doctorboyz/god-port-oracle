@@ -494,6 +494,65 @@ def _generate_ranging_signal(
     )
 
 
+def compute_trend_alignment(
+    effective_trend: str,
+    signal_type: "SignalType",
+    d1_trend_strength: Optional[float] = None,
+    price_momentum_24h: Optional[float] = None,
+) -> float:
+    """Compute trend alignment multiplier for counter-trend confidence scaling.
+
+    Instead of hard blocking counter-trend signals, scale confidence based on:
+    1. Trend strength — strong trend = stronger block, weak trend = weaker block
+    2. Price momentum — if price is already moving against the trend, the
+       counter-trend signal may be an early trend change detection.
+
+    Returns multiplier 0.0-1.0:
+      0.0 = full block (strong trend + price confirming it)
+      0.3 = heavy reduction (strong trend + price starting to reverse)
+      0.5 = moderate reduction (weak trend + price confirming)
+      0.7 = light reduction (weak trend + price reversing)
+      1.0 = no reduction (trend not applicable or unknown)
+
+    The multiplier can be used as: confidence *= multiplier
+    """
+    # Default: no reduction if we don't have strength/momentum data
+    if d1_trend_strength is None and price_momentum_24h is None:
+        return 1.0
+
+    strength = d1_trend_strength if d1_trend_strength is not None else 0.5
+    momentum = price_momentum_24h if price_momentum_24h is not None else 0.0
+
+    # Clamp
+    strength = max(0.0, min(1.0, strength))
+    momentum = max(-0.05, min(0.05, momentum))
+
+    # Is price moving against the trend?
+    if effective_trend == "bullish":
+        price_against_trend = momentum < -0.005  # price falling >0.5% in 24h
+        price_with_trend = momentum > 0.003     # price rising
+    elif effective_trend == "bearish":
+        price_against_trend = momentum > 0.005   # price rising >0.5% in 24h
+        price_with_trend = momentum < -0.003     # price falling
+    else:
+        return 1.0
+
+    if price_against_trend:
+        if strength > 0.6:
+            return 0.3   # Strong trend but price reversing — allow with heavy reduction
+        else:
+            return 0.7   # Weak trend + price reversing — mostly allow (early detection)
+
+    if price_with_trend:
+        if strength > 0.6:
+            return 0.0   # Strong trend + price confirming — hard block
+        else:
+            return 0.5   # Weak trend + price confirming — moderate reduction
+
+    # Price neutral / consolidating
+    return 0.3 if strength > 0.6 else 0.6
+
+
 @strategy(
     name="swing",
     timeframe="H1",
@@ -513,6 +572,9 @@ def generate_signal(
     timeframe: str = "M5",
     timestamp: Optional[datetime] = None,
     d1_trend: Optional[str] = None,
+    h4_trend: Optional[str] = None,
+    d1_trend_strength: Optional[float] = None,
+    price_momentum_24h: Optional[float] = None,
     min_confidence: float = MIN_CONFIDENCE,
     strategy_id: str = "",
     learning_mode: bool = False,
@@ -537,8 +599,11 @@ def generate_signal(
         timeframe: Timeframe string (default M5).
         timestamp: Candle timestamp for session classification (defaults to now).
         d1_trend: D1 trend direction ('bullish', 'bearish', or None for no filter).
-            When provided, BUY signals are only allowed in bullish D1,
-            SELL signals only in bearish D1.
+        h4_trend: H4 trend direction ('bullish', 'bearish', or None). Uses EMA 10/50.
+        d1_trend_strength: Normalized D1 trend strength (0=flat, 1=strong).
+            EMA50-EMA200 spread as fraction of price.
+        price_momentum_24h: 24h price change ratio (e.g. -0.015 = -1.5%).
+            Detects trend reversals before EMA crossovers confirm them.
 
     Returns:
         Signal with type, confidence, and reason.
@@ -585,22 +650,53 @@ def generate_signal(
         active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
         reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
 
-    # Multi-timeframe trend filter: trade WITH the big trend, not against it
-    # Hard filter: block counter-trend signals entirely (better WR at cost of fewer trades)
-    # Learning mode: record but don't block — we need data on counter-trend trades too
-    if d1_trend is not None:
-        if d1_trend == "bullish" and signal_type == SignalType.SELL:
+    # Multi-timeframe trend filter — confidence scaling based on trend strength + momentum
+    # Instead of hard blocking counter-trend trades, scale confidence by:
+    # 1. How strong the D1 trend is (weak trend → less reduction)
+    # 2. Whether price momentum is already reversing (price falling in bullish D1 → early signal)
+    #
+    # Hard block only when: strong trend + price confirming the trend direction
+    # Allow with reduced confidence when: trend weakening OR price starting to reverse
+    #
+    # H4 override: H4 EMA 10/50 responds ~4x faster than D1 EMA 50/200.
+    # When H4 disagrees with D1, trend is considered "weakening" regardless of strength.
+    if d1_trend is not None and signal_type != SignalType.HOLD:
+        effective_trend = d1_trend
+        if h4_trend is not None and h4_trend != "unknown":
+            if d1_trend == "bullish" and h4_trend == "bearish":
+                effective_trend = "bearish"
+            elif d1_trend == "bearish" and h4_trend == "bullish":
+                effective_trend = "bullish"
+
+        h4_override = effective_trend != d1_trend
+
+        is_counter_trend = (
+            (effective_trend == "bullish" and signal_type == SignalType.SELL)
+            or (effective_trend == "bearish" and signal_type == SignalType.BUY)
+        )
+
+        if is_counter_trend:
             if learning_mode:
-                reason += f" (learning: counter-trend SELL in bullish D1)"
+                reason += f" (learning: counter-trend {signal_type.value} in {d1_trend} D1)"
             else:
-                signal_type = SignalType.HOLD
-                reason += f" (counter-trend SELL in bullish D1)"
-        elif d1_trend == "bearish" and signal_type == SignalType.BUY:
-            if learning_mode:
-                reason += f" (learning: counter-trend BUY in bearish D1)"
-            else:
-                signal_type = SignalType.HOLD
-                reason += f" (counter-trend BUY in bearish D1)"
+                # If H4 overrides, trend is already conflicted — reduce block strength
+                if h4_override:
+                    trend_mult = 0.5  # H4 conflict = trend uncertain
+                    reason += f" (H4 override: {d1_trend} D1 → {effective_trend} H4)"
+                else:
+                    trend_mult = compute_trend_alignment(
+                        effective_trend, signal_type,
+                        d1_trend_strength, price_momentum_24h,
+                    )
+
+                if trend_mult == 0.0:
+                    signal_type = SignalType.HOLD
+                    reason += f" (counter-trend {signal_type.value} blocked: strong {effective_trend} trend)"
+                else:
+                    confidence *= trend_mult
+                    reason += f" (counter-trend: trend_mult={trend_mult:.1f}, conf={confidence:.2f})"
+        elif h4_override:
+            reason += f" (H4 override: {d1_trend} D1 → {effective_trend} H4)"
 
     # Regime label included in signal output (no confidence reduction — volatile regime filter hurts PF)
     reason += f" [{regime}]"

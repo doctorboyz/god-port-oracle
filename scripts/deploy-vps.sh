@@ -27,6 +27,13 @@ echo "=== Oracle Engine Deployment ==="
 echo "Host: $VPS_HOST"
 echo "Phase: $TRADING_PHASE | Dry run: $DRY_RUN | M5 Scalp: $M5_SCALP_ENABLED"
 
+# Pre-deploy safety check
+echo "[0/3] Running pre-deploy checks..."
+if ! bash "$(dirname "$0")/pre-deploy-check.sh"; then
+    echo "ERROR: Pre-deploy checks failed — aborting deploy"
+    exit 1
+fi
+
 # Copy project to VPS
 echo "[1/3] Syncing project files..."
 rsync -avz --delete \
