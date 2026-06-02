@@ -229,12 +229,15 @@ class TradeOutcomeTrainer:
         features_df["pnl"] = df["pnl"].values
         features_df["pnl_pct"] = df["profit_pct"].values
         features_df["confidence"] = df["confidence"].fillna(0.5).values
-        # Regime: prefer live_trades, fallback to _regime from features_json
-        regime_fallback = features_df.pop("_regime") if "_regime" in features_df.columns else None
-        if regime_fallback is not None:
-            features_df["regime"] = df["regime"].fillna(regime_fallback).values
+        # Regime: prefer live_trades, fallback to deriving from ADX in features
+        regime_lt = df["regime"]
+        if "adx" in features_df.columns:
+            adx_derived = features_df["adx"].apply(
+                lambda v: "trending" if pd.notna(v) and v > 25 else "ranging"
+            )
+            features_df["regime"] = regime_lt.fillna(adx_derived).values
         else:
-            features_df["regime"] = df["regime"].fillna("unknown").values
+            features_df["regime"] = regime_lt.fillna("unknown").values
         features_df["direction"] = df["lt_direction"].fillna(df["to_direction"]).values
         features_df["trading_mode"] = df["trading_mode"].values
         features_df["is_open"] = 0
