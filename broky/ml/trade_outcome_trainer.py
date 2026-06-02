@@ -305,6 +305,17 @@ class TradeOutcomeTrainer:
                 feature_importance={},
             )
 
+        if y_train.nunique() < 2:
+            logger.warning("Skipping %s: y_train has only 1 class", name)
+            return ModelResult(
+                name=name, model_type=self.config.model_type,
+                feature_cols=list(X.columns), n_samples=len(X),
+                n_train=len(X_train), n_test=len(X_test),
+                cv_accuracy=0, cv_std=0, test_accuracy=0,
+                win_rate=y.mean(), profit_factor=0,
+                feature_importance={},
+            )
+
         # Select model
         if self.config.model_type == "rf":
             model = RandomForestClassifier(
