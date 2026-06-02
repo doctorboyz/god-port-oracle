@@ -183,6 +183,7 @@ class TradeOutcomeTrainer:
         conn = get_connection(db_path)
 
         # Load trade_outcomes with explicit columns (avoid duplicate cols from JOIN)
+        # LEFT JOIN allows synthetic trades (negative trade_id) to be included
         query = """
             SELECT
                 to_.id AS outcome_id,
@@ -202,14 +203,14 @@ class TradeOutcomeTrainer:
                 lt.pnl_pct AS lt_pnl_pct,
                 lt.direction AS lt_direction
             FROM trade_outcomes to_
-            JOIN live_trades lt ON lt.id = to_.trade_id
+            LEFT JOIN live_trades lt ON lt.id = to_.trade_id
             WHERE to_.features_json IS NOT NULL
               AND to_.outcome_label != 'BREAKEVEN'
         """
         params: list = []
 
         if self.config.exclude_phantom:
-            query += " AND lt.exit_reason != 'phantom'"
+            query += " AND (lt.exit_reason IS NULL OR lt.exit_reason != 'phantom')"
 
         query += " ORDER BY to_.created_at ASC"
 
@@ -223,12 +224,13 @@ class TradeOutcomeTrainer:
         # Expand features_json into columns
         features_df = pd.json_normalize(df["features_json"].apply(json.loads))
 
-        # Add metadata columns
+        # Add metadata columns (use to_direction as fallback for synthetic trades
+        # where live_trades JOIN returns NULL)
         features_df["pnl"] = df["pnl"].values
         features_df["pnl_pct"] = df["profit_pct"].values
-        features_df["confidence"] = df["confidence"].values
-        features_df["regime"] = df["regime"].values
-        features_df["direction"] = df["lt_direction"].values
+        features_df["confidence"] = df["confidence"].fillna(0.5).values
+        features_df["regime"] = df["regime"].fillna("unknown").values
+        features_df["direction"] = df["lt_direction"].fillna(df["to_direction"]).values
         features_df["trading_mode"] = df["trading_mode"].values
         features_df["is_open"] = 0
         features_df["account_id"] = df["account_id"].values
