@@ -61,7 +61,7 @@ class TradeOutcomePredictor:
             training_results = json.load(f)
 
         config = training_results.get("config", {})
-        categorical_cols = config.get("categorical_cols", ["session", "d1_trend", "price_vs_cloud"])
+        categorical_cols = config.get("categorical_cols", ["session", "d1_trend", "h4_trend", "price_vs_cloud", "mfi_signal"])
         self._feature_cols = config.get("feature_cols", [])
 
         for m in training_results.get("models", []):
@@ -160,17 +160,23 @@ class TradeOutcomePredictor:
         if self._engineer is not None:
             try:
                 df = self._engineer.transform(df)
+                # FeatureEngineer produces correct ordinal/one-hot encodings.
+                # Drop original string columns to prevent single-row LabelEncoder
+                # from overwriting them with wrong values (always 0 on 1-row fit).
+                str_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+                df = df.drop(columns=str_cols, errors="ignore")
             except Exception:
                 pass
 
-        # Label-encode remaining string columns (replicates prepare_features)
-        from sklearn.preprocessing import LabelEncoder
-        for col in df.select_dtypes(include=["object", "string"]).columns:
-            try:
-                le = LabelEncoder()
-                df[col] = le.fit_transform(df[col].astype(str))
-            except Exception:
-                df[col] = 0
+        # Label-encode remaining string columns (only if no FeatureEngineer)
+        if self._engineer is None:
+            from sklearn.preprocessing import LabelEncoder
+            for col in df.select_dtypes(include=["object", "string"]).columns:
+                try:
+                    le = LabelEncoder()
+                    df[col] = le.fit_transform(df[col].astype(str))
+                except Exception:
+                    df[col] = 0
 
         # Ensure numeric and fill NaN
         X = df.select_dtypes(include=[np.number]).fillna(0)

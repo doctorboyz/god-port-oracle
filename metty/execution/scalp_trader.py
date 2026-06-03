@@ -33,6 +33,7 @@ from broky.risk.spread_filter import check_spread
 from broky.signals.scalp_generator import generate_scalp_signal, SCALP_SPREAD_MAX
 from metty.core.db import (
     close_live_trade,
+    get_latest_signal_id,
     get_open_trades,
     init_db,
     insert_live_trade,
@@ -394,7 +395,7 @@ class ScalpTrader:
                     mae=round(mae, 2) if mae else None,
                     mfe_pct=round(mfe_pct, 4) if mfe_pct else None,
                     mae_pct=round(mae_pct, 4) if mae_pct else None,
-                    exit_regime=signal.regime if signal and hasattr(signal, 'regime') else "unknown",
+                    exit_regime="unknown",
                     exit_d1_trend=self._last_d1_trend,
                     exit_h4_trend=self._last_h4_trend,
                     db_path=self.db_path,
@@ -729,6 +730,7 @@ class ScalpTrader:
         # Build indicator scores JSON for debugging/feature importance
         import json as _json
         indicator_scores_json = _json.dumps(signal.indicators) if signal.indicators else None
+        ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
 
         if self.dry_run:
             trade_id = insert_live_trade(
@@ -742,11 +744,12 @@ class ScalpTrader:
                 confidence=signal.confidence,
                 regime=signal.regime or "unknown",
                 session=session,
-                d1_trend=m1_trend,
+                d1_trend=_d1_proxy,
                 reason=signal.reason,
                 ticket=None,
                 trading_mode=TradingMode.SCALP.value,
                 strategy_id=self.strategy_id,
+                signal_id=ref_signal_id,
                 atr_at_entry=atr_val,
                 indicator_scores_json=indicator_scores_json,
                 spread_at_entry=spread if spread > 0 else None,
@@ -807,11 +810,12 @@ class ScalpTrader:
                 confidence=signal.confidence,
                 regime=signal.regime or "unknown",
                 session=session,
-                d1_trend=m1_trend,
+                d1_trend=_d1_proxy,
                 reason=signal.reason,
                 ticket=ticket,
                 trading_mode=TradingMode.SCALP.value,
                 strategy_id=self.strategy_id,
+                signal_id=ref_signal_id,
                 atr_at_entry=atr_val,
                 indicator_scores_json=indicator_scores_json,
                 spread_at_entry=spread if spread > 0 else None,

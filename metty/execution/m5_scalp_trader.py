@@ -627,7 +627,6 @@ class M5ScalpTrader:
                 regime=signal.regime or "unknown",
                 session=session,
                 d1_trend=d1_trend,
-                h4_trend=h4_trend,
                 reason=signal.reason,
                 ticket=ticket,
                 trading_mode=TradingMode.M5_SCALP.value,
