@@ -623,6 +623,9 @@ def generate_signal(
         boll_bw = (boll.upper.iloc[-1] - boll.lower.iloc[-1]) / boll.middle.iloc[-1]
     regime = classify_regime(latest_adx, boll_bw)
 
+    # Compute weighted_score for all paths (needed for Signal constructor even in ranging mode)
+    weighted_score = calculate_weighted_score(scores)
+
     # Ranging market (ADX < 20): use Bollinger mean-reversion instead of trend-following
     # Data shows ranging WR 66.7% vs trending 46.2% — mean reversion works in ranges
     if latest_adx < 20:
@@ -642,7 +645,6 @@ def generate_signal(
         confidence = signal.confidence
         reason = signal.reason
     else:
-        weighted_score = calculate_weighted_score(scores)
         signal_type = score_to_signal_type(weighted_score, learning_mode=learning_mode)
         confidence = calculate_signal_confidence(scores, weighted_score)
 
