@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/doctorboyz/Code/github.com/doctorboyz/nexus-oracle/scripts/session-summary.sh god-port"
+          }
+        ]
+      }
+    ]
+  }
+}

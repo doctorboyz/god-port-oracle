@@ -434,7 +434,7 @@ class M5ScalpTrader:
                     "reason": f"spread {spread:.0f} > max {self.risk.max_spread_points:.0f}",
                     "spread": spread,
                 }
-        spread_for_signal = spread
+        spread_for_signal = spread if spread is not None else 0.0
 
         # 5. Session gate (learning mode: skip, trade all sessions for data)
         if session not in ("london", "overlap", "ny") and not self.learning_mode:

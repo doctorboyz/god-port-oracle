@@ -58,6 +58,8 @@ class FeatureEngineer:
     def __init__(self, fillna: bool = True):
         self.fillna = fillna
         self._medians: dict[str, float] = {}
+        self._session_columns: list[str] = []
+        self._feature_columns: Optional[list[str]] = None
 
     def fit(self, df: pd.DataFrame) -> "FeatureEngineer":
         """Compute median values for NaN filling from training data."""

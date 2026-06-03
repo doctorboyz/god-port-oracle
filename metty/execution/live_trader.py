@@ -887,11 +887,11 @@ class LiveTrader:
                 candles, str(signal.signal_type.value),
                 spread=_live_spread,
                 d1_trend=d1_trend or "neutral",
-                h4_trend=self._last_h4_trend or "unknown",
+                h4_trend=h4_trend or "unknown",
                 session=session,
                 sentiment=sentiment_data,
             )
-            regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
+            regime = d1_trend if d1_trend and d1_trend not in ("neutral", "unknown") else "trending"
             ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
                 ml_features, regime, str(signal.signal_type.value),
             )

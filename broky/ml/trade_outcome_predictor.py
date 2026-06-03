@@ -168,15 +168,12 @@ class TradeOutcomePredictor:
             except Exception:
                 pass
 
-        # Label-encode remaining string columns (only if no FeatureEngineer)
+        # No FeatureEngineer means we cannot produce correct encodings.
+        # Single-row LabelEncoder always produces 0, which mismatches training.
+        # Better to disable predictions entirely than to silently produce wrong values.
         if self._engineer is None:
-            from sklearn.preprocessing import LabelEncoder
-            for col in df.select_dtypes(include=["object", "string"]).columns:
-                try:
-                    le = LabelEncoder()
-                    df[col] = le.fit_transform(df[col].astype(str))
-                except Exception:
-                    df[col] = 0
+            logger.warning("No FeatureEngineer loaded — cannot produce correct encodings, returning None")
+            return None
 
         # Ensure numeric and fill NaN
         X = df.select_dtypes(include=[np.number]).fillna(0)
@@ -188,7 +185,10 @@ class TradeOutcomePredictor:
         X = X[available_cols]
 
         proba = model.predict_proba(X)
-        return float(proba[0][0])  # P(LOSS) = proba of class 0
+        # Training labels: 0=LOSS, 1=WIN from (df["pnl"] > 0).astype(int)
+        # Verify class order matches our assumption
+        loss_idx = list(model.classes_).index(0) if 0 in model.classes_ else 0
+        return float(proba[0][loss_idx])  # P(LOSS)
 
     def should_skip(
         self,
@@ -468,14 +468,16 @@ def compute_features_from_candles(
     features["leverage_at_entry"] = 0.0
 
     # Multi-timeframe price context
+    # Use float("nan") instead of None so these columns stay numeric dtype
+    # and get properly imputed by FeatureEngineer instead of being dropped
     h1 = candles.get("H1")
     h4 = candles.get("H4")
     d1 = candles.get("D1")
-    features["h1_close"] = float(h1["close"].iloc[-1]) if h1 is not None and not h1.empty else None
-    features["h4_close"] = float(h4["close"].iloc[-1]) if h4 is not None and not h4.empty else None
-    features["d1_close"] = float(d1["close"].iloc[-1]) if d1 is not None and not d1.empty else None
-    features["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else None
-    features["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else None
+    features["h1_close"] = float(h1["close"].iloc[-1]) if h1 is not None and not h1.empty else float("nan")
+    features["h4_close"] = float(h4["close"].iloc[-1]) if h4 is not None and not h4.empty else float("nan")
+    features["d1_close"] = float(d1["close"].iloc[-1]) if d1 is not None and not d1.empty else float("nan")
+    features["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else float("nan")
+    features["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else float("nan")
 
     return features
 
