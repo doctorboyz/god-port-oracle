@@ -62,7 +62,7 @@ BUY_TOP_FEATURES = [
     "ema_9_21_diff", "macd_hist", "ema_21", "adx", "ad_line_slope", "sma_20",
 ]
 SELL_TOP_FEATURES = [
-    "dema_21", "session_strength", "price_vs_cloud", "sma_10",
+    "dema_21", "session_strength", "price_vs_cloud_encoded", "sma_10",
     "atr_to_price", "ema_200", "plus_di", "atr", "macd_hist",
     "fear_greed_value", "minus_di", "ema_50", "sma_20", "mfi",
     "tick_volume_ratio",
