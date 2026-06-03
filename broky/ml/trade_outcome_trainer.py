@@ -47,10 +47,12 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
     "fear_greed_value", "gold_bias_strength",
     # Short-term reference
     "sma_20", "ema_21", "rsi", "cci",
+    # Multi-timeframe price context
+    "h1_close", "h4_close", "d1_close", "m5_high", "m5_low",
 ]
 
 # Categorical features that need encoding
-CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud"]
+CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud", "mfi_signal"]
 
 # Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
 # BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow

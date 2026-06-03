@@ -36,6 +36,7 @@ from metty.core.db import (
     get_open_trades,
     init_db,
     insert_live_trade,
+    insert_rejected_signal,
 )
 from shared.events import Event, EventBus, EventType
 from shared.models import SignalType, TradingMode
@@ -581,6 +582,10 @@ class ScalpTrader:
         )
         m1_trend = self._determine_m1_trend(m1)
 
+        # Build indicator scores JSON for debugging/feature importance
+        import json as _json
+        indicator_scores_json = _json.dumps(signal.indicators) if signal.indicators else None
+
         if self.dry_run:
             trade_id = insert_live_trade(
                 account_id=self.account_id,
@@ -598,6 +603,8 @@ class ScalpTrader:
                 ticket=None,
                 trading_mode=TradingMode.SCALP.value,
                 strategy_id=self.strategy_id,
+                atr_at_entry=atr_val,
+                indicator_scores_json=indicator_scores_json,
                 db_path=self.db_path,
             )
             logger.info(
@@ -652,6 +659,8 @@ class ScalpTrader:
                 ticket=ticket,
                 trading_mode=TradingMode.SCALP.value,
                 strategy_id=self.strategy_id,
+                atr_at_entry=atr_val,
+                indicator_scores_json=indicator_scores_json,
                 db_path=self.db_path,
             )
 

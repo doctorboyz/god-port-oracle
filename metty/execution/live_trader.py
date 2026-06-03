@@ -39,6 +39,7 @@ from metty.core.db import (
     get_open_trades,
     init_db,
     insert_live_trade,
+    insert_rejected_signal,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -141,6 +142,9 @@ class LiveTrader:
         )
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0
+        self._sentiment_cache: dict = {}
+        self._sentiment_cache_time: float = 0
+        self._mfe_mae_state: dict[int, dict] = {}  # trade_id -> {mfe, mae, entry_price}
         self._last_exit_time: Optional[datetime] = None
         self._notifier = notifier
         self._last_d1_trend: Optional[str] = None
@@ -173,6 +177,64 @@ class LiveTrader:
                 self._calendar_cache = []
             self._calendar_cache_time = now
         return self._calendar_cache
+
+    def _get_sentiment(self) -> dict:
+        """Fetch real sentiment data with 15-minute cache."""
+        now = time.time()
+        if now - self._sentiment_cache_time > 900:  # 15 min cache
+            try:
+                from metty.execution.live_collector import fetch_live_sentiment
+                self._sentiment_cache = fetch_live_sentiment() or {}
+            except Exception as e:
+                logger.warning("[Swing:%s] Sentiment fetch failed: %s", self.account, e)
+                self._sentiment_cache = {}
+            self._sentiment_cache_time = now
+        return self._sentiment_cache
+
+    def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
+        """Get minutes to next event, event type, and impact level."""
+        calendar = self._get_calendar()
+        if not calendar:
+            return None, None, None
+        try:
+            now_utc = datetime.now(timezone.utc)
+            for event in calendar:
+                event_time = event.get("date")
+                if not event_time:
+                    continue
+                if isinstance(event_time, str):
+                    event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+                minutes_left = int((event_time - now_utc).total_seconds() / 60)
+                if minutes_left > 0:
+                    return minutes_left, event.get("title", ""), event.get("impact", "")
+            return None, None, None
+        except Exception:
+            return None, None, None
+
+    def _record_rejection(self, signal: Signal, reason: str, session: str = "",
+                          d1_trend: str = "", candles: dict | None = None) -> None:
+        """Record a rejected signal for survivorship bias analysis."""
+        try:
+            import json
+            ts_str = signal.timestamp.isoformat() if hasattr(signal.timestamp, 'isoformat') else str(signal.timestamp)
+            indicator_json = json.dumps(signal.indicators) if signal.indicators else None
+            insert_rejected_signal(
+                account_id=self.account_id,
+                timestamp=ts_str,
+                direction=signal.signal_type.value,
+                confidence=signal.confidence,
+                price=signal.price,
+                rejection_reason=reason,
+                trading_mode=TradingMode.SWING.value,
+                strategy_id=self.strategy_id,
+                regime=signal.regime,
+                session=session,
+                d1_trend=d1_trend,
+                signal_json=indicator_json,
+                db_path=self.db_path,
+            )
+        except Exception as e:
+            logger.warning("[Swing:%s] Failed to record rejection: %s", self.account, e)
 
     def _fetch_candles(self) -> Optional[dict[str, pd.DataFrame]]:
         """Fetch candle data from MT5 bridge, fall back to CSV."""
@@ -520,6 +582,21 @@ class LiveTrader:
             sl = trade["stop_loss"]
             tp = trade["take_profit"]
             lot_size = trade["lot_size"]
+            trade_id = trade["id"]
+
+            # Update MFE/MAE tracking
+            m5_high = float(m5["high"].iloc[-1])
+            m5_low = float(m5["low"].iloc[-1])
+            mfe_mae = self._mfe_mae_state.get(trade_id, {"mfe": 0, "mae": 0, "entry_price": entry_price})
+            if direction == "BUY":
+                favorable = m5_high - entry_price
+                adverse = entry_price - m5_low
+            else:
+                favorable = entry_price - m5_low
+                adverse = m5_high - entry_price
+            mfe_mae["mfe"] = max(mfe_mae["mfe"], favorable)
+            mfe_mae["mae"] = max(mfe_mae["mae"], adverse)
+            self._mfe_mae_state[trade_id] = mfe_mae
 
             exit_reason = None
             exit_price = current_price
@@ -564,7 +641,18 @@ class LiveTrader:
                     pnl = (entry_price - exit_price) * lot_size * CONTRACT_SIZE
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
-                # Close in DB
+                # Close in DB with MFE/MAE data
+                mfe_mae = self._mfe_mae_state.pop(trade_id, {"mfe": 0, "mae": 0, "entry_price": entry_price})
+                mfe = mfe_mae.get("mfe", 0)
+                mae = mfe_mae.get("mae", 0)
+                mfe_pct = round(mfe / entry_price * 100, 4) if entry_price > 0 else 0
+                mae_pct = round(mae / entry_price * 100, 4) if entry_price > 0 else 0
+
+                # Get exit context (regime/trend at exit time)
+                exit_d1_trend = self._last_d1_trend
+                exit_h4_trend = self._last_h4_trend
+                exit_regime = exit_d1_trend if exit_d1_trend and exit_d1_trend != "neutral" else None
+
                 close_live_trade(
                     trade_id=trade["id"],
                     exit_price=exit_price,
@@ -572,6 +660,13 @@ class LiveTrader:
                     pnl=round(pnl, 2),
                     pnl_pct=round(pnl_pct, 4),
                     exit_reason=exit_reason,
+                    mfe=round(mfe, 2),
+                    mae=round(mae, 2),
+                    mfe_pct=mfe_pct,
+                    mae_pct=mae_pct,
+                    exit_regime=exit_regime,
+                    exit_d1_trend=exit_d1_trend,
+                    exit_h4_trend=exit_h4_trend,
                     db_path=self.db_path,
                 )
 
@@ -681,6 +776,7 @@ class LiveTrader:
         open_trades = get_open_trades(self.account_id, self.db_path)
         if len(open_trades) >= self.max_positions:
             log_position(logger, "LIMIT", account=self.account, count=len(open_trades), max=self.max_positions)
+            self._record_rejection(signal, "position_limit", session, d1_trend, candles)
             return {
                 "action": "hold",
                 "reason": f"position limit ({len(open_trades)}/{self.max_positions})",
@@ -689,6 +785,7 @@ class LiveTrader:
 
         # 4c. Existing position check (always enforced — prevents churn)
         if self._check_existing_position():
+            self._record_rejection(signal, "existing_position", session, d1_trend, candles)
             return {
                 "action": "hold",
                 "reason": "position already open",
@@ -700,6 +797,7 @@ class LiveTrader:
             can_trade, cb_reason = self.circuit_breaker.can_open_trade()
             if not can_trade:
                 log_circuit_break(logger, "BLOCKED", account=self.account, reason=cb_reason)
+                self._record_rejection(signal, f"circuit_breaker:{cb_reason}", session, d1_trend, candles)
                 if self.event_bus:
                     self.event_bus.publish(Event(
                         type=EventType.CIRCUIT_BREAKER_TRIGGERED,
@@ -716,6 +814,7 @@ class LiveTrader:
                 }
 
             if self._check_cooldown():
+                self._record_rejection(signal, "cooldown", session, d1_trend, candles)
                 return {
                     "action": "hold",
                     "reason": "cooldown after last exit",
@@ -724,6 +823,7 @@ class LiveTrader:
 
             calendar = self._get_calendar()
             if should_avoid_trading(calendar):
+                self._record_rejection(signal, "calendar_avoid", session, d1_trend, candles)
                 return {
                     "action": "hold",
                     "reason": "high-impact news nearby",
@@ -732,14 +832,19 @@ class LiveTrader:
 
         # 5. ML filter — risk-scale position size based on P(LOSS) prediction
         ml_risk_multiplier = 1.0
+        ml_loss_proba = None
+        ml_model_used = None
+        ml_risk_reason = None
         if self._ml_enabled and self._ml_predictor is not None:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
+            sentiment_data = self._get_sentiment()
             ml_features = compute_features_from_candles(
                 candles, str(signal.signal_type.value),
                 spread=0.0,  # swing trader doesn't fetch spread — pass 0
                 d1_trend=d1_trend or "neutral",
                 session=session,
+                sentiment=sentiment_data,
             )
             regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
             ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
@@ -753,6 +858,7 @@ class LiveTrader:
                     ml_risk_multiplier = 0.01  # minimal position for data collection
                 else:
                     logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                    self._record_rejection(signal, f"ml_filter:{ml_reason}", session, d1_trend, candles)
                     return {"action": "hold", "reason": ml_reason, "signal": signal}
             elif ml_risk_multiplier < 1.0:
                 logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
@@ -785,6 +891,7 @@ class LiveTrader:
                 lots = 0.01
             else:
                 logger.info("[Swing:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lots)
+                self._record_rejection(signal, f"ml_lot_too_small:{lots:.4f}", session, d1_trend, candles)
                 return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
 
         # 7. Execute or dry-run
@@ -793,6 +900,15 @@ class LiveTrader:
             if hasattr(m5.index[-1], "isoformat")
             else str(m5.index[-1])
         )
+
+        # Build indicator scores JSON for debugging/feature importance
+        indicator_scores_json = None
+        if signal.indicators:
+            import json
+            indicator_scores_json = json.dumps(signal.indicators)
+
+        # Calendar context
+        minutes_to_next, next_event_type, next_event_impact = self._get_calendar_context()
 
         # Link trade to latest collector snapshot for ML training
         ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
@@ -815,6 +931,15 @@ class LiveTrader:
                 trading_mode=TradingMode.SWING.value,
                 strategy_id=self.strategy_id,
                 signal_id=ref_signal_id,
+                atr_at_entry=atr_val,
+                ml_risk_multiplier=ml_risk_multiplier,
+                ml_risk_reason=ml_risk_reason,
+                ml_loss_proba=ml_loss_proba,
+                ml_model_used=ml_model_used,
+                minutes_to_next_event=minutes_to_next,
+                next_event_type=next_event_type,
+                next_event_impact=next_event_impact,
+                indicator_scores_json=indicator_scores_json,
                 db_path=self.db_path,
             )
             log_trade(logger, "OPENED", account=self.account, direction=direction,
@@ -889,6 +1014,15 @@ class LiveTrader:
                 trading_mode=TradingMode.SWING.value,
                 strategy_id=self.strategy_id,
                 signal_id=ref_signal_id,
+                atr_at_entry=atr_val,
+                ml_risk_multiplier=ml_risk_multiplier,
+                ml_risk_reason=ml_risk_reason,
+                ml_loss_proba=ml_loss_proba,
+                ml_model_used=ml_model_used,
+                minutes_to_next_event=minutes_to_next,
+                next_event_type=next_event_type,
+                next_event_impact=next_event_impact,
+                indicator_scores_json=indicator_scores_json,
                 db_path=self.db_path,
             )
 

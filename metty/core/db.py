@@ -131,6 +131,13 @@ CREATE TABLE IF NOT EXISTS feature_snapshots (
     gold_bias_strength REAL,
     news_sentiment REAL,
 
+    -- Multi-timeframe price context
+    h1_close REAL,
+    h4_close REAL,
+    d1_close REAL,
+    m5_high REAL,
+    m5_low REAL,
+
     FOREIGN KEY (signal_id) REFERENCES signals(id)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON feature_snapshots(timestamp);
@@ -202,6 +209,7 @@ CREATE TABLE IF NOT EXISTS live_trades (
     reason TEXT,
     trading_mode TEXT NOT NULL DEFAULT 'swing',
     strategy_id TEXT NOT NULL DEFAULT '',
+    signal_id INTEGER,
     ticket INTEGER,
     exit_price REAL,
     exit_time TEXT,
@@ -209,6 +217,38 @@ CREATE TABLE IF NOT EXISTS live_trades (
     pnl_pct REAL,
     exit_reason TEXT,
     is_open INTEGER NOT NULL DEFAULT 1,
+
+    -- MFE/MAE tracking (max favorable/adverse excursion)
+    mfe REAL,
+    mae REAL,
+    mfe_pct REAL,
+    mae_pct REAL,
+
+    -- Exit context (regime/trend at exit time)
+    exit_regime TEXT,
+    exit_d1_trend TEXT,
+    exit_h4_trend TEXT,
+
+    -- Execution quality
+    spread_at_entry REAL,
+    slippage REAL,
+    atr_at_entry REAL,
+
+    -- ML filter info (what the model said before entry)
+    ml_risk_multiplier REAL,
+    ml_risk_reason TEXT,
+    ml_model_version TEXT,
+    ml_loss_proba REAL,
+    ml_model_used TEXT,
+
+    -- Calendar context (news/events near entry)
+    minutes_to_next_event INTEGER,
+    next_event_type TEXT,
+    next_event_impact TEXT,
+
+    -- Signal intermediate scores (debugging + feature importance)
+    indicator_scores_json TEXT,
+
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
@@ -259,6 +299,18 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     holding_minutes INTEGER,
     exit_reason TEXT,
     features_json TEXT,
+
+    -- MFE/MAE tracking (max favorable/adverse excursion)
+    mfe REAL,
+    mae REAL,
+    mfe_pct REAL,
+    mae_pct REAL,
+
+    -- Exit context
+    exit_regime TEXT,
+    exit_d1_trend TEXT,
+    exit_h4_trend TEXT,
+
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (trade_id) REFERENCES live_trades(id),
     FOREIGN KEY (signal_id) REFERENCES signals(id),
@@ -267,6 +319,27 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_label ON trade_outcomes(outcome_label);
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_mode ON trade_outcomes(trading_mode, strategy_id);
+
+-- Rejected signals (for tracking survivorship bias)
+CREATE TABLE IF NOT EXISTS rejected_signals (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    price REAL NOT NULL,
+    rejection_reason TEXT NOT NULL,
+    trading_mode TEXT NOT NULL DEFAULT 'swing',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    regime TEXT,
+    session TEXT,
+    d1_trend TEXT,
+    signal_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_rejected_ts ON rejected_signals(timestamp);
+CREATE INDEX IF NOT EXISTS idx_rejected_reason ON rejected_signals(rejection_reason);
 """
 
 
@@ -294,8 +367,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
 
 
 def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
-    """Add trading_mode and strategy_id columns to existing tables."""
+    """Add new columns to existing tables for evolving schema."""
     migrations = [
+        # Original migrations
         ("live_trades", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("live_trades", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
         ("live_trades", "signal_id", "INTEGER"),
@@ -306,6 +380,45 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("feature_snapshots", "h4_trend", "TEXT NOT NULL DEFAULT ''"),
         ("candles", "trading_mode", "TEXT NOT NULL DEFAULT 'swing'"),
         ("candles", "strategy_id", "TEXT NOT NULL DEFAULT ''"),
+        # MFE/MAE tracking
+        ("live_trades", "mfe", "REAL"),
+        ("live_trades", "mae", "REAL"),
+        ("live_trades", "mfe_pct", "REAL"),
+        ("live_trades", "mae_pct", "REAL"),
+        # Exit context
+        ("live_trades", "exit_regime", "TEXT"),
+        ("live_trades", "exit_d1_trend", "TEXT"),
+        ("live_trades", "exit_h4_trend", "TEXT"),
+        # Execution quality
+        ("live_trades", "spread_at_entry", "REAL"),
+        ("live_trades", "slippage", "REAL"),
+        ("live_trades", "atr_at_entry", "REAL"),
+        # ML filter info
+        ("live_trades", "ml_risk_multiplier", "REAL"),
+        ("live_trades", "ml_risk_reason", "TEXT"),
+        ("live_trades", "ml_model_version", "TEXT"),
+        ("live_trades", "ml_loss_proba", "REAL"),
+        ("live_trades", "ml_model_used", "TEXT"),
+        # Calendar context
+        ("live_trades", "minutes_to_next_event", "INTEGER"),
+        ("live_trades", "next_event_type", "TEXT"),
+        ("live_trades", "next_event_impact", "TEXT"),
+        # Signal intermediate scores
+        ("live_trades", "indicator_scores_json", "TEXT"),
+        # Multi-TF price in feature_snapshots
+        ("feature_snapshots", "h1_close", "REAL"),
+        ("feature_snapshots", "h4_close", "REAL"),
+        ("feature_snapshots", "d1_close", "REAL"),
+        ("feature_snapshots", "m5_high", "REAL"),
+        ("feature_snapshots", "m5_low", "REAL"),
+        # MFE/MAE in trade_outcomes
+        ("trade_outcomes", "mfe", "REAL"),
+        ("trade_outcomes", "mae", "REAL"),
+        ("trade_outcomes", "mfe_pct", "REAL"),
+        ("trade_outcomes", "mae_pct", "REAL"),
+        ("trade_outcomes", "exit_regime", "TEXT"),
+        ("trade_outcomes", "exit_d1_trend", "TEXT"),
+        ("trade_outcomes", "exit_h4_trend", "TEXT"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -316,6 +429,8 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
     index_migrations = [
         ("idx_live_trades_mode", "live_trades(trading_mode, strategy_id)"),
         ("idx_signals_mode", "signals(trading_mode, strategy_id)"),
+        ("idx_rejected_ts", "rejected_signals(timestamp)"),
+        ("idx_rejected_reason", "rejected_signals(rejection_reason)"),
     ]
     for idx_name, idx_def in index_migrations:
         try:
@@ -467,6 +582,8 @@ _SNAPSHOT_COLUMNS: set[str] = {
     "atr", "atr_to_price",
     "balance_at_entry", "leverage_at_entry",
     "fear_greed_value", "gold_bias_strength", "news_sentiment",
+    # Multi-timeframe price context
+    "h1_close", "h4_close", "d1_close", "m5_high", "m5_low",
 }
 
 
@@ -518,7 +635,7 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
 
     Links trades to signals by signal_id when available, otherwise by
     timestamp proximity (±60s, same account). Extracts feature snapshots
-    for each linked signal.
+    for each linked signal. Propagates MFE/MAE and exit context from live_trades.
 
     Returns:
         Dict with stats: {linked, skipped, total, outcomes: {WIN, LOSS, BREAKEVEN}}
@@ -530,11 +647,13 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
     stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
 
     try:
-        # Get all closed trades with results
+        # Get all closed trades with results (including MFE/MAE)
         trades = conn.execute(
             """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
                       strategy_id, entry_price, exit_price, pnl, pnl_pct,
-                      exit_reason, signal_id, exit_time
+                      exit_reason, signal_id, exit_time,
+                      mfe, mae, mfe_pct, mae_pct,
+                      exit_regime, exit_d1_trend, exit_h4_trend
                FROM live_trades
                WHERE is_open = 0 AND pnl IS NOT NULL AND exit_price IS NOT NULL
                ORDER BY id"""
@@ -546,6 +665,8 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
             t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
             entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
             signal_id, exit_time = t[12], t[13]
+            mfe, mae, mfe_pct, mae_pct = t[14], t[15], t[16], t[17]
+            exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
 
             # Skip if already in trade_outcomes
             existing = conn.execute(
@@ -634,11 +755,16 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                 """INSERT INTO trade_outcomes
                    (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
                     trading_mode, strategy_id, entry_price, exit_price, profit,
-                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                    mfe, mae, mfe_pct, mae_pct,
+                    exit_regime, exit_d1_trend, exit_h4_trend)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
                  mode, strategy, entry_price, exit_price, pnl, pnl_pct,
-                 outcome, holding_minutes, exit_reason, features_json),
+                 outcome, holding_minutes, exit_reason, features_json,
+                 mfe, mae, mfe_pct, mae_pct,
+                 exit_regime, exit_d1_trend, exit_h4_trend),
             )
             stats["linked"] += 1
             stats["outcomes"][outcome] += 1
@@ -779,6 +905,22 @@ def insert_live_trade(
     trading_mode: str = "swing",
     strategy_id: str = "",
     signal_id: int | None = None,
+    # Execution quality
+    spread_at_entry: float | None = None,
+    slippage: float | None = None,
+    atr_at_entry: float | None = None,
+    # ML filter info
+    ml_risk_multiplier: float | None = None,
+    ml_risk_reason: str | None = None,
+    ml_model_version: str | None = None,
+    ml_loss_proba: float | None = None,
+    ml_model_used: str | None = None,
+    # Calendar context
+    minutes_to_next_event: int | None = None,
+    next_event_type: str | None = None,
+    next_event_impact: str | None = None,
+    # Signal intermediate scores
+    indicator_scores_json: str | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a live trade record and return its ID."""
@@ -788,11 +930,60 @@ def insert_live_trade(
             """INSERT INTO live_trades
                (account_id, timestamp, direction, symbol, entry_price, stop_loss,
                 take_profit, lot_size, confidence, regime, session, d1_trend,
-                reason, trading_mode, strategy_id, signal_id, ticket, is_open)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                reason, trading_mode, strategy_id, signal_id, ticket, is_open,
+                spread_at_entry, slippage, atr_at_entry,
+                ml_risk_multiplier, ml_risk_reason, ml_model_version,
+                ml_loss_proba, ml_model_used,
+                minutes_to_next_event, next_event_type, next_event_impact,
+                indicator_scores_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (account_id, timestamp, direction, symbol, entry_price, stop_loss,
              take_profit, lot_size, confidence, regime, session, d1_trend,
-             reason, trading_mode, strategy_id, signal_id, ticket),
+             reason, trading_mode, strategy_id, signal_id, ticket,
+             spread_at_entry, slippage, atr_at_entry,
+             ml_risk_multiplier, ml_risk_reason, ml_model_version,
+             ml_loss_proba, ml_model_used,
+             minutes_to_next_event, next_event_type, next_event_impact,
+             indicator_scores_json),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def insert_rejected_signal(
+    account_id: int,
+    timestamp: str,
+    direction: str,
+    confidence: float,
+    price: float,
+    rejection_reason: str,
+    trading_mode: str = "swing",
+    strategy_id: str = "",
+    regime: str | None = None,
+    session: str | None = None,
+    d1_trend: str | None = None,
+    signal_json: str | None = None,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Insert a rejected signal record and return its ID.
+
+    Tracks signals that were generated but rejected (low confidence,
+    circuit breaker, ML filter, etc.) for survivorship bias analysis.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """INSERT INTO rejected_signals
+               (account_id, timestamp, direction, confidence, price,
+                rejection_reason, trading_mode, strategy_id, regime,
+                session, d1_trend, signal_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (account_id, timestamp, direction, confidence, price,
+             rejection_reason, trading_mode, strategy_id, regime,
+             session, d1_trend, signal_json),
         )
         conn.commit()
         return cursor.lastrowid
@@ -848,6 +1039,15 @@ def close_live_trade(
     pnl: float,
     pnl_pct: float,
     exit_reason: str,
+    # MFE/MAE tracking
+    mfe: float | None = None,
+    mae: float | None = None,
+    mfe_pct: float | None = None,
+    mae_pct: float | None = None,
+    # Exit context
+    exit_regime: str | None = None,
+    exit_d1_trend: str | None = None,
+    exit_h4_trend: str | None = None,
     db_path: Optional[Path] = None,
 ) -> None:
     """Close a live trade by marking it as closed with exit details."""
@@ -856,9 +1056,14 @@ def close_live_trade(
         conn.execute(
             """UPDATE live_trades SET
                exit_price = ?, exit_time = ?, pnl = ?, pnl_pct = ?,
-               exit_reason = ?, is_open = 0
+               exit_reason = ?, is_open = 0,
+               mfe = ?, mae = ?, mfe_pct = ?, mae_pct = ?,
+               exit_regime = ?, exit_d1_trend = ?, exit_h4_trend = ?
                WHERE id = ?""",
-            (exit_price, exit_time, pnl, pnl_pct, exit_reason, trade_id),
+            (exit_price, exit_time, pnl, pnl_pct, exit_reason,
+             mfe, mae, mfe_pct, mae_pct,
+             exit_regime, exit_d1_trend, exit_h4_trend,
+             trade_id),
         )
         conn.commit()
     finally:
@@ -931,7 +1136,7 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
 
     Links trades to signals by signal_id when available, otherwise by
     timestamp proximity (±60s, same account). Extracts feature snapshots
-    for each linked signal.
+    for each linked signal. Propagates MFE/MAE and exit context from live_trades.
 
     Returns:
         Dict with stats: {linked, skipped, total, outcomes: {WIN, LOSS, BREAKEVEN}}
@@ -943,11 +1148,13 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
     stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
 
     try:
-        # Get all closed trades with results
+        # Get all closed trades with results (including MFE/MAE)
         trades = conn.execute(
             """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
                       strategy_id, entry_price, exit_price, pnl, pnl_pct,
-                      exit_reason, signal_id, exit_time
+                      exit_reason, signal_id, exit_time,
+                      mfe, mae, mfe_pct, mae_pct,
+                      exit_regime, exit_d1_trend, exit_h4_trend
                FROM live_trades
                WHERE is_open = 0 AND pnl IS NOT NULL AND exit_price IS NOT NULL
                ORDER BY id"""
@@ -959,6 +1166,8 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
             t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
             entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
             signal_id, exit_time = t[12], t[13]
+            mfe, mae, mfe_pct, mae_pct = t[14], t[15], t[16], t[17]
+            exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
 
             # Skip if already in trade_outcomes
             existing = conn.execute(
@@ -1047,11 +1256,16 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                 """INSERT INTO trade_outcomes
                    (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
                     trading_mode, strategy_id, entry_price, exit_price, profit,
-                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                    mfe, mae, mfe_pct, mae_pct,
+                    exit_regime, exit_d1_trend, exit_h4_trend)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
                  mode, strategy, entry_price, exit_price, pnl, pnl_pct,
-                 outcome, holding_minutes, exit_reason, features_json),
+                 outcome, holding_minutes, exit_reason, features_json,
+                 mfe, mae, mfe_pct, mae_pct,
+                 exit_regime, exit_d1_trend, exit_h4_trend),
             )
             stats["linked"] += 1
             stats["outcomes"][outcome] += 1

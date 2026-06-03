@@ -39,6 +39,7 @@ from metty.core.db import (
     get_open_trades,
     init_db,
     insert_live_trade,
+    insert_rejected_signal,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -577,6 +578,10 @@ class M5ScalpTrader:
                 else str(m5.index[-1])
             )
 
+            # Build indicator scores JSON for debugging
+            import json as _json
+            indicator_scores_json = _json.dumps(signal.indicators) if signal.indicators else None
+
             insert_live_trade(
                 account_id=self.account_id,
                 timestamp=ts_str,
@@ -594,6 +599,8 @@ class M5ScalpTrader:
                 trading_mode=TradingMode.M5_SCALP.value,
                 strategy_id=self.strategy_id,
                 signal_id=ref_signal_id,
+                atr_at_entry=float(latest_atr) if latest_atr else None,
+                indicator_scores_json=indicator_scores_json,
                 db_path=self.db_path,
             )
 

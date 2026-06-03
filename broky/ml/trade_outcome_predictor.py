@@ -246,6 +246,7 @@ def compute_features_from_candles(
     spread: float = 0,
     d1_trend: str = "neutral",
     session: str = "unknown",
+    sentiment: dict | None = None,
 ) -> dict[str, float | str]:
     """Compute ML features from candle data for trade outcome prediction.
 
@@ -417,17 +418,32 @@ def compute_features_from_candles(
     vwap = (typical * volume).cumsum() / volume.cumsum()
     features["vwap_offset_pct"] = float(100 * (price - vwap.iloc[-1]) / vwap.iloc[-1]) if vwap.iloc[-1] > 0 else 0
 
-    # Sentiment (fallback values if not available)
-    features["fear_greed_value"] = 50.0
-    features["gold_bias_strength"] = 50.0
-    features["news_sentiment"] = 0.0
+    # Sentiment (use real values if provided, otherwise neutral defaults)
+    _sent = sentiment or {}
+    features["fear_greed_value"] = _sent.get("fear_greed_value", 50.0)
+    features["gold_bias_strength"] = _sent.get("gold_bias_strength", 50.0)
+    features["news_sentiment"] = _sent.get("news_sentiment", 0.0)
     features["spread_ratio"] = float(spread) / max(features["atr"], 0.01)
-    features["long_short_ratio"] = 50.0
-    features["session_strength"] = 50.0
+    features["long_short_ratio"] = _sent.get("long_short_ratio", 50.0)
+    features["session_strength"] = _sent.get("session_strength", 50.0)
+
+    # MFI signal (derived from MFI value computed above)
+    mfi_val = features.get("mfi", 50.0)
+    features["mfi_signal"] = "oversold" if mfi_val < 20 else ("overbought" if mfi_val > 80 else "neutral")
 
     # Balance/leverage (not available before trade entry)
     features["balance_at_entry"] = 0.0
     features["leverage_at_entry"] = 0.0
+
+    # Multi-timeframe price context
+    h1 = candles.get("H1")
+    h4 = candles.get("H4")
+    d1 = candles.get("D1")
+    features["h1_close"] = float(h1["close"].iloc[-1]) if h1 is not None and not h1.empty else None
+    features["h4_close"] = float(h4["close"].iloc[-1]) if h4 is not None and not h4.empty else None
+    features["d1_close"] = float(d1["close"].iloc[-1]) if d1 is not None and not d1.empty else None
+    features["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else None
+    features["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else None
 
     return features
 

@@ -325,6 +325,14 @@ class LiveCollector:
         full_snapshot["gold_bias_strength"] = sentiment.get("gold_bias_strength")
         full_snapshot["news_sentiment"] = sentiment.get("news_sentiment")
 
+        # Multi-timeframe price context
+        h1 = candles.get("H1")
+        full_snapshot["h1_close"] = float(h1["close"].iloc[-1]) if h1 is not None and not h1.empty else None
+        full_snapshot["h4_close"] = float(h4["close"].iloc[-1]) if h4 is not None and not h4.empty else None
+        full_snapshot["d1_close"] = float(d1["close"].iloc[-1]) if d1 is not None and not d1.empty else None
+        full_snapshot["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else None
+        full_snapshot["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else None
+
         # Clean NaN values
         clean = {}
         for k, v in full_snapshot.items():

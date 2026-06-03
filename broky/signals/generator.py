@@ -650,6 +650,11 @@ def generate_signal(
         active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
         reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
 
+    # Initialize trend/session intermediate values (may be overwritten by trend logic)
+    trend_mult: float = 1.0
+    h4_override: bool = False
+    session_mult: float = 1.0
+
     # Multi-timeframe trend filter — confidence scaling based on trend strength + momentum
     # Instead of hard blocking counter-trend trades, scale confidence by:
     # 1. How strong the D1 trend is (weak trend → less reduction)
@@ -743,4 +748,8 @@ def generate_signal(
         reason=reason,
         regime=regime,
         strategy_id=strategy_id,
+        weighted_score=weighted_score,
+        trend_mult=trend_mult if trend_mult != 1.0 else None,
+        h4_override=str(h4_override) if h4_override else None,
+        session_mult=session_mult if session_mult != 1.0 else None,
     )

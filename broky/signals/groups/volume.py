@@ -59,10 +59,18 @@ class VolumeGroup:
         def last(series: pd.Series) -> float:
             return float(series.iloc[-1]) if len(series) > 0 and not pd.isna(series.iloc[-1]) else float("nan")
 
+        # Derive mfi_signal from MFI value
+        mfi_val = last(mfi)
+        if not pd.isna(mfi_val):
+            mfi_signal = "oversold" if mfi_val < 20 else ("overbought" if mfi_val > 80 else "neutral")
+        else:
+            mfi_signal = "neutral"
+
         return {
             "obv": last(obv),
             "obv_slope": last(obv_slope),
-            "mfi": last(mfi),
+            "mfi": mfi_val,
+            "mfi_signal": mfi_signal,
             "vwap_offset_pct": last(vwap_offset),
             "volume_roc": last(vol_roc),
             "ad_line": last(ad),

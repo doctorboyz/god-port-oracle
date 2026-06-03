@@ -83,6 +83,11 @@ class Signal(BaseModel):
     regime: Optional[str] = None
     trading_mode: TradingMode = TradingMode.SWING
     strategy_id: str = ""
+    # Signal intermediate scores (for debugging + feature importance)
+    weighted_score: Optional[float] = None
+    trend_mult: Optional[float] = None
+    h4_override: Optional[str] = None
+    session_mult: Optional[float] = None
 
     @field_validator("confidence")
     @classmethod
@@ -244,6 +249,13 @@ class FeatureSnapshot(BaseModel):
     gold_bias_strength: Optional[float] = None
     news_sentiment: Optional[float] = None
 
+    # Multi-timeframe price context
+    h1_close: Optional[float] = None
+    h4_close: Optional[float] = None
+    d1_close: Optional[float] = None
+    m5_high: Optional[float] = None
+    m5_low: Optional[float] = None
+
 
 class ExitReason(str, Enum):
     STOP_LOSS = "stop_loss"
@@ -271,9 +283,35 @@ class LiveTrade(BaseModel):
     reason: str = ""
     trading_mode: TradingMode = TradingMode.SWING
     strategy_id: str = ""
+    signal_id: Optional[int] = None
     ticket: Optional[int] = None
     exit_price: Optional[float] = None
     exit_time: Optional[datetime] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
     exit_reason: Optional[str] = None
+    # MFE/MAE tracking
+    mfe: Optional[float] = None
+    mae: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
+    # Exit context
+    exit_regime: Optional[str] = None
+    exit_d1_trend: Optional[str] = None
+    exit_h4_trend: Optional[str] = None
+    # Execution quality
+    spread_at_entry: Optional[float] = None
+    slippage: Optional[float] = None
+    atr_at_entry: Optional[float] = None
+    # ML filter info
+    ml_risk_multiplier: Optional[float] = None
+    ml_risk_reason: Optional[str] = None
+    ml_model_version: Optional[str] = None
+    ml_loss_proba: Optional[float] = None
+    ml_model_used: Optional[str] = None
+    # Calendar context
+    minutes_to_next_event: Optional[int] = None
+    next_event_type: Optional[str] = None
+    next_event_impact: Optional[str] = None
+    # Signal intermediate scores
+    indicator_scores_json: Optional[str] = None

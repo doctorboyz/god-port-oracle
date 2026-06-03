@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Categorical features that need encoding
-CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend"}
+CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend", "mfi_signal"}
 
 # Numeric features organized by group
 VOLUME_FEATURES = [
@@ -44,7 +44,12 @@ EXTERNAL_SENTIMENT_FEATURES = [
     "fear_greed_value", "gold_bias_strength", "news_sentiment",
 ]
 
-ALL_NUMERIC_FEATURES = VOLUME_FEATURES + OB_OS_FEATURES + MA_FEATURES + SENTIMENT_FEATURES + BROKY_FEATURES + EXTERNAL_SENTIMENT_FEATURES
+# Multi-timeframe price context features
+MULTI_TF_PRICE_FEATURES = [
+    "h1_close", "h4_close", "d1_close", "m5_high", "m5_low",
+]
+
+ALL_NUMERIC_FEATURES = VOLUME_FEATURES + OB_OS_FEATURES + MA_FEATURES + SENTIMENT_FEATURES + BROKY_FEATURES + EXTERNAL_SENTIMENT_FEATURES + MULTI_TF_PRICE_FEATURES
 
 
 class FeatureEngineer:
@@ -99,6 +104,11 @@ class FeatureEngineer:
             trend_map = {"bullish": 1, "bearish": -1}
             result["h4_trend_encoded"] = result["h4_trend"].map(trend_map).fillna(0).astype(int)
 
+        # Encode mfi_signal: oversold=1, neutral=0, overbought=-1
+        if "mfi_signal" in result.columns:
+            mfi_map = {"oversold": 1, "neutral": 0, "overbought": -1}
+            result["mfi_signal_encoded"] = result["mfi_signal"].map(mfi_map).fillna(0).astype(int)
+
         # Fill NaN in numeric features with median (if fitted) or 0
         # Also force all numeric features to float dtype (SQLite may return mixed types)
         if self.fillna:
@@ -136,7 +146,7 @@ class FeatureEngineer:
             if col in df.columns:
                 cols.append(col)
         # Encoded categorical features
-        for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded"]:
+        for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded", "mfi_signal_encoded"]:
             if col in df.columns:
                 cols.append(col)
         # One-hot session columns (use cached order if available)
