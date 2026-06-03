@@ -272,6 +272,14 @@ class HistoricalCollector:
         full_snapshot["d1_trend"] = d1_trend
         full_snapshot["h4_trend"] = h4_trend
 
+        # Multi-timeframe price context for ML features
+        h1 = candles.get("H1")
+        full_snapshot["h1_close"] = float(h1["close"].iloc[-1]) if h1 is not None and not h1.empty else None
+        full_snapshot["h4_close"] = float(h4["close"].iloc[-1]) if h4 is not None and not h4.empty else None
+        full_snapshot["d1_close"] = float(d1["close"].iloc[-1]) if d1 is not None and not d1.empty else None
+        full_snapshot["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else None
+        full_snapshot["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else None
+
         price = full_snapshot.get("price", 0.0)
         if price <= 0:
             return None

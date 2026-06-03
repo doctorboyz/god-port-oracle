@@ -107,6 +107,9 @@ class ScalpTrader:
         )
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0
+        self._sentiment_cache: dict = {}
+        self._sentiment_cache_time: float = 0
+        self._mfe_mae_state: dict[int, dict] = {}  # trade_id → {mfe, mae, mfe_pct, mae_pct}
         self._last_exit_time: Optional[datetime] = None
         self._cycle_count: int = 0
         self._bridge = None  # PersistentMT5Bridge, initialized lazily
@@ -298,6 +301,8 @@ class ScalpTrader:
 
         m1 = candles["M1"]
         current_price = float(m1["close"].iloc[-1])
+        current_high = float(m1["high"].iloc[-1]) if "high" in m1.columns else current_price
+        current_low = float(m1["low"].iloc[-1]) if "low" in m1.columns else current_price
         now_str = datetime.now(timezone.utc).isoformat()
 
         for trade in open_trades:
@@ -307,11 +312,25 @@ class ScalpTrader:
             if strategy != self.strategy_id and mode != "scalp":
                 continue
 
+            trade_id = trade["id"]
             direction = trade["direction"]
             entry_price = trade["entry_price"]
             sl = trade["stop_loss"]
             tp = trade["take_profit"]
             lot_size = trade["lot_size"]
+
+            # Update MFE/MAE tracking
+            if trade_id not in self._mfe_mae_state:
+                self._mfe_mae_state[trade_id] = {"mfe": 0.0, "mae": 0.0}
+            state = self._mfe_mae_state[trade_id]
+            if direction == "BUY":
+                favorable = current_high - entry_price
+                adverse = entry_price - current_low
+            else:
+                favorable = entry_price - current_low
+                adverse = current_high - entry_price
+            state["mfe"] = max(state["mfe"], favorable)
+            state["mae"] = max(state["mae"], adverse)
 
             exit_reason = None
             exit_price = current_price
@@ -356,15 +375,27 @@ class ScalpTrader:
                     pnl = (entry_price - exit_price) * lot_size * CONTRACT_SIZE
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
+                # MFE/MAE from tracking state
+                mfe = state["mfe"] if entry_price > 0 else None
+                mae = state["mae"] if entry_price > 0 else None
+                mfe_pct = (mfe / entry_price * 100) if mfe and entry_price > 0 else None
+                mae_pct = (mae / entry_price * 100) if mae and entry_price > 0 else None
+
                 close_live_trade(
-                    trade_id=trade["id"],
+                    trade_id=trade_id,
                     exit_price=exit_price,
                     exit_time=now_str,
                     pnl=round(pnl, 2),
                     pnl_pct=round(pnl_pct, 4),
                     exit_reason=exit_reason,
+                    mfe=round(mfe, 2) if mfe else None,
+                    mae=round(mae, 2) if mae else None,
+                    mfe_pct=round(mfe_pct, 4) if mfe_pct else None,
+                    mae_pct=round(mae_pct, 4) if mae_pct else None,
                     db_path=self.db_path,
                 )
+                # Clean up MFE/MAE state
+                self._mfe_mae_state.pop(trade_id, None)
 
                 if pnl > 0:
                     self.circuit_breaker.record_win(pnl)
@@ -436,6 +467,79 @@ class ScalpTrader:
             pass
         return 500.0
 
+    def _get_sentiment(self) -> dict:
+        """Get sentiment data with 15-minute cache."""
+        now = time.time()
+        if now - self._sentiment_cache_time > 900:
+            try:
+                from metty.execution.live_collector import fetch_live_sentiment
+                self._sentiment_cache = fetch_live_sentiment()
+            except Exception as e:
+                logger.warning("[Scalp:%s] Sentiment fetch failed: %s", self.account, e)
+                self._sentiment_cache = {}
+            self._sentiment_cache_time = now
+        return self._sentiment_cache
+
+    def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
+        """Get minutes to next high-impact event and its type/impact."""
+        try:
+            from broky.data.calendar import fetch_calendar
+            now = time.time()
+            if now - self._calendar_cache_time > 3600:
+                self._calendar_cache = fetch_calendar(days_ahead=2, filter_currencies={"USD"})
+                self._calendar_cache_time = now
+            if not self._calendar_cache:
+                return None, None, None
+            from datetime import datetime as _dt, timezone as _tz
+            now_utc = _dt.now(_tz.utc)
+            min_minutes = None
+            min_event_type = None
+            min_event_impact = None
+            for ev in self._calendar_cache:
+                impact = ev.get("impact", "")
+                if impact not in ("High", "high"):
+                    continue
+                ev_time = ev.get("time") or ev.get("datetime")
+                if not ev_time:
+                    continue
+                try:
+                    if isinstance(ev_time, str):
+                        ev_dt = _dt.fromisoformat(ev_time.replace("Z", "+00:00"))
+                    else:
+                        ev_dt = ev_time
+                    delta = (ev_dt - now_utc).total_seconds() / 60
+                    if delta > 0 and (min_minutes is None or delta < min_minutes):
+                        min_minutes = int(delta)
+                        min_event_type = ev.get("title", ev.get("event", "unknown"))
+                        min_event_impact = impact
+                except Exception:
+                    continue
+            return min_minutes, min_event_type, min_event_impact
+        except Exception:
+            return None, None, None
+
+    def _record_rejection(self, signal, reason: str, session: str = "unknown",
+                          d1_trend: str | None = None, h4_trend: str | None = None) -> None:
+        """Record a rejected signal for survivorship bias analysis."""
+        try:
+            ts_str = datetime.now(timezone.utc).isoformat()
+            insert_rejected_signal(
+                account_id=self.account_id,
+                timestamp=ts_str,
+                direction=signal.signal_type.value if signal else "HOLD",
+                confidence=signal.confidence if signal else 0.0,
+                price=signal.price if signal else 0.0,
+                rejection_reason=reason,
+                trading_mode=TradingMode.SCALP.value,
+                strategy_id=self.strategy_id,
+                regime=signal.regime if signal else "unknown",
+                session=session,
+                d1_trend=d1_trend,
+                db_path=self.db_path,
+            )
+        except Exception as e:
+            logger.warning("[Scalp:%s] Rejected signal recording failed: %s", self.account, e)
+
     def run_once(self) -> dict:
         """Run a single scalp trading cycle."""
         init_db(self.db_path)
@@ -456,6 +560,7 @@ class ScalpTrader:
         # 3. Get spread and check
         spread = self._get_spread()
         if spread > 0 and not check_spread(spread, self.risk.max_spread_points):
+            self._record_rejection(None, f"spread {spread:.0f} > max {self.risk.max_spread_points:.0f}")
             return {
                 "action": "hold",
                 "reason": f"spread {spread:.0f} > max {self.risk.max_spread_points:.0f}",
@@ -470,6 +575,7 @@ class ScalpTrader:
 
         # Session gate: only trade during liquid sessions (London, Overlap, NY)
         if session not in ("london", "overlap", "ny"):
+            self._record_rejection(None, f"scalp blocked: {session} session", session=session)
             return {
                 "action": "hold",
                 "reason": f"scalp blocked: {session} session",
@@ -500,6 +606,7 @@ class ScalpTrader:
         # 6. Risk checks
         can_trade, cb_reason = self.circuit_breaker.can_open_trade()
         if not can_trade:
+            self._record_rejection(signal, f"circuit breaker: {cb_reason}", session=session)
             if self.event_bus:
                 self.event_bus.publish(Event(
                     type=EventType.CIRCUIT_BREAKER_TRIGGERED,
@@ -516,6 +623,7 @@ class ScalpTrader:
             }
 
         if self._check_cooldown():
+            self._record_rejection(signal, "cooldown after last scalp exit", session=session)
             return {
                 "action": "hold",
                 "reason": "cooldown after last scalp exit",
@@ -523,6 +631,7 @@ class ScalpTrader:
             }
 
         if self._check_existing_scalp_position():
+            self._record_rejection(signal, "scalp position already open", session=session)
             return {
                 "action": "hold",
                 "reason": "scalp position already open",
@@ -531,23 +640,32 @@ class ScalpTrader:
 
         # 6.5. ML filter — risk-scale position size based on P(LOSS) prediction
         ml_risk_multiplier = 1.0
+        ml_risk_reason: str | None = None
+        ml_loss_proba: float | None = None
+        ml_model_used: str | None = None
+        ml_model_version: str | None = None
         if self._ml_enabled and self._ml_predictor is not None:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
+            _sentiment = self._get_sentiment()
             ml_features = compute_features_from_candles(
                 candles, str(signal.signal_type.value),
                 spread=spread if spread > 0 else 0,
                 d1_trend="neutral",
                 session=session,
+                sentiment=_sentiment,
             )
-            ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
+            ml_risk_multiplier, ml_risk_reason = self._ml_predictor.get_risk_multiplier(
                 ml_features, "trending", str(signal.signal_type.value),
             )
+            ml_loss_proba = self._ml_predictor._last_loss_proba if hasattr(self._ml_predictor, '_last_loss_proba') else None
+            ml_model_used = "xgboost" if ml_risk_multiplier != 1.0 else None
             if ml_risk_multiplier == 0:
-                logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_reason)
-                return {"action": "hold", "reason": ml_reason, "signal": signal}
+                logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_risk_reason)
+                self._record_rejection(signal, ml_risk_reason or "ml_filter_blocked", session=session)
+                return {"action": "hold", "reason": ml_risk_reason, "signal": signal}
             elif ml_risk_multiplier < 1.0:
-                logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_reason)
+                logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_risk_reason)
 
         # 7. Calculate SL/TP/lots using M1 ATR
         try:
@@ -572,7 +690,11 @@ class ScalpTrader:
         lots *= ml_risk_multiplier  # ML risk-scaling
         if lots < 0.01:
             logger.info("[Scalp:%s] ML risk-scaling: lots=%.4f < 0.01, skipping", self.account, lots)
+            self._record_rejection(signal, f"ml_lot_too_small ({lots:.4f})", session=session)
             return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
+
+        # 7.5. Calendar context for data collection
+        minutes_to_next_event, next_event_type, next_event_impact = self._get_calendar_context()
 
         # 8. Execute or dry-run
         ts_str = (
@@ -605,6 +727,15 @@ class ScalpTrader:
                 strategy_id=self.strategy_id,
                 atr_at_entry=atr_val,
                 indicator_scores_json=indicator_scores_json,
+                spread_at_entry=spread if spread > 0 else None,
+                ml_risk_multiplier=ml_risk_multiplier if ml_risk_multiplier != 1.0 else None,
+                ml_risk_reason=ml_risk_reason,
+                ml_loss_proba=ml_loss_proba,
+                ml_model_used=ml_model_used,
+                ml_model_version=ml_model_version,
+                minutes_to_next_event=minutes_to_next_event,
+                next_event_type=next_event_type,
+                next_event_impact=next_event_impact,
                 db_path=self.db_path,
             )
             logger.info(
@@ -661,6 +792,15 @@ class ScalpTrader:
                 strategy_id=self.strategy_id,
                 atr_at_entry=atr_val,
                 indicator_scores_json=indicator_scores_json,
+                spread_at_entry=spread if spread > 0 else None,
+                ml_risk_multiplier=ml_risk_multiplier if ml_risk_multiplier != 1.0 else None,
+                ml_risk_reason=ml_risk_reason,
+                ml_loss_proba=ml_loss_proba,
+                ml_model_used=ml_model_used,
+                ml_model_version=ml_model_version,
+                minutes_to_next_event=minutes_to_next_event,
+                next_event_type=next_event_type,
+                next_event_impact=next_event_impact,
                 db_path=self.db_path,
             )
 
