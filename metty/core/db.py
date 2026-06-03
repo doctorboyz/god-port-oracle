@@ -745,8 +745,8 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                         "SELECT * FROM feature_snapshots LIMIT 0"
                     ).description]
                     snap_dict = dict(zip(columns, snap_row))
-                    # Remove metadata keys (keep d1_trend, h4_trend for ML training)
-                    for key in ["id", "signal_id", "timestamp", "timeframe", "session",
+                    # Remove metadata keys (keep d1_trend, h4_trend, session for ML training)
+                    for key in ["id", "signal_id", "timestamp", "timeframe",
                                 "trading_mode", "strategy_id"]:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)
@@ -1246,8 +1246,8 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                         "SELECT * FROM feature_snapshots LIMIT 0"
                     ).description]
                     snap_dict = dict(zip(columns, snap_row))
-                    # Remove metadata keys (keep d1_trend, h4_trend for ML training)
-                    for key in ["id", "signal_id", "timestamp", "timeframe", "session",
+                    # Remove metadata keys (keep d1_trend, h4_trend, session for ML training)
+                    for key in ["id", "signal_id", "timestamp", "timeframe",
                                 "trading_mode", "strategy_id"]:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)

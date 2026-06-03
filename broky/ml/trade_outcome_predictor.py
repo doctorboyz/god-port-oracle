@@ -245,6 +245,7 @@ def compute_features_from_candles(
     direction: str,
     spread: float = 0,
     d1_trend: str = "neutral",
+    h4_trend: str = "unknown",
     session: str = "unknown",
     sentiment: dict | None = None,
 ) -> dict[str, float | str]:
@@ -265,6 +266,7 @@ def compute_features_from_candles(
     features: dict[str, float | str] = {
         "session": session,
         "d1_trend": d1_trend,
+        "h4_trend": h4_trend,
     }
 
     # Price
@@ -423,9 +425,33 @@ def compute_features_from_candles(
     features["fear_greed_value"] = _sent.get("fear_greed_value", 50.0)
     features["gold_bias_strength"] = _sent.get("gold_bias_strength", 50.0)
     features["news_sentiment"] = _sent.get("news_sentiment", 0.0)
-    features["spread_ratio"] = float(spread) / max(features["atr"], 0.01)
-    features["long_short_ratio"] = _sent.get("long_short_ratio", 50.0)
-    features["session_strength"] = _sent.get("session_strength", 50.0)
+
+    # spread_ratio: must match training formula from SentimentGroup.compute_indicators()
+    # Training: (current_high - current_low) / rolling_20_avg(high - low)
+    # NOT spread / ATR (that was wrong — different value range)
+    if len(high) >= 20 and len(low) >= 20:
+        bar_range = float(high.iloc[-1] - low.iloc[-1])
+        avg_range = float((high - low).rolling(20).mean().iloc[-1])
+        features["spread_ratio"] = bar_range / avg_range if avg_range > 0 else float("nan")
+    else:
+        features["spread_ratio"] = float("nan")
+
+    # long_short_ratio: always NaN at training time (no broker data available)
+    features["long_short_ratio"] = float("nan")
+
+    # session_strength: must match training formula from SentimentGroup._session_strength()
+    # Training: 0.2-1.0 based on UTC hour, NOT 50.0
+    hour = m5.index[-1].hour if hasattr(m5.index[-1], "hour") else 0
+    if 13 <= hour <= 16:
+        features["session_strength"] = 1.0   # London/NY overlap
+    elif 8 <= hour <= 16:
+        features["session_strength"] = 0.7   # London
+    elif 13 <= hour <= 22:
+        features["session_strength"] = 0.7   # NY
+    elif 0 <= hour <= 8:
+        features["session_strength"] = 0.4   # Asian
+    else:
+        features["session_strength"] = 0.2   # Off-hours
 
     # MFI signal (derived from MFI value computed above)
     mfi_val = features.get("mfi", 50.0)

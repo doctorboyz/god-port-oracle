@@ -110,6 +110,8 @@ class ScalpTrader:
         self._sentiment_cache: dict = {}
         self._sentiment_cache_time: float = 0
         self._mfe_mae_state: dict[int, dict] = {}  # trade_id → {mfe, mae, mfe_pct, mae_pct}
+        self._last_d1_trend: Optional[str] = None
+        self._last_h4_trend: Optional[str] = None
         self._last_exit_time: Optional[datetime] = None
         self._cycle_count: int = 0
         self._bridge = None  # PersistentMT5Bridge, initialized lazily
@@ -392,6 +394,9 @@ class ScalpTrader:
                     mae=round(mae, 2) if mae else None,
                     mfe_pct=round(mfe_pct, 4) if mfe_pct else None,
                     mae_pct=round(mae_pct, 4) if mae_pct else None,
+                    exit_regime=signal.regime if signal and hasattr(signal, 'regime') else "unknown",
+                    exit_d1_trend=self._last_d1_trend,
+                    exit_h4_trend=self._last_h4_trend,
                     db_path=self.db_path,
                 )
                 # Clean up MFE/MAE state
@@ -648,10 +653,23 @@ class ScalpTrader:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
             _sentiment = self._get_sentiment()
+            # Derive D1 trend proxy from H1 EMA50 (scalp doesn't have D1 data)
+            h1 = candles.get("H1")
+            _d1_proxy = "unknown"
+            if h1 is not None and len(h1) >= 50:
+                try:
+                    ema50 = h1["close"].ewm(span=50, adjust=False).mean()
+                    if h1["close"].iloc[-1] > ema50.iloc[-1]:
+                        _d1_proxy = "bullish"
+                    else:
+                        _d1_proxy = "bearish"
+                except Exception:
+                    pass
             ml_features = compute_features_from_candles(
                 candles, str(signal.signal_type.value),
                 spread=spread if spread > 0 else 0,
-                d1_trend="neutral",
+                d1_trend=_d1_proxy,
+                h4_trend="unknown",
                 session=session,
                 sentiment=_sentiment,
             )
@@ -703,6 +721,10 @@ class ScalpTrader:
             else str(m1.index[-1])
         )
         m1_trend = self._determine_m1_trend(m1)
+
+        # Store trend state for exit context (scalp uses M1 as D1 proxy)
+        self._last_d1_trend = _d1_proxy  # H1 EMA50-based proxy
+        self._last_h4_trend = "unknown"  # scalp doesn't fetch H4
 
         # Build indicator scores JSON for debugging/feature importance
         import json as _json

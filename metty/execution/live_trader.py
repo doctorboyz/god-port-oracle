@@ -191,6 +191,18 @@ class LiveTrader:
             self._sentiment_cache_time = now
         return self._sentiment_cache
 
+    def _get_current_spread(self) -> float:
+        """Get current spread from MT5 bridge. Returns 0.0 if unavailable."""
+        try:
+            bridge = self._get_bridge()
+            if bridge is not None:
+                spread = bridge.get_spread_sync("XAUUSD")
+                if spread is not None and spread >= 0:
+                    return float(spread)
+        except Exception as e:
+            logger.debug("[Swing:%s] Spread fetch failed: %s", self.account, e)
+        return 0.0
+
     def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
         """Get minutes to next event, event type, and impact level."""
         calendar = self._get_calendar()
@@ -839,10 +851,12 @@ class LiveTrader:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
             sentiment_data = self._get_sentiment()
+            _live_spread = self._get_current_spread()
             ml_features = compute_features_from_candles(
                 candles, str(signal.signal_type.value),
-                spread=0.0,  # swing trader doesn't fetch spread — pass 0
+                spread=_live_spread,
                 d1_trend=d1_trend or "neutral",
+                h4_trend=self._last_h4_trend or "unknown",
                 session=session,
                 sentiment=sentiment_data,
             )
@@ -932,6 +946,7 @@ class LiveTrader:
                 strategy_id=self.strategy_id,
                 signal_id=ref_signal_id,
                 atr_at_entry=atr_val,
+                spread_at_entry=_live_spread if _live_spread > 0 else None,
                 ml_risk_multiplier=ml_risk_multiplier,
                 ml_risk_reason=ml_risk_reason,
                 ml_loss_proba=ml_loss_proba,
@@ -1015,6 +1030,7 @@ class LiveTrader:
                 strategy_id=self.strategy_id,
                 signal_id=ref_signal_id,
                 atr_at_entry=atr_val,
+                spread_at_entry=_live_spread if _live_spread > 0 else None,
                 ml_risk_multiplier=ml_risk_multiplier,
                 ml_risk_reason=ml_risk_reason,
                 ml_loss_proba=ml_loss_proba,

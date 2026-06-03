@@ -147,6 +147,8 @@ class M5ScalpTrader:
         self._sentiment_cache: dict = {}
         self._sentiment_cache_time: float = 0
         self._mfe_mae_state: dict[int, dict] = {}  # trade_id → {mfe, mae}
+        self._last_d1_trend: Optional[str] = None
+        self._last_h4_trend: Optional[str] = None
         self.event_bus = event_bus
         # ML filter — only enabled if models have decent accuracy
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
@@ -399,6 +401,7 @@ class M5ScalpTrader:
 
         # 2. Check for existing M5 scalp position (always enforced — prevents churn)
         if self._check_existing_m5_scalp_position():
+            self._record_rejection(None, "existing_m5_scalp_position", session=session, d1_trend=self._last_d1_trend, h4_trend=self._last_h4_trend)
             return {"action": "hold", "reason": "existing M5 scalp position open"}
 
         # 2b. Position limit check (always enforced, even in learning mode)
@@ -412,6 +415,7 @@ class M5ScalpTrader:
 
         # 3. Cooldown check (learning mode: skip cooldown)
         if self._check_cooldown() and not self.learning_mode:
+            self._record_rejection(None, "cooldown", session=session, d1_trend=self._last_d1_trend, h4_trend=self._last_h4_trend)
             return {"action": "hold", "reason": "cooldown after exit"}
 
         # 4. Spread check (learning mode: skip spread filter, pass spread to generator)
@@ -438,6 +442,9 @@ class M5ScalpTrader:
         # 6. Compute HTF trends
         d1_trend = self._compute_d1_trend(candles)
         h4_trend = self._compute_h4_trend(candles)
+        # Store for exit context
+        self._last_d1_trend = d1_trend
+        self._last_h4_trend = h4_trend
 
         # 7. Generate M5 scalp signal (learning_mode passed to bypass generator filters)
         signal = generate_m5_scalp_signal(
@@ -492,6 +499,7 @@ class M5ScalpTrader:
                 candles, str(signal.signal_type.value),
                 spread=spread_for_signal,
                 d1_trend=d1_trend or "neutral",
+                h4_trend=h4_trend or "unknown",
                 session=session,
                 sentiment=_sentiment,
             )
@@ -872,6 +880,9 @@ class M5ScalpTrader:
                     mae=round(mae, 2) if mae else None,
                     mfe_pct=round(mfe_pct, 4) if mfe_pct else None,
                     mae_pct=round(mae_pct, 4) if mae_pct else None,
+                    exit_regime="unknown",
+                    exit_d1_trend=self._last_d1_trend,
+                    exit_h4_trend=self._last_h4_trend,
                     db_path=self.db_path,
                 )
                 # Clean up MFE/MAE state
