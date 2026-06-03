@@ -100,16 +100,22 @@ class TradeOutcomeConfig:
     test_ratio: float = 0.2
 
     # XGBoost hyperparameters
-    xgb_max_depth: int = 5
-    xgb_reg_lambda: float = 0.0
+    xgb_max_depth: int = 3
+    xgb_min_child_weight: int = 5
+    xgb_subsample: float = 0.8
+    xgb_colsample_bytree: float = 0.8
+    xgb_reg_lambda: float = 1.0
     xgb_learning_rate: float = 0.05
     xgb_scale_pos_weight: bool = True
     xgb_n_estimators: int = 200
 
     # RandomForest hyperparameters
     rf_n_estimators: int = 200
-    rf_max_depth: int = 10
-    rf_min_samples_leaf: int = 1
+    rf_max_depth: int = 8
+    rf_min_samples_leaf: int = 5
+
+    # Sample weight: live trades get this multiplier vs synthetic
+    live_weight: float = 3.0
 
     # Paths (relative to working dir; use "data/models" for Docker volume persistence)
     model_dir: str = "data/models"
@@ -243,14 +249,27 @@ class TradeOutcomeTrainer:
         features_df["is_open"] = 0
         features_df["account_id"] = df["account_id"].values
         features_df["exit_reason"] = df["exit_reason"].values
+        features_df["is_synthetic"] = df["strategy_id"].apply(
+            lambda s: 1 if s and "premium_backfill" in str(s) else 0
+        ).values
 
         logger.info("Loaded %d trade-outcome rows from trade_outcomes table", len(features_df))
         return features_df
 
     def prepare_features(
         self, df: pd.DataFrame, feature_cols: list[str]
-    ) -> tuple[pd.DataFrame, pd.Series]:
-        """Engineer features and create binary labels (1=WIN, 0=LOSS)."""
+    ) -> tuple[pd.DataFrame, pd.Series, object, list[str], np.ndarray]:
+        """Engineer features and create binary labels (1=WIN, 0=LOSS).
+
+        Returns (X, y, engineer, feature_names, sample_weights).
+        """
+        # Extract sample weights BEFORE feature engineering (row count must match)
+        if "is_synthetic" in df.columns:
+            is_syn = df["is_synthetic"].values
+            sample_weights = np.where(is_syn == 1, 1.0, self.config.live_weight)
+        else:
+            sample_weights = np.ones(len(df))
+
         engineer = FeatureEngineer(fillna=True)
         engineer.fit(df)
         df_transformed = engineer.transform(df)
@@ -285,13 +304,14 @@ class TradeOutcomeTrainer:
         X = X.select_dtypes(include=[np.number])
 
         self._last_engineer = engineer
-        return X, y, engineer, list(X.columns)
+        return X, y, engineer, list(X.columns), sample_weights
 
     def train_single(
         self,
         X: pd.DataFrame,
         y: pd.Series,
         name: str,
+        sample_weights: Optional[np.ndarray] = None,
     ) -> ModelResult:
         """Train a single model and evaluate with CV + holdout."""
         from sklearn.metrics import accuracy_score
@@ -300,6 +320,11 @@ class TradeOutcomeTrainer:
         split_idx = int(len(X) * (1 - self.config.test_ratio))
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+
+        # Split sample weights if provided
+        train_weights = None
+        if sample_weights is not None:
+            train_weights = sample_weights[:split_idx]
 
         if len(X_train) < self.config.min_samples:
             logger.warning("Too few samples for %s: %d (need %d)",
@@ -337,6 +362,9 @@ class TradeOutcomeTrainer:
             xgb_kwargs: dict = dict(
                 n_estimators=self.config.xgb_n_estimators,
                 max_depth=self.config.xgb_max_depth,
+                min_child_weight=self.config.xgb_min_child_weight,
+                subsample=self.config.xgb_subsample,
+                colsample_bytree=self.config.xgb_colsample_bytree,
                 learning_rate=self.config.xgb_learning_rate,
                 random_state=42, n_jobs=-1, eval_metric="logloss",
                 reg_lambda=self.config.xgb_reg_lambda,
@@ -361,8 +389,11 @@ class TradeOutcomeTrainer:
             cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
             cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
 
-        # Train on full training set
-        model.fit(X_train, y_train)
+        # Train on full training set (with sample weights if available)
+        fit_kwargs: dict = {}
+        if train_weights is not None:
+            fit_kwargs["sample_weight"] = train_weights
+        model.fit(X_train, y_train, **fit_kwargs)
 
         # Save model to disk for live prediction
         self._save_model(model, name)
@@ -409,13 +440,13 @@ class TradeOutcomeTrainer:
             raise ValueError(f"Not enough data: {len(df)} rows (need 50+)")
 
         feature_cols = self.config.get_feature_cols()
-        X, y, engineer, available_cols = self.prepare_features(df, feature_cols)
+        X, y, engineer, available_cols, sample_weights = self.prepare_features(df, feature_cols)
 
         results: list[ModelResult] = []
 
         # 1. Overall model
         logger.info("Training overall model on %d samples...", len(X))
-        overall = self.train_single(X, y, "overall")
+        overall = self.train_single(X, y, "overall", sample_weights=sample_weights)
         overall.config = self.config.to_dict()
         results.append(overall)
 
@@ -428,8 +459,9 @@ class TradeOutcomeTrainer:
                     continue
                 X_sub = X[mask].reset_index(drop=True)
                 y_sub = y[mask].reset_index(drop=True)
+                w_sub = sample_weights[mask.values] if sample_weights is not None else None
                 logger.info("Training regime=%s model on %d samples...", regime, len(X_sub))
-                result = self.train_single(X_sub, y_sub, f"regime_{regime}")
+                result = self.train_single(X_sub, y_sub, f"regime_{regime}", sample_weights=w_sub)
                 results.append(result)
 
         # 3. Direction-specific models (with direction-specific features)
@@ -441,6 +473,7 @@ class TradeOutcomeTrainer:
                     continue
                 X_sub = X[mask].reset_index(drop=True)
                 y_sub = y[mask].reset_index(drop=True)
+                w_sub = sample_weights[mask.values] if sample_weights is not None else None
                 # Filter to direction-specific features
                 dir_cols = self.config.get_feature_cols(direction=direction)
                 dir_cols_avail = [c for c in dir_cols if c in X_sub.columns]
@@ -448,7 +481,7 @@ class TradeOutcomeTrainer:
                     X_sub = X_sub[dir_cols_avail]
                 logger.info("Training direction=%s model on %d samples, %d features...",
                             direction, len(X_sub), len(X_sub.columns))
-                result = self.train_single(X_sub, y_sub, f"direction_{direction}")
+                result = self.train_single(X_sub, y_sub, f"direction_{direction}", sample_weights=w_sub)
                 results.append(result)
 
         # 4. Regime x Direction models (with direction-specific features)
@@ -461,6 +494,7 @@ class TradeOutcomeTrainer:
                             continue
                         X_sub = X[mask].reset_index(drop=True)
                         y_sub = y[mask].reset_index(drop=True)
+                        w_sub = sample_weights[mask.values] if sample_weights is not None else None
                         # Filter to direction-specific features
                         dir_cols = self.config.get_feature_cols(direction=direction)
                         dir_cols_avail = [c for c in dir_cols if c in X_sub.columns]
@@ -469,7 +503,7 @@ class TradeOutcomeTrainer:
                         logger.info("Training %s_%s model on %d samples, %d features...",
                                     regime, direction, len(X_sub), len(X_sub.columns))
                         result = self.train_single(
-                            X_sub, y_sub, f"{regime}_{direction}",
+                            X_sub, y_sub, f"{regime}_{direction}", sample_weights=w_sub,
                         )
                         results.append(result)
 
@@ -560,14 +594,18 @@ def main():
     parser.add_argument("--no-direction", action="store_true")
     parser.add_argument("--db-path", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--xgb-max-depth", type=int, default=5)
-    parser.add_argument("--xgb-reg-lambda", type=float, default=0.0)
+    parser.add_argument("--xgb-max-depth", type=int, default=3)
+    parser.add_argument("--xgb-min-child-weight", type=int, default=5)
+    parser.add_argument("--xgb-subsample", type=float, default=0.8)
+    parser.add_argument("--xgb-colsample-bytree", type=float, default=0.8)
+    parser.add_argument("--xgb-reg-lambda", type=float, default=1.0)
     parser.add_argument("--xgb-learning-rate", type=float, default=0.05)
     parser.add_argument("--no-scale-pos-weight", action="store_true")
     parser.add_argument("--xgb-n-estimators", type=int, default=200)
     parser.add_argument("--rf-n-estimators", type=int, default=200)
-    parser.add_argument("--rf-max-depth", type=int, default=10)
-    parser.add_argument("--rf-min-samples-leaf", type=int, default=1)
+    parser.add_argument("--rf-max-depth", type=int, default=8)
+    parser.add_argument("--rf-min-samples-leaf", type=int, default=5)
+    parser.add_argument("--live-weight", type=float, default=3.0)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -584,6 +622,9 @@ def main():
         regime_specific=not args.no_regime,
         direction_specific=not args.no_direction,
         xgb_max_depth=args.xgb_max_depth,
+        xgb_min_child_weight=args.xgb_min_child_weight,
+        xgb_subsample=args.xgb_subsample,
+        xgb_colsample_bytree=args.xgb_colsample_bytree,
         xgb_reg_lambda=args.xgb_reg_lambda,
         xgb_learning_rate=args.xgb_learning_rate,
         xgb_scale_pos_weight=not args.no_scale_pos_weight,
@@ -591,6 +632,7 @@ def main():
         rf_n_estimators=args.rf_n_estimators,
         rf_max_depth=args.rf_max_depth,
         rf_min_samples_leaf=args.rf_min_samples_leaf,
+        live_weight=args.live_weight,
     )
 
     trainer = TradeOutcomeTrainer(config)
