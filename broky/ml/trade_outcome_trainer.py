@@ -293,7 +293,7 @@ class TradeOutcomeTrainer:
         # Remove raw categorical string columns that have encoded replacements
         # to avoid train/serve skew (predictor drops strings, uses encodings)
         raw_cats_with_encodings = {
-            "session": [c for c in available if c.startswith("session_")],
+            "session": [c for c in available if c.startswith("session_") and c != "session_strength"],
             "d1_trend": ["d1_trend_encoded"],
             "h4_trend": ["h4_trend_encoded"],
             "price_vs_cloud": ["price_vs_cloud_encoded"],
