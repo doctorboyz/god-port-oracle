@@ -194,8 +194,39 @@ class LiveTrader:
     def _get_current_spread(self) -> float:
         """Get current spread from MT5 bridge. Returns 0.0 if unavailable."""
         try:
-            bridge = self._get_bridge()
-            if bridge is not None:
+            from metty.bridge.client import MT5Bridge
+            from metty.core.models import AccountConfig, AccountName
+            account_configs = {
+                "A": AccountConfig(
+                    name=AccountName.A,
+                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
+                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
+                    balance=100.0, leverage=2000,
+                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")),
+                    signal_group="volume",
+                ),
+                "B": AccountConfig(
+                    name=AccountName.B,
+                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
+                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
+                    balance=100.0, leverage=2000,
+                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.102"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5005")),
+                    signal_group="volume",
+                ),
+                "C": AccountConfig(
+                    name=AccountName.C,
+                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
+                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial17"),
+                    balance=100.0, leverage=2000,
+                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.103"),
+                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5005")),
+                    signal_group="volume",
+                ),
+            }
+            if self.account in account_configs:
+                bridge = MT5Bridge(account_configs[self.account])
                 spread = bridge.get_spread_sync("XAUUSD")
                 if spread is not None and spread >= 0:
                     return float(spread)
@@ -847,11 +878,11 @@ class LiveTrader:
         ml_loss_proba = None
         ml_model_used = None
         ml_risk_reason = None
+        _live_spread = self._get_current_spread()
         if self._ml_enabled and self._ml_predictor is not None:
             from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
             sentiment_data = self._get_sentiment()
-            _live_spread = self._get_current_spread()
             ml_features = compute_features_from_candles(
                 candles, str(signal.signal_type.value),
                 spread=_live_spread,

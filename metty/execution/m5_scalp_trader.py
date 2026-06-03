@@ -386,6 +386,12 @@ class M5ScalpTrader:
         if len(m5) < 200:
             return {"action": "skip", "reason": f"M5 data too short ({len(m5)} bars)"}
 
+        # Classify session early (needed for rejection recording)
+        _ts = m5.index[-1]
+        if hasattr(_ts, "to_pydatetime"):
+            _ts = _ts.to_pydatetime().replace(tzinfo=timezone.utc)
+        session = self._classify_session(_ts)
+
         # 1b. Monitor existing M5 scalp positions for exits
         closed = self._monitor_positions(candles)
 
@@ -431,10 +437,6 @@ class M5ScalpTrader:
         spread_for_signal = spread
 
         # 5. Session gate (learning mode: skip, trade all sessions for data)
-        timestamp = m5.index[-1]
-        if hasattr(timestamp, "to_pydatetime"):
-            timestamp = timestamp.to_pydatetime().replace(tzinfo=timezone.utc)
-        session = self._classify_session(timestamp)
         if session not in ("london", "overlap", "ny") and not self.learning_mode:
             self._record_rejection(None, f"m5 scalp blocked: {session} session", session=session)
             return {"action": "hold", "reason": f"m5 scalp blocked: {session} session"}

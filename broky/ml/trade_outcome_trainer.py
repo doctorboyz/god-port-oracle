@@ -285,15 +285,28 @@ class TradeOutcomeTrainer:
         derived = [c for c in df_transformed.columns
                    if c in ("ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
                              "price_vs_cloud_encoded", "d1_trend_encoded",
-                             "h4_trend_encoded")
+                             "h4_trend_encoded", "mfi_signal_encoded")
                    or c.startswith("session_")]
         available += derived
         available = list(dict.fromkeys(available))  # deduplicate preserving order
 
+        # Remove raw categorical string columns that have encoded replacements
+        # to avoid train/serve skew (predictor drops strings, uses encodings)
+        raw_cats_with_encodings = {
+            "session": [c for c in available if c.startswith("session_")],
+            "d1_trend": ["d1_trend_encoded"],
+            "h4_trend": ["h4_trend_encoded"],
+            "price_vs_cloud": ["price_vs_cloud_encoded"],
+            "mfi_signal": ["mfi_signal_encoded"],
+        }
+        for raw_col, encoded_cols in raw_cats_with_encodings.items():
+            if raw_col in available and any(e in available for e in encoded_cols):
+                available.remove(raw_col)
+
         X = df_transformed[available].copy()
         y = (df["pnl"] > 0).astype(int)
 
-        # Encode any remaining string columns
+        # Encode any remaining string columns (fallback for unencoded categoricals)
         label_encoders: dict[str, LabelEncoder] = {}
         for col in X.select_dtypes(include=["object", "string"]).columns:
             le = LabelEncoder()
