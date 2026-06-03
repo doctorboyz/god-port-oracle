@@ -455,7 +455,7 @@ class M5ScalpTrader:
             low=m5["low"],
             volume=m5["volume"],
             current_price=float(m5["close"].iloc[-1]),
-            timestamp=timestamp,
+            timestamp=last_time,
             spread=spread_for_signal,
             d1_trend=d1_trend,
             h4_trend=h4_trend,
