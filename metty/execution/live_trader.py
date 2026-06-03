@@ -694,7 +694,7 @@ class LiveTrader:
                 # Get exit context (regime/trend at exit time)
                 exit_d1_trend = self._last_d1_trend
                 exit_h4_trend = self._last_h4_trend
-                exit_regime = exit_d1_trend if exit_d1_trend and exit_d1_trend != "neutral" else None
+                exit_regime = exit_d1_trend if exit_d1_trend and exit_d1_trend not in ("neutral", "unknown") else None
 
                 close_live_trade(
                     trade_id=trade["id"],
