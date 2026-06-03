@@ -232,7 +232,9 @@ class TradeOutcomeTrainer:
 
         # Add metadata columns (use to_direction as fallback for synthetic trades
         # where live_trades JOIN returns NULL)
-        features_df["pnl"] = df["pnl"].values
+        # CRITICAL: use to_.profit (available for ALL trades including synthetic)
+        # NOT lt.pnl (NULL for synthetic trades → labels all synthetic as LOSS)
+        features_df["pnl"] = df["profit"].values
         features_df["pnl_pct"] = df["profit_pct"].values
         features_df["confidence"] = df["confidence"].fillna(0.5).values
         # Regime: prefer live_trades, fallback to deriving from ADX in features
