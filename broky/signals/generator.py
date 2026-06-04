@@ -82,7 +82,7 @@ def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -
     """
     if latest_adx >= 25:
         # Strong trend — check for volatility
-        if boll_bandwidth is not None and boll_bandwidth > 0.04:
+        if boll_bandwidth is not None and boll_bandwidth > 0.035:
             return MarketRegime.VOLATILE.value
         return MarketRegime.TRENDING.value
     elif latest_adx >= 20:

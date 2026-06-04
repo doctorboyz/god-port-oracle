@@ -41,7 +41,7 @@ class TradeOutcomePredictor:
     ):
         import os
         if model_dir is None:
-            model_dir = os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v2")
+            model_dir = os.environ.get("ML_MODEL_DIR", "data/models/v4")
         self.model_dir = Path(model_dir)
         self.loss_threshold = loss_threshold
         self._models: dict[str, object] = {}

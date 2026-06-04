@@ -78,6 +78,7 @@ class BacktestEngine:
         cooldown_bars: int = 12,
         slippage_bps: float = 0.0,
         strategy: str = "swing",
+        learning_mode: bool = False,
     ):
         self.initial_equity = initial_equity
         self.risk_per_trade = risk_per_trade
@@ -90,6 +91,7 @@ class BacktestEngine:
         self.cooldown_bars = cooldown_bars  # Min bars between trades (12h on H1)
         self.slippage_bps = slippage_bps  # Basis points of slippage (e.g., 3 = 0.03%)
         self.strategy = strategy
+        self.learning_mode = learning_mode  # Relax trend filters for more signals
         # Ensure strategy generators are registered before lookup
         import broky.signals  # noqa: F401
         self._generate_fn, self._strategy_config = StrategyRegistry.get(strategy)
@@ -213,6 +215,7 @@ class BacktestEngine:
                         timestamp=candle_ts,
                         d1_trend=d1_trend,
                         min_confidence=self.min_confidence,
+                        learning_mode=self.learning_mode,
                     )
 
                     if signal.signal_type != SignalType.HOLD and signal.confidence >= self.min_confidence:

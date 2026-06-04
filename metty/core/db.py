@@ -1277,6 +1277,176 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
     return stats
 
 
+
+# Reserved account ID for synthetic/backtest trades (not a real trading account).
+SYNTHETIC_ACCOUNT_ID = 0
+
+
+def ensure_synthetic_account(db_path: Optional[Path] = None) -> None:
+    """Create the synthetic account row if it does not exist (id=0).
+
+    Required because trade_outcomes.account_id has a FK to accounts(id).
+    """
+    conn = get_connection(db_path)
+    try:
+        existing = conn.execute(
+            "SELECT id FROM accounts WHERE id = ?", (SYNTHETIC_ACCOUNT_ID,)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT INTO accounts
+                   (id, name, broker_login, broker_server, balance, leverage,
+                    bridge_host, bridge_port, signal_group, is_active)
+                   VALUES (?, 'synthetic_backtest', '', 'Synthetic', 0, 100,
+                           'localhost', 0, '', 0)""",
+                (SYNTHETIC_ACCOUNT_ID,),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def insert_synthetic_trade(
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    pnl: float,
+    pnl_pct: float,
+    d1_trend: str = "unknown",
+    session: str = "unknown",
+    regime: str = "unknown",
+    strategy_id: str = "backtest_synth",
+    entry_time: str = "",
+    exit_time: str = "",
+    exit_reason: str = "",
+    symbol: str = "XAUUSD",
+    trading_mode: str = "swing",
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+    lot_size: float = 0.01,
+    confidence: float = 0.0,
+    h4_trend: str | None = None,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Insert a minimal live_trades row for a synthetic backtest trade.
+
+    Creates a closed trade with account_id=SYNTHETIC_ACCOUNT_ID (0).
+    Returns the trade ID for linking to trade_outcomes.
+    """
+    ensure_synthetic_account(db_path)
+
+    conn = get_connection(db_path)
+    try:
+        # Handle h4_trend column — may not exist in older schemas
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(live_trades)").fetchall()}
+        h4_col = "h4_trend" if "h4_trend" in cols else None
+
+        if h4_col:
+            cursor = conn.execute(
+                """INSERT INTO live_trades
+                   (account_id, timestamp, direction, symbol, entry_price, stop_loss,
+                    take_profit, lot_size, confidence, regime, session, d1_trend,
+                    h4_trend, reason, trading_mode, strategy_id, is_open,
+                    exit_price, exit_time, pnl, pnl_pct, exit_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                           ?, ?, ?, ?, ?)""",
+                (SYNTHETIC_ACCOUNT_ID, entry_time, direction, symbol, entry_price,
+                 stop_loss, take_profit, lot_size, confidence, regime, session,
+                 d1_trend, h4_trend, f"backtest_{exit_reason}", trading_mode,
+                 strategy_id,
+                 exit_price, exit_time, pnl, pnl_pct, exit_reason),
+            )
+        else:
+            cursor = conn.execute(
+                """INSERT INTO live_trades
+                   (account_id, timestamp, direction, symbol, entry_price, stop_loss,
+                    take_profit, lot_size, confidence, regime, session, d1_trend,
+                    reason, trading_mode, strategy_id, is_open,
+                    exit_price, exit_time, pnl, pnl_pct, exit_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                           ?, ?, ?, ?, ?)""",
+                (SYNTHETIC_ACCOUNT_ID, entry_time, direction, symbol, entry_price,
+                 stop_loss, take_profit, lot_size, confidence, regime, session,
+                 d1_trend, f"backtest_{exit_reason}", trading_mode, strategy_id,
+                 exit_price, exit_time, pnl, pnl_pct, exit_reason),
+            )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def insert_synthetic_trade_outcome(
+    trade_id: int,
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    profit: float,
+    profit_pct: float,
+    outcome_label: str,
+    holding_minutes: int,
+    exit_reason: str,
+    features_json: str,
+    regime: str = "unknown",
+    d1_trend: str = "unknown",
+    h4_trend: str = "unknown",
+    session: str = "unknown",
+    strategy_id: str = "backtest_synth",
+    trading_mode: str = "swing",
+    symbol: str = "XAUUSD",
+    mfe: float | None = None,
+    mae: float | None = None,
+    mfe_pct: float | None = None,
+    mae_pct: float | None = None,
+    exit_regime: str | None = None,
+    exit_d1_trend: str | None = None,
+    exit_h4_trend: str | None = None,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Insert a trade_outcomes row for a synthetic backtest trade.
+
+    Links to a live_trades row created by insert_synthetic_trade().
+    MFE/MAE and exit context are stored in features_json (not as separate columns)
+    since the trade_outcomes table doesn't have dedicated columns for them.
+    Returns the outcome ID.
+    """
+    # Enrich features_json with MFE/MAE and exit context before insertion
+    import json
+    features = json.loads(features_json) if isinstance(features_json, str) else features_json.copy() if features_json else {}
+    if mfe is not None:
+        features["mfe"] = mfe
+    if mae is not None:
+        features["mae"] = mae
+    if mfe_pct is not None:
+        features["mfe_pct"] = mfe_pct
+    if mae_pct is not None:
+        features["mae_pct"] = mae_pct
+    if exit_regime is not None:
+        features["exit_regime"] = exit_regime
+    if exit_d1_trend is not None:
+        features["exit_d1_trend"] = exit_d1_trend
+    if exit_h4_trend is not None:
+        features["exit_h4_trend"] = exit_h4_trend
+    enriched_json = json.dumps(features)
+
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """INSERT INTO trade_outcomes
+               (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                trading_mode, strategy_id, entry_price, exit_price, profit,
+                profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
+               VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (trade_id, SYNTHETIC_ACCOUNT_ID, symbol, direction,
+             trading_mode, strategy_id, entry_price, exit_price, profit,
+             profit_pct, outcome_label, holding_minutes, exit_reason, enriched_json),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
 def query_trade_outcomes_for_training(
     min_confidence: float = 0.0,
     exclude_breakeven: bool = True,
