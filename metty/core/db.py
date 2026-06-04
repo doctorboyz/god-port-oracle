@@ -937,7 +937,7 @@ def insert_live_trade(
                 minutes_to_next_event, next_event_type, next_event_impact,
                 indicator_scores_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (account_id, timestamp, direction, symbol, entry_price, stop_loss,
              take_profit, lot_size, confidence, regime, session, d1_trend,
              reason, trading_mode, strategy_id, signal_id, ticket,
