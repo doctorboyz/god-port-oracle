@@ -245,6 +245,43 @@ class TradeOutcomePredictor:
         info = self._model_info.get(name, {})
         return info.get("test_accuracy", 0)
 
+    def health_check(self) -> tuple[bool, str]:
+        """Verify the ML filter can actually produce predictions.
+
+        Returns (healthy, reason):
+          - (True, "OK") if a test prediction succeeds
+          - (False, reason) if prediction fails for any reason
+        """
+        # 1. Check predictor is enabled
+        if not self.enabled:
+            return False, "ML filter disabled (no models loaded)"
+
+        # 2. Check get_risk_multiplier method exists
+        if not hasattr(self, "get_risk_multiplier"):
+            return False, "get_risk_multiplier method missing"
+
+        # 3. Check predict_loss_proba method exists
+        if not hasattr(self, "predict_loss_proba"):
+            return False, "predict_loss_proba method missing"
+
+        # 4. Run a test prediction with synthetic features
+        try:
+            test_features = {
+                "rsi_14": 50.0, "macd": 0.0, "macd_signal": 0.0,
+                "atr_14": 5.0, "bb_position": 0.5, "adx_14": 25.0,
+                "session": "london", "d1_trend": "bullish",
+                "h4_trend": "bullish", "spread": 0.3,
+            }
+            result = self.get_risk_multiplier(test_features, "trending", "BUY")
+            if result is None:
+                return False, "get_risk_multiplier returned None"
+            multiplier, reason = result
+            if not isinstance(multiplier, (int, float)):
+                return False, f"get_risk_multiplier returned non-numeric: {type(multiplier)}"
+            return True, f"OK (test prediction: {multiplier:.1f}x)"
+        except Exception as e:
+            return False, f"Test prediction failed: {e}"
+
 
 def compute_features_from_candles(
     candles: dict[str, pd.DataFrame],

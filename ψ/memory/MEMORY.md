@@ -38,8 +38,10 @@
 - [Trend Filter Asymmetry](learnings/2026-05-27_trend-filter-asymmetry.md) — D1 bullish → BUY เสียหายหมดในตลาดขาลง; H4 override เร็วกว่า 4x แต่ยังช้า 20ชม; ML bias จาก training regime; silent crash = silent losses
 - [Trend Features Data Pipeline Blind Spot](learnings/2026-05-28_trend-features-data-pipeline.md) — backfill strip d1_trend ทิ้งจาก features_json ทำให้ 2,078 trades ไม่มี trend features; metadata vs feature เป็นเส้นบางๆ
 - [Decorator Import-Time Side Effects](learnings/2026-05-28_decorator-import-side-effects.md) — @strategy มี side effect ตอน import; utility function ใต้ decorator โดยไม่ตั้งใจ = fatal import error
+- [Scope Verification + SQL Placeholders](learnings/2026-06-04_scope-verification-sql-placeholders.md) — เปลี่ยน variable reference ต้องเช็ค scope; SQL INSERT ต้องนับ ? placeholders ให้ตรงกับ columns
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
 - [2026-05-28 Trend Features Pipeline Fix](retrospectives/2026-05/28/08.38_trend-features-pipeline.md)
 - [2026-05-28 Trend Alignment Deploy Fix](retrospectives/2026-05/28/13.32_trend-alignment-deploy-fix.md)
+- [2026-06-04 ML Parameter Audit + Deploy](retrospectives/2026-06/04/07.52_ml-parameter-audit-deploy.md) — audit 8 bugs, deploy 3 fixes, 2 บั๊กที่พบหลัง deploy (h4_trend NameError, INSERT placeholder mismatch)

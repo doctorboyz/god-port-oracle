@@ -56,6 +56,9 @@ ACCOUNT_RISK = {"A": 0.01, "B": 0.02, "C": 0.02}
 # Contract size: 1 lot XAUUSD = 100 oz
 CONTRACT_SIZE = 100.0
 
+# ML filter circuit breaker: stop trading after N consecutive ML failures
+ML_MAX_CONSECUTIVE_FAILS = 5
+
 
 @dataclass
 class RiskConfig:
@@ -155,6 +158,7 @@ class LiveTrader:
         # ML filter — risk-scale position size based on P(LOSS) prediction
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
         self._ml_predictor = None
+        self._ml_fail_count: int = 0  # consecutive ML prediction failures
         if self._ml_enabled:
             try:
                 from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
@@ -163,6 +167,15 @@ class LiveTrader:
                 )
                 logger.info("[Swing:%s] ML filter enabled: %s", self.account,
                            "models loaded" if self._ml_predictor.enabled else "no models")
+                # Health check: verify ML predictor can actually produce predictions
+                if self._ml_predictor.enabled:
+                    healthy, reason = self._ml_predictor.health_check()
+                    if not healthy:
+                        logger.critical("[Swing:%s] ML filter UNHEALTHY: %s — disabling", self.account, reason)
+                        self._ml_enabled = False
+                        self._ml_predictor = None
+                    else:
+                        logger.info("[Swing:%s] ML filter health check passed: %s", self.account, reason)
             except Exception as e:
                 logger.warning("[Swing:%s] ML filter init failed: %s", self.account, e)
                 self._ml_enabled = False
@@ -880,36 +893,59 @@ class LiveTrader:
         ml_model_used = None
         ml_risk_reason = None
         _live_spread = self._get_current_spread()
-        if self._ml_enabled and self._ml_predictor is not None:
-            from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
-            sentiment_data = self._get_sentiment()
-            ml_features = compute_features_from_candles(
-                candles, str(signal.signal_type.value),
-                spread=_live_spread,
-                d1_trend=d1_trend or "neutral",
-                h4_trend=h4_trend or "unknown",
-                session=session,
-                sentiment=sentiment_data,
+        # Circuit breaker: if ML filter has failed too many times, stop trading
+        if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:
+            logger.critical(
+                "[Swing:%s] ML filter failed %d times consecutively — circuit breaker: holding",
+                self.account, self._ml_fail_count,
             )
-            regime = d1_trend if d1_trend and d1_trend not in ("neutral", "unknown") else "trending"
-            ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
-                ml_features, regime, str(signal.signal_type.value),
-            )
-            if ml_risk_multiplier == 0:
-                if self.learning_mode:
-                    # In learning mode, never block — allow trade with min lot
-                    # to collect diverse outcomes for ML retraining
-                    logger.info("[Swing:%s] ML would block, but learning mode: allowing min-lot trade (%s)", self.account, ml_reason)
-                    ml_risk_multiplier = 0.01  # minimal position for data collection
+            self._record_rejection(signal, f"ml_filter_circuit_break:{self._ml_fail_count}_fails", session, d1_trend, candles)
+            return {"action": "hold", "reason": f"ML circuit breaker ({self._ml_fail_count} consecutive failures)", "signal": signal}
+
+        if self._ml_enabled and self._ml_predictor is not None:
+            try:
+                from broky.ml.trade_outcome_predictor import compute_features_from_candles
+
+                sentiment_data = self._get_sentiment()
+                ml_features = compute_features_from_candles(
+                    candles, str(signal.signal_type.value),
+                    spread=_live_spread,
+                    d1_trend=d1_trend or "neutral",
+                    h4_trend=h4_trend or "unknown",
+                    session=session,
+                    sentiment=sentiment_data,
+                )
+                regime = d1_trend if d1_trend and d1_trend not in ("neutral", "unknown") else "trending"
+                ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
+                    ml_features, regime, str(signal.signal_type.value),
+                )
+                # ML filter succeeded — reset failure counter
+                self._ml_fail_count = 0
+
+                if ml_risk_multiplier == 0:
+                    if self.learning_mode:
+                        # In learning mode, never block — allow trade with min lot
+                        # to collect diverse outcomes for ML retraining
+                        logger.info("[Swing:%s] ML would block, but learning mode: allowing min-lot trade (%s)", self.account, ml_reason)
+                        ml_risk_multiplier = 0.01  # minimal position for data collection
+                    else:
+                        logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                        self._record_rejection(signal, f"ml_filter:{ml_reason}", session, d1_trend, candles)
+                        return {"action": "hold", "reason": ml_reason, "signal": signal}
+                elif ml_risk_multiplier < 1.0:
+                    logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
                 else:
-                    logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
-                    self._record_rejection(signal, f"ml_filter:{ml_reason}", session, d1_trend, candles)
-                    return {"action": "hold", "reason": ml_reason, "signal": signal}
-            elif ml_risk_multiplier < 1.0:
-                logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
-            else:
-                logger.info("[Swing:%s] ML filter pass: %s", self.account, ml_reason)
+                    logger.info("[Swing:%s] ML filter pass: %s", self.account, ml_reason)
+
+            except Exception as e:
+                self._ml_fail_count += 1
+                logger.error(
+                    "[Swing:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection",
+                    self.account, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
+                )
+                # ML filter is down — trade proceeds at full size (1.0) with no ML scaling
+                # Circuit breaker above will stop trading after ML_MAX_CONSECUTIVE_FAILS
 
         # 6. Calculate SL/TP/lots
         try:

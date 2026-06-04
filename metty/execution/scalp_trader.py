@@ -50,6 +50,9 @@ ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3}
 # Contract size: 1 lot XAUUSD = 100 oz
 CONTRACT_SIZE = 100.0
 
+# ML filter circuit breaker: stop trading after N consecutive ML failures
+ML_MAX_CONSECUTIVE_FAILS = 5
+
 
 @dataclass
 class ScalpRiskConfig:
@@ -120,6 +123,7 @@ class ScalpTrader:
         # ML filter — only enabled if models have decent accuracy
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
         self._ml_predictor = None
+        self._ml_fail_count: int = 0  # consecutive ML prediction failures
         if self._ml_enabled:
             try:
                 from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
@@ -128,6 +132,15 @@ class ScalpTrader:
                 )
                 logger.info("[Scalp:%s] ML filter enabled: %s", self.account,
                            "models loaded" if self._ml_predictor.enabled else "no models")
+                # Health check: verify ML predictor can actually produce predictions
+                if self._ml_predictor.enabled:
+                    healthy, reason = self._ml_predictor.health_check()
+                    if not healthy:
+                        logger.critical("[Scalp:%s] ML filter UNHEALTHY: %s — disabling", self.account, reason)
+                        self._ml_enabled = False
+                        self._ml_predictor = None
+                    else:
+                        logger.info("[Scalp:%s] ML filter health check passed: %s", self.account, reason)
             except Exception as e:
                 logger.warning("[Scalp:%s] ML filter init failed: %s", self.account, e)
                 self._ml_enabled = False
@@ -650,41 +663,63 @@ class ScalpTrader:
         ml_loss_proba: float | None = None
         ml_model_used: str | None = None
         ml_model_version: str | None = None
-        if self._ml_enabled and self._ml_predictor is not None:
-            from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
-            _sentiment = self._get_sentiment()
-            # Derive D1 trend proxy from H1 EMA50 (scalp doesn't have D1 data)
-            h1 = candles.get("H1")
-            _d1_proxy = "unknown"
-            if h1 is not None and len(h1) >= 50:
-                try:
-                    ema50 = h1["close"].ewm(span=50, adjust=False).mean()
-                    if h1["close"].iloc[-1] > ema50.iloc[-1]:
-                        _d1_proxy = "bullish"
-                    else:
-                        _d1_proxy = "bearish"
-                except Exception:
-                    pass
-            ml_features = compute_features_from_candles(
-                candles, str(signal.signal_type.value),
-                spread=spread if spread > 0 else 0,
-                d1_trend=_d1_proxy,
-                h4_trend="unknown",
-                session=session,
-                sentiment=_sentiment,
+        # Circuit breaker: if ML filter has failed too many times, stop trading
+        if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:
+            logger.critical(
+                "[Scalp:%s] ML filter failed %d times consecutively — circuit breaker: holding",
+                self.account, self._ml_fail_count,
             )
-            ml_risk_multiplier, ml_risk_reason = self._ml_predictor.get_risk_multiplier(
-                ml_features, "trending", str(signal.signal_type.value),
-            )
-            ml_loss_proba = self._ml_predictor._last_loss_proba if hasattr(self._ml_predictor, '_last_loss_proba') else None
-            ml_model_used = "xgboost" if ml_risk_multiplier != 1.0 else None
-            if ml_risk_multiplier == 0:
-                logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_risk_reason)
-                self._record_rejection(signal, ml_risk_reason or "ml_filter_blocked", session=session)
-                return {"action": "hold", "reason": ml_risk_reason, "signal": signal}
-            elif ml_risk_multiplier < 1.0:
-                logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_risk_reason)
+            self._record_rejection(signal, f"ml_filter_circuit_break:{self._ml_fail_count}_fails", session=session)
+            return {"action": "hold", "reason": f"ML circuit breaker ({self._ml_fail_count} consecutive failures)", "signal": signal}
+
+        if self._ml_enabled and self._ml_predictor is not None:
+            try:
+                from broky.ml.trade_outcome_predictor import compute_features_from_candles
+
+                _sentiment = self._get_sentiment()
+                # Derive D1 trend proxy from H1 EMA50 (scalp doesn't have D1 data)
+                h1 = candles.get("H1")
+                _d1_proxy = "unknown"
+                if h1 is not None and len(h1) >= 50:
+                    try:
+                        ema50 = h1["close"].ewm(span=50, adjust=False).mean()
+                        if h1["close"].iloc[-1] > ema50.iloc[-1]:
+                            _d1_proxy = "bullish"
+                        else:
+                            _d1_proxy = "bearish"
+                    except Exception:
+                        pass
+                ml_features = compute_features_from_candles(
+                    candles, str(signal.signal_type.value),
+                    spread=spread if spread > 0 else 0,
+                    d1_trend=_d1_proxy,
+                    h4_trend="unknown",
+                    session=session,
+                    sentiment=_sentiment,
+                )
+                ml_risk_multiplier, ml_risk_reason = self._ml_predictor.get_risk_multiplier(
+                    ml_features, "trending", str(signal.signal_type.value),
+                )
+                ml_loss_proba = self._ml_predictor._last_loss_proba if hasattr(self._ml_predictor, '_last_loss_proba') else None
+                ml_model_used = "xgboost" if ml_risk_multiplier != 1.0 else None
+                # ML filter succeeded — reset failure counter
+                self._ml_fail_count = 0
+
+                if ml_risk_multiplier == 0:
+                    logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_risk_reason)
+                    self._record_rejection(signal, ml_risk_reason or "ml_filter_blocked", session=session)
+                    return {"action": "hold", "reason": ml_risk_reason, "signal": signal}
+                elif ml_risk_multiplier < 1.0:
+                    logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_risk_reason)
+
+            except Exception as e:
+                self._ml_fail_count += 1
+                logger.error(
+                    "[Scalp:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection",
+                    self.account, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
+                )
+                # ML filter is down — trade proceeds at full size (1.0) with no ML scaling
 
         # 7. Calculate SL/TP/lots using M1 ATR
         try:
