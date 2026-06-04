@@ -806,6 +806,7 @@ class LiveTrader:
             else datetime.now(timezone.utc)
         )
         d1_trend = self._determine_d1_trend(candles.get("D1"))
+        h4_trend = self._compute_h4_trend(candles.get("H4"))
 
         # 4. Risk checks
         if signal.signal_type == SignalType.HOLD:
