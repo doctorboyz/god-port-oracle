@@ -62,7 +62,12 @@ case "$ACTION" in
             docker compose -f $COMPOSE_FILE build oracle-engine && \
             docker compose -f $COMPOSE_FILE up -d oracle-engine && \
             echo 'Oracle engine started!' && \
-            docker compose -f $COMPOSE_FILE ps"
+            docker compose -f $COMPOSE_FILE ps && \
+            echo '' && \
+            echo '=== Running ML smoke test ===' && \
+            sleep 5 && \
+            docker compose -f $COMPOSE_FILE exec oracle-engine python scripts/smoke-test-ml.py || \
+            echo '⚠️  ML smoke test failed — check model loading!'"
         ;;
     stop)
         echo "[3/3] Stopping oracle-engine on VPS..."
@@ -81,7 +86,12 @@ case "$ACTION" in
             docker compose -f $COMPOSE_FILE build --no-cache oracle-engine && \
             docker compose -f $COMPOSE_FILE up -d oracle-engine && \
             echo 'Oracle engine rebuilt!' && \
-            docker compose -f $COMPOSE_FILE ps"
+            docker compose -f $COMPOSE_FILE ps && \
+            echo '' && \
+            echo '=== Running ML smoke test ===' && \
+            sleep 5 && \
+            docker compose -f $COMPOSE_FILE exec oracle-engine python scripts/smoke-test-ml.py || \
+            echo '⚠️  ML smoke test failed — check model loading!'"
         ;;
     restart)
         echo "[3/3] Restarting oracle-engine on VPS..."

@@ -11,11 +11,11 @@ NC='\033[0m'
 FAILURES=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "=== Pre-Deploy Check ==="
+echo "=== Pre-Deploy Check (5 steps) ==="
 echo ""
 
 # ── 1. Syntax check (py_compile) ──
-echo "[1/4] Syntax check..."
+echo "[1/5] Syntax check..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' pyfile; do
     if ! python3 -c "import py_compile; py_compile.compile('$pyfile', doraise=True)" 2>/dev/null; then
@@ -33,7 +33,7 @@ else
 fi
 
 # ── 2. Import test (key modules) ──
-echo "[2/4] Import test..."
+echo "[2/5] Import test..."
 IMPORTS=(
     "broky.signals.generator:generate_signal"
     "broky.ml.features:FeatureEngineer"
@@ -66,11 +66,23 @@ for entry in "${IMPORTS[@]}"; do
 done
 
 # ── 3-4. SQL + Scope checks (Python script) ──
-echo "[3/4] SQL + Scope checks..."
+echo "[3/5] SQL + Scope checks..."
 if python3 "$ROOT/scripts/pre_deploy_checks.py"; then
     :
 else
     FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+# ── 5. ML model smoke test ──
+echo "[5/5] ML model loading test..."
+ML_MODEL_DIR="${ML_MODEL_DIR:-data/models/v4}"
+if python3 "$ROOT/scripts/smoke-test-ml.py" --model-dir "$ML_MODEL_DIR" > /dev/null 2>&1; then
+    echo -e "  ${GREEN}✓ ML models load and predict successfully${NC}"
+else
+    echo -e "  ${YELLOW}⚠ ML model test failed — models may not load on VPS${NC}"
+    echo -e "  ${YELLOW}  Run 'python3 scripts/smoke-test-ml.py' for details${NC}"
+    echo -e "  ${YELLOW}  This is a WARNING, not a blocker — deploy may still work if VPS has models${NC}"
 fi
 
 echo ""
