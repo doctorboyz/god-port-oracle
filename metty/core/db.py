@@ -411,6 +411,11 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("feature_snapshots", "d1_close", "REAL"),
         ("feature_snapshots", "m5_high", "REAL"),
         ("feature_snapshots", "m5_low", "REAL"),
+        # Partial TP tracking
+        ("live_trades", "tp1_price", "REAL"),
+        ("live_trades", "parent_trade_id", "INTEGER"),
+        ("live_trades", "tp_level", "INTEGER DEFAULT 1"),
+        ("live_trades", "remaining_lots", "REAL"),
         # MFE/MAE in trade_outcomes
         ("trade_outcomes", "mfe", "REAL"),
         ("trade_outcomes", "mae", "REAL"),
@@ -733,6 +738,10 @@ def insert_live_trade(
     next_event_impact: str | None = None,
     # Signal intermediate scores
     indicator_scores_json: str | None = None,
+    # Partial TP tracking
+    tp1_price: float | None = None,
+    tp_level: int = 1,
+    parent_trade_id: int | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a live trade record and return its ID."""
@@ -747,9 +756,9 @@ def insert_live_trade(
                 ml_risk_multiplier, ml_risk_reason, ml_model_version,
                 ml_loss_proba, ml_model_used,
                 minutes_to_next_event, next_event_type, next_event_impact,
-                indicator_scores_json)
+                indicator_scores_json, tp1_price, tp_level, parent_trade_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (account_id, timestamp, direction, symbol, entry_price, stop_loss,
              take_profit, lot_size, confidence, regime, session, d1_trend,
              reason, trading_mode, strategy_id, signal_id, ticket,
@@ -757,7 +766,7 @@ def insert_live_trade(
              ml_risk_multiplier, ml_risk_reason, ml_model_version,
              ml_loss_proba, ml_model_used,
              minutes_to_next_event, next_event_type, next_event_impact,
-             indicator_scores_json),
+             indicator_scores_json, tp1_price, tp_level, parent_trade_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -860,6 +869,11 @@ def close_live_trade(
     exit_regime: str | None = None,
     exit_d1_trend: str | None = None,
     exit_h4_trend: str | None = None,
+    # Partial TP tracking
+    tp1_price: float | None = None,
+    tp_level: int = 1,
+    parent_trade_id: int | None = None,
+    remaining_lots: float | None = None,
     db_path: Optional[Path] = None,
 ) -> None:
     """Close a live trade by marking it as closed with exit details."""
@@ -870,11 +884,13 @@ def close_live_trade(
                exit_price = ?, exit_time = ?, pnl = ?, pnl_pct = ?,
                exit_reason = ?, is_open = 0,
                mfe = ?, mae = ?, mfe_pct = ?, mae_pct = ?,
-               exit_regime = ?, exit_d1_trend = ?, exit_h4_trend = ?
+               exit_regime = ?, exit_d1_trend = ?, exit_h4_trend = ?,
+               tp1_price = ?, tp_level = ?, parent_trade_id = ?, remaining_lots = ?
                WHERE id = ?""",
             (exit_price, exit_time, pnl, pnl_pct, exit_reason,
              mfe, mae, mfe_pct, mae_pct,
              exit_regime, exit_d1_trend, exit_h4_trend,
+             tp1_price, tp_level, parent_trade_id, remaining_lots,
              trade_id),
         )
         conn.commit()
