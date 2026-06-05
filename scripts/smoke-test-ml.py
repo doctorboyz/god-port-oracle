@@ -217,9 +217,9 @@ def check_per_model_prediction(predictor: object) -> None:
         }
 
         try:
-            proba = predictor.predict_loss_proba(test_features, regime=regime, direction=direction)
+            proba, model_used = predictor.predict_loss_proba(test_features, regime=regime, direction=direction)
             if proba is not None:
-                _pass(f"  {regime}/{direction}: LOSS proba={proba:.3f}")
+                _pass(f"  {regime}/{direction}: LOSS proba={proba:.3f} (model={model_used})")
             else:
                 _warn(f"  {regime}/{direction}: predict_loss_proba returned None")
         except Exception as e:
@@ -237,8 +237,10 @@ def check_per_model_prediction(predictor: object) -> None:
         try:
             result = predictor.get_risk_multiplier(test_features, regime, direction)
             if result is not None:
-                multiplier, reason = result
-                _pass(f"  {regime}/{direction}: risk={multiplier:.1f}x ({reason})")
+                multiplier, reason, loss_proba, model_used = result
+                proba_str = f", proba={loss_proba:.3f}" if loss_proba is not None else ""
+                model_str = f", model={model_used}" if model_used else ""
+                _pass(f"  {regime}/{direction}: risk={multiplier:.1f}x ({reason}{proba_str}{model_str})")
             else:
                 _fail(f"  {regime}/{direction}: get_risk_multiplier returned None")
         except Exception as e:

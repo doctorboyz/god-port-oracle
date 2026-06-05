@@ -698,11 +698,9 @@ class ScalpTrader:
                     session=session,
                     sentiment=_sentiment,
                 )
-                ml_risk_multiplier, ml_risk_reason = self._ml_predictor.get_risk_multiplier(
+                ml_risk_multiplier, ml_risk_reason, ml_loss_proba, ml_model_used = self._ml_predictor.get_risk_multiplier(
                     ml_features, "trending", str(signal.signal_type.value),
                 )
-                ml_loss_proba = self._ml_predictor._last_loss_proba if hasattr(self._ml_predictor, '_last_loss_proba') else None
-                ml_model_used = "xgboost" if ml_risk_multiplier != 1.0 else None
                 # ML filter succeeded — reset failure counter
                 self._ml_fail_count = 0
 

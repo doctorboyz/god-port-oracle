@@ -113,10 +113,15 @@ class TradeOutcomePredictor:
         features: dict[str, float | str],
         regime: Optional[str] = None,
         direction: Optional[str] = None,
-    ) -> Optional[float]:
-        """Predict probability of LOSS. Returns None if unavailable."""
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Predict probability of LOSS and which model was used.
+
+        Returns (proba_loss, model_name):
+          - (0.83, "regime_trending") if prediction succeeds
+          - (None, None) if no model available
+        """
         if not self.enabled:
-            return None
+            return None, None
 
         model_names = []
         if regime and direction:
@@ -137,11 +142,11 @@ class TradeOutcomePredictor:
             try:
                 proba = self._predict(model, features, info.get("feature_cols", []))
                 if proba is not None:
-                    return proba
+                    return proba, name
             except Exception:
                 continue
 
-        return None
+        return None, None
 
     def _predict(
         self,
@@ -203,7 +208,7 @@ class TradeOutcomePredictor:
         if not self.enabled:
             return False, "ML filter disabled"
 
-        proba_loss = self.predict_loss_proba(features, regime, direction)
+        proba_loss, _ = self.predict_loss_proba(features, regime, direction)
         if proba_loss is None:
             return False, "no model available"
 
@@ -216,7 +221,7 @@ class TradeOutcomePredictor:
         features: dict[str, float | str],
         regime: Optional[str] = None,
         direction: Optional[str] = None,
-    ) -> tuple[float, str]:
+    ) -> tuple[float, str, Optional[float], Optional[str]]:
         """Convert P(LOSS) to position size multiplier for risk-scaling.
 
         Instead of hard blocking trades, reduce position size based on risk:
@@ -224,22 +229,22 @@ class TradeOutcomePredictor:
         - P(LOSS) 0.50–0.85: linear scaling from 1.0 down to 0.0
         - P(LOSS) > 0.85: skip trade (0.0) — model very confident of loss
 
-        Returns (multiplier: float 0.0-1.0, reason: str).
+        Returns (multiplier, reason, loss_proba, model_used).
         """
         if not self.enabled:
-            return 1.0, "ML filter disabled"
+            return 1.0, "ML filter disabled", None, None
 
-        proba_loss = self.predict_loss_proba(features, regime, direction)
+        proba_loss, model_used = self.predict_loss_proba(features, regime, direction)
         if proba_loss is None:
-            return 1.0, "no model available"
+            return 1.0, "no model available", None, None
 
         if proba_loss <= 0.50:
-            return 1.0, f"ML risk: P(LOSS)={proba_loss:.0%}, full size"
+            return 1.0, f"ML risk: P(LOSS)={proba_loss:.0%}, full size", proba_loss, model_used
         if proba_loss >= 0.85:
-            return 0.0, f"ML risk: P(LOSS)={proba_loss:.0%}, skip"
+            return 0.0, f"ML risk: P(LOSS)={proba_loss:.0%}, skip", proba_loss, model_used
 
         multiplier = (0.85 - proba_loss) / 0.35
-        return round(multiplier, 2), f"ML risk: P(LOSS)={proba_loss:.0%}, {multiplier:.0%} size"
+        return round(multiplier, 2), f"ML risk: P(LOSS)={proba_loss:.0%}, {multiplier:.0%} size", proba_loss, model_used
 
     def get_model_accuracy(self, name: str) -> float:
         info = self._model_info.get(name, {})
@@ -272,13 +277,12 @@ class TradeOutcomePredictor:
                 "session": "london", "d1_trend": "bullish",
                 "h4_trend": "bullish", "spread": 0.3,
             }
-            result = self.get_risk_multiplier(test_features, "trending", "BUY")
-            if result is None:
-                return False, "get_risk_multiplier returned None"
-            multiplier, reason = result
+            multiplier, reason, loss_proba, model_used = self.get_risk_multiplier(test_features, "trending", "BUY")
             if not isinstance(multiplier, (int, float)):
                 return False, f"get_risk_multiplier returned non-numeric: {type(multiplier)}"
-            return True, f"OK (test prediction: {multiplier:.1f}x)"
+            model_info = f", model={model_used}" if model_used else ""
+            proba_info = f", P(LOSS)={loss_proba:.0%}" if loss_proba is not None else ""
+            return True, f"OK (test prediction: {multiplier:.1f}x{proba_info}{model_info})"
         except Exception as e:
             return False, f"Test prediction failed: {e}"
 

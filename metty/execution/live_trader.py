@@ -917,7 +917,7 @@ class LiveTrader:
                     sentiment=sentiment_data,
                 )
                 regime = d1_trend if d1_trend and d1_trend not in ("neutral", "unknown") else "trending"
-                ml_risk_multiplier, ml_reason = self._ml_predictor.get_risk_multiplier(
+                ml_risk_multiplier, ml_reason, ml_loss_proba, ml_model_used = self._ml_predictor.get_risk_multiplier(
                     ml_features, regime, str(signal.signal_type.value),
                 )
                 # ML filter succeeded — reset failure counter
