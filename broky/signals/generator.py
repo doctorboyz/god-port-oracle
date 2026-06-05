@@ -686,10 +686,10 @@ def generate_signal(
             if learning_mode:
                 reason += f" (learning: counter-trend {signal_type.value} in {d1_trend} D1)"
             else:
-                # If H4 overrides, trend is already conflicted — reduce block strength
+                # If H4 overrides D1, hard block counter-trend — don't trade against H4
                 if h4_override:
-                    trend_mult = 0.5  # H4 conflict = trend uncertain
-                    reason += f" (H4 override: {d1_trend} D1 → {effective_trend} H4)"
+                    trend_mult = 0.0  # H4 override = block counter-trend completely
+                    reason += f" (counter-trend blocked: H4 {effective_trend} overrides D1 {d1_trend})"
                 else:
                     trend_mult = compute_trend_alignment(
                         effective_trend, signal_type,
