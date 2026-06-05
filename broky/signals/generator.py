@@ -619,8 +619,13 @@ def generate_signal(
     # Classify market regime
     boll = calculate_bollinger(close, period=20, std_dev=2.0)
     boll_bw = None
+    band_position = None  # Bollinger position for overbought/oversold detection (0=lower, 1=upper)
     if pd.notna(boll.upper.iloc[-1]) and pd.notna(boll.middle.iloc[-1]) and boll.middle.iloc[-1] != 0:
         boll_bw = (boll.upper.iloc[-1] - boll.lower.iloc[-1]) / boll.middle.iloc[-1]
+        # Compute band position for mean-reversion exception in counter-trend filter
+        band_range = boll.upper.iloc[-1] - boll.lower.iloc[-1]
+        if band_range > 0:
+            band_position = (current_price - boll.lower.iloc[-1]) / band_range
     regime = classify_regime(latest_adx, boll_bw)
 
     # Compute weighted_score for all paths (needed for Signal constructor even in ranging mode)
@@ -686,10 +691,24 @@ def generate_signal(
             if learning_mode:
                 reason += f" (learning: counter-trend {signal_type.value} in {d1_trend} D1)"
             else:
-                # If H4 overrides D1, hard block counter-trend — don't trade against H4
+                # If H4 overrides D1, hard block counter-trend — unless overbought/oversold
+                # Mean reversion exception: allow counter-trend with reduced size
+                # when price is at Bollinger extreme (oversold for BUY, overbought for SELL)
                 if h4_override:
-                    trend_mult = 0.0  # H4 override = block counter-trend completely
-                    reason += f" (counter-trend blocked: H4 {effective_trend} overrides D1 {d1_trend})"
+                    is_oversold = band_position is not None and band_position <= 0.15
+                    is_overbought = band_position is not None and band_position >= 0.85
+                    counter_buy = signal_type == SignalType.BUY
+                    counter_sell = signal_type == SignalType.SELL
+
+                    if counter_buy and is_oversold:
+                        trend_mult = 0.3  # Allow mean-reversion BUY near lower band
+                        reason += f" (H4 override: oversold boll={band_position:.2f} → mean-revert BUY)"
+                    elif counter_sell and is_overbought:
+                        trend_mult = 0.3  # Allow mean-reversion SELL near upper band
+                        reason += f" (H4 override: overbought boll={band_position:.2f} → mean-revert SELL)"
+                    else:
+                        trend_mult = 0.0  # Hard block: no extreme condition → no counter-trend
+                        reason += f" (counter-trend blocked: H4 {effective_trend} overrides D1 {d1_trend})"
                 else:
                     trend_mult = compute_trend_alignment(
                         effective_trend, signal_type,
