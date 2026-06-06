@@ -72,6 +72,10 @@ class M5ScalpRiskConfig:
     tp_levels: list = field(default_factory=lambda: [1.0, 1.5, 2.5, 4.0])
     tp_close_percents: list = field(default_factory=lambda: [0.40, 0.25, 0.25, 0.10])
     sizing_method: str = "risk_per_trade"  # risk_per_trade, kelly, volatility_adjusted, fixed_fraction
+    # Partial TP (Option C): close at TP1, open scale-in position
+    partial_tp_enabled: bool = False  # Feature flag — must be explicitly enabled
+    tp1_ratio: float = 0.5   # TP1 at 50% of TP distance from entry
+    rr_scale_in: float = 2.5  # RR ratio for the scale-in position
 
 
 class M5ScalpTrader:
@@ -133,6 +137,25 @@ class M5ScalpTrader:
             self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
             self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
             self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
+        # Partial TP overrides per account
+        per_account_ptp = {
+            "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
+            "B": os.environ.get("PARTIAL_TP_ENABLED_B", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
+            "C": os.environ.get("PARTIAL_TP_ENABLED_C", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
+        }
+        per_account_tp1r = {
+            "A": float(os.environ.get("TP1_RATIO_A", os.environ.get("TP1_RATIO", "0.5"))),
+            "B": float(os.environ.get("TP1_RATIO_B", os.environ.get("TP1_RATIO", "0.5"))),
+            "C": float(os.environ.get("TP1_RATIO_C", os.environ.get("TP1_RATIO", "0.5"))),
+        }
+        per_account_rrsi = {
+            "A": float(os.environ.get("RR_SCALE_IN_A", os.environ.get("RR_SCALE_IN", "2.5"))),
+            "B": float(os.environ.get("RR_SCALE_IN_B", os.environ.get("RR_SCALE_IN", "2.5"))),
+            "C": float(os.environ.get("RR_SCALE_IN_C", os.environ.get("RR_SCALE_IN", "2.5"))),
+        }
+        self.risk.partial_tp_enabled = per_account_ptp.get(self.account, self.risk.partial_tp_enabled)
+        self.risk.tp1_ratio = per_account_tp1r.get(self.account, self.risk.tp1_ratio)
+        self.risk.rr_scale_in = per_account_rrsi.get(self.account, self.risk.rr_scale_in)
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:
@@ -374,6 +397,197 @@ class M5ScalpTrader:
             })
         return levels
 
+    def _execute_tp1_close(
+        self,
+        trade: dict,
+        tp1_price: float,
+        mfe_mae: dict,
+        now_str: str,
+    ) -> list[dict]:
+        """Close position 1 at TP1, open scale-in position 2 (Option C).
+
+        Flow:
+        1. Close position 1 at TP1 price → take profit
+        2. Open position 2 at current price with new SL based on rr_scale_in
+        3. Position 2's TP = original final TP
+        """
+        closed = []
+        direction = trade["direction"]
+        entry_price = trade["entry_price"]
+        tp = trade["take_profit"]
+        lot_size = trade["lot_size"]
+        trade_id = trade["id"]
+
+        # 1. Close position 1 at TP1
+        exit_price = tp1_price
+        if direction == "BUY":
+            pnl = (exit_price - entry_price) * lot_size * CONTRACT_SIZE
+            pnl_pct = (exit_price - entry_price) / entry_price * 100
+        else:
+            pnl = (entry_price - exit_price) * lot_size * CONTRACT_SIZE
+            pnl_pct = (entry_price - exit_price) / entry_price * 100
+
+        mfe = mfe_mae.get("mfe", 0) if mfe_mae else 0
+        mae = mfe_mae.get("mae", 0) if mfe_mae else 0
+        mfe_pct = (mfe / entry_price * 100) if mfe and entry_price > 0 else None
+        mae_pct = (mae / entry_price * 100) if mae and entry_price > 0 else None
+
+        exit_d1_trend = self._last_d1_trend
+        exit_h4_trend = self._last_h4_trend
+
+        close_live_trade(
+            trade_id=trade["id"],
+            exit_price=exit_price,
+            exit_time=now_str,
+            pnl=round(pnl, 2),
+            pnl_pct=round(pnl_pct, 4),
+            exit_reason="tp1_hit",
+            mfe=round(mfe, 2) if mfe else None,
+            mae=round(mae, 2) if mae else None,
+            mfe_pct=round(mfe_pct, 4) if mfe_pct else None,
+            mae_pct=round(mae_pct, 4) if mae_pct else None,
+            exit_regime="unknown",
+            exit_d1_trend=exit_d1_trend,
+            exit_h4_trend=exit_h4_trend,
+            tp1_price=tp1_price,
+            tp_level=1,
+            remaining_lots=0,
+            db_path=self.db_path,
+        )
+
+        # Update circuit breaker for position 1 profit
+        if pnl > 0:
+            self.circuit_breaker.record_win(pnl)
+        else:
+            self.circuit_breaker.record_loss(pnl)
+
+        self._last_exit_time = datetime.now(timezone.utc)
+        self._mfe_mae_state.pop(trade_id, None)
+
+        # Close in MT5 if ticket exists
+        if trade.get("ticket") and not self.dry_run:
+            try:
+                from metty.bridge.client import MT5Bridge
+                from metty.core.models import AccountConfig, AccountName
+
+                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
+                port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
+
+                config = AccountConfig(
+                    name=AccountName[self.account],
+                    bridge_host=host,
+                    bridge_port=port,
+                    broker_login="", broker_server="",
+                )
+                bridge = MT5Bridge(config)
+
+                async def _close():
+                    if await bridge.connect():
+                        await bridge.close_position(trade["ticket"])
+                        await bridge.disconnect()
+
+                import asyncio
+                asyncio.run(_close())
+            except Exception as e:
+                logger.warning("[M5Scalp:%s] Failed to close position %s at TP1 in MT5: %s",
+                               self.account, trade["ticket"], e)
+
+        closed.append({
+            "trade_id": trade["id"],
+            "direction": direction,
+            "exit_reason": "tp1_hit",
+            "exit_price": exit_price,
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 4),
+        })
+
+        logger.info("[M5Scalp:%s] TP1_CLOSED #%d %s @ %.2f (PnL=%.2f)",
+                     self.account, trade_id, direction, exit_price, pnl)
+
+        # 2. Open scale-in position (position 2) at current price
+        remaining_distance = abs(tp - tp1_price)
+        if direction == "BUY":
+            new_sl = tp1_price - remaining_distance / self.risk.rr_scale_in
+        else:
+            new_sl = tp1_price + remaining_distance / self.risk.rr_scale_in
+
+        new_lots = lot_size  # Same lot size (Exness min = 0.01)
+        current_price = tp1_price  # Approximate entry for scale-in
+
+        # Open scale-in in MT5 (if not dry run)
+        ticket = None
+        if not self.dry_run:
+            try:
+                from metty.bridge.client import MT5Bridge
+                from metty.core.models import AccountConfig, AccountName
+
+                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
+                port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
+
+                config = AccountConfig(
+                    name=AccountName[self.account],
+                    bridge_host=host,
+                    bridge_port=port,
+                    broker_login=os.environ.get(f"MT5_LOGIN_{self.account}", ""),
+                    broker_server=os.environ.get(f"MT5_SERVER_{self.account}", "Exness-MT5Trial17"),
+                )
+                bridge = MT5Bridge(config)
+
+                async def _open():
+                    if not await bridge.connect():
+                        return None
+                    result = await bridge.send_order("XAUUSD", direction, new_lots, new_sl, tp)
+                    await bridge.disconnect()
+                    return result
+
+                import asyncio
+                order_result = asyncio.run(_open())
+                ticket = order_result.ticket if order_result and order_result.success else None
+                if order_result and not order_result.success:
+                    logger.error("[M5Scalp:%s] Scale-in order FAILED at TP1: %s",
+                                 self.account, order_result.error)
+                    return closed  # Don't insert scale-in if MT5 order failed
+            except Exception as e:
+                logger.error("[M5Scalp:%s] Scale-in MT5 error at TP1: %s", self.account, e)
+                return closed  # Don't insert scale-in if MT5 errored
+
+        # Insert scale-in trade in DB
+        scale_in_id = insert_live_trade(
+            account_id=self.account_id,
+            timestamp=now_str,
+            direction=direction,
+            entry_price=current_price,
+            stop_loss=round(new_sl, 2),
+            take_profit=tp,
+            lot_size=new_lots,
+            confidence=trade.get("confidence", 0),
+            regime=trade.get("regime", "unknown") or "unknown",
+            session=trade.get("session", "unknown") or "unknown",
+            d1_trend=exit_d1_trend or "unknown",
+            reason=f"scale-in from trade #{trade_id} (tp1_hit)",
+            ticket=ticket,
+            symbol=trade.get("symbol", "XAUUSD"),
+            trading_mode="m5_scalp",
+            strategy_id=self.strategy_id,
+            tp1_price=tp1_price,
+            tp_level=2,
+            parent_trade_id=trade_id,
+            atr_multiplier=self.risk.atr_multiplier,
+            rr_ratio=self.risk.risk_reward_ratio,
+            min_confidence_threshold=self.risk.min_confidence,
+            db_path=self.db_path,
+        )
+
+        # Initialize MFE/MAE tracking for scale-in position
+        self._mfe_mae_state[scale_in_id] = {"mfe": 0.0, "mae": 0.0}
+
+        logger.info("[M5Scalp:%s] SCALE_IN #%d %s @ %.2f SL=%.2f TP=%.2f (from #%d)",
+                     self.account, scale_in_id, direction, current_price, new_sl, tp, trade_id)
+
+        return closed
+
     def run_once(self) -> dict:
         """Run a single M5 scalping cycle."""
         self._cycle_count += 1
@@ -566,6 +780,13 @@ class M5ScalpTrader:
             stop_loss = float(signal.price + sl_distance)
             take_profit = float(signal.price - sl_distance * self.risk.risk_reward_ratio)
 
+        # TP1 = 50% of TP distance (for partial TP tracking)
+        tp_distance = abs(take_profit - signal.price)
+        if signal.signal_type == SignalType.BUY:
+            tp1_price = round(signal.price + tp_distance * 0.5, 2)
+        else:
+            tp1_price = round(signal.price - tp_distance * 0.5, 2)
+
         # Position sizing
         balance = self._get_balance()
         lot_size = float(self._calculate_lots(balance, signal.price, stop_loss, latest_atr))
@@ -678,6 +899,10 @@ class M5ScalpTrader:
                 minutes_to_next_event=minutes_to_next_event,
                 next_event_type=next_event_type,
                 next_event_impact=next_event_impact,
+                tp1_price=tp1_price,
+                atr_multiplier=self.risk.atr_multiplier,
+                rr_ratio=self.risk.risk_reward_ratio,
+                min_confidence_threshold=self.risk.min_confidence,
                 db_path=self.db_path,
             )
 
@@ -850,6 +1075,25 @@ class M5ScalpTrader:
             state["mfe"] = max(state["mfe"], favorable)
             state["mae"] = max(state["mae"], adverse)
 
+            # === Partial TP (Option C): detect TP1 hit ===
+            tp_level = trade.get("tp_level", 1) or 1
+            tp1_price = trade.get("tp1_price")
+            if (
+                self.risk.partial_tp_enabled
+                and tp_level == 1
+                and tp1_price
+                and tp1_price > 0
+            ):
+                tp1_hit = False
+                if direction == "BUY" and current_price >= tp1_price:
+                    tp1_hit = True
+                elif direction == "SELL" and current_price <= tp1_price:
+                    tp1_hit = True
+
+                if tp1_hit:
+                    closed.extend(self._execute_tp1_close(trade, tp1_price, state, now_str))
+                    continue  # Trade closed + scale-in opened, skip normal exit
+
             exit_reason = None
             exit_price = current_price
 
@@ -917,6 +1161,7 @@ class M5ScalpTrader:
                     exit_regime="unknown",
                     exit_d1_trend=self._last_d1_trend,
                     exit_h4_trend=self._last_h4_trend,
+                    tp1_price=trade.get("tp1_price"),
                     db_path=self.db_path,
                 )
                 # Clean up MFE/MAE state

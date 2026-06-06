@@ -69,6 +69,11 @@ class SynthTradeOutcome:
     exit_h4_trend: str = "unknown"
     exit_regime: str = "unknown"
 
+    # Trading parameters used for this trade
+    atr_multiplier: float = 1.5
+    rr_ratio: float = 2.0
+    min_confidence_threshold: float = 0.30
+
     # Full feature snapshot (for features_json)
     features: dict = field(default_factory=dict)
 
@@ -236,10 +241,9 @@ class BacktestToMLPipeline:
 
     def _compute_d1_trend_series(self, d1: pd.DataFrame) -> pd.Series:
         """Compute D1 trend series (bullish/bearish) based on EMA 50/200."""
-        # DataFrames in _candles use Title Case (from load_timeframe)
-        close_col = "Close" if "Close" in d1.columns else "close"
-        ema50 = calculate_ema(d1[close_col], 50)
-        ema200 = calculate_ema(d1[close_col], 200)
+        # DataFrames use lowercase columns (since loader standardization)
+        ema50 = calculate_ema(d1["close"], 50)
+        ema200 = calculate_ema(d1["close"], 200)
 
         trend = pd.Series(index=d1.index, dtype=object)
         for i in range(len(d1)):
@@ -290,10 +294,9 @@ class BacktestToMLPipeline:
         if len(valid) < 200:
             return "unknown"
 
-        # DataFrames in _candles use Title Case (from load_timeframe)
-        close_col = "Close" if "Close" in valid.columns else "close"
-        ema50 = calculate_ema(valid[close_col], 50)
-        ema200 = calculate_ema(valid[close_col], 200)
+        # DataFrames use lowercase columns (since loader standardization)
+        ema50 = calculate_ema(valid["close"], 50)
+        ema200 = calculate_ema(valid["close"], 200)
 
         last_ema50 = ema50.iloc[-1]
         last_ema200 = ema200.iloc[-1]
@@ -431,8 +434,8 @@ class BacktestToMLPipeline:
             return 0.0, 0.0, 0.0, 0.0
 
         try:
-            high_slice = df["High"].iloc[start:end + 1]
-            low_slice = df["Low"].iloc[start:end + 1]
+            high_slice = df["high"].iloc[start:end + 1]
+            low_slice = df["low"].iloc[start:end + 1]
         except (IndexError, KeyError):
             return 0.0, 0.0, 0.0, 0.0
 
@@ -609,6 +612,9 @@ class BacktestToMLPipeline:
             exit_d1_trend=exit_d1_trend,
             exit_h4_trend=exit_h4_trend,
             exit_regime=exit_regime,
+            atr_multiplier=self.atr_multiplier,
+            rr_ratio=self.risk_reward_ratio,
+            min_confidence_threshold=self.min_confidence,
             features=features,
             entry_timestamp=entry_ts.isoformat(),
             exit_timestamp=exit_ts.isoformat(),
@@ -676,6 +682,9 @@ class BacktestToMLPipeline:
                     exit_reason=outcome.exit_reason,
                     trading_mode="backtest",
                     h4_trend=outcome.h4_trend,
+                    atr_multiplier=outcome.atr_multiplier,
+                    rr_ratio=outcome.rr_ratio,
+                    min_confidence_threshold=outcome.min_confidence_threshold,
                     db_path=self.db_path,
                 )
 
@@ -703,6 +712,9 @@ class BacktestToMLPipeline:
                     exit_regime=outcome.exit_regime,
                     exit_d1_trend=outcome.exit_d1_trend,
                     exit_h4_trend=outcome.exit_h4_trend,
+                    atr_multiplier=outcome.atr_multiplier,
+                    rr_ratio=outcome.rr_ratio,
+                    min_confidence_threshold=outcome.min_confidence_threshold,
                     db_path=self.db_path,
                 )
                 stats["db_writes"] += 1

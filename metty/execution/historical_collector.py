@@ -39,11 +39,16 @@ DEFAULT_SAMPLE_EVERY = 12  # every hour on M5
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename CSV columns (Open, High, Low, Close, Volume) to lowercase."""
+    """Ensure OHLCV columns are lowercase.
+
+    Since load_timeframe() now returns lowercase columns by default,
+    this is a pass-through. Kept for backward compatibility with any
+    code that still calls it.
+    """
     rename_map = {}
     for col in df.columns:
         lower = col.lower()
-        if lower in ("open", "high", "low", "close", "volume"):
+        if lower in ("open", "high", "low", "close", "volume") and col != lower:
             rename_map[col] = lower
     if rename_map:
         df = df.rename(columns=rename_map)

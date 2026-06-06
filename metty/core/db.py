@@ -249,6 +249,17 @@ CREATE TABLE IF NOT EXISTS live_trades (
     -- Signal intermediate scores (debugging + feature importance)
     indicator_scores_json TEXT,
 
+    -- Partial TP tracking (TP1 → Scale-In)
+    tp1_price REAL,
+    parent_trade_id INTEGER,
+    tp_level INTEGER DEFAULT 1,
+    remaining_lots REAL,
+
+    -- Trading parameters (what config was used for this trade)
+    atr_multiplier REAL,
+    rr_ratio REAL,
+    min_confidence_threshold REAL,
+
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
@@ -310,6 +321,15 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     exit_regime TEXT,
     exit_d1_trend TEXT,
     exit_h4_trend TEXT,
+
+    -- pnl aliases (ISSUE-014: same as profit/profit_pct)
+    pnl REAL,
+    pnl_pct REAL,
+
+    -- Trading parameters (what config was used for this trade)
+    atr_multiplier REAL,
+    rr_ratio REAL,
+    min_confidence_threshold REAL,
 
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (trade_id) REFERENCES live_trades(id),
@@ -424,6 +444,16 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("trade_outcomes", "exit_regime", "TEXT"),
         ("trade_outcomes", "exit_d1_trend", "TEXT"),
         ("trade_outcomes", "exit_h4_trend", "TEXT"),
+        # pnl/pnl_pct aliases in trade_outcomes (ISSUE-014)
+        ("trade_outcomes", "pnl", "REAL"),
+        ("trade_outcomes", "pnl_pct", "REAL"),
+        # Trading parameters per trade (what config was used)
+        ("live_trades", "atr_multiplier", "REAL"),
+        ("live_trades", "rr_ratio", "REAL"),
+        ("live_trades", "min_confidence_threshold", "REAL"),
+        ("trade_outcomes", "atr_multiplier", "REAL"),
+        ("trade_outcomes", "rr_ratio", "REAL"),
+        ("trade_outcomes", "min_confidence_threshold", "REAL"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -742,6 +772,10 @@ def insert_live_trade(
     tp1_price: float | None = None,
     tp_level: int = 1,
     parent_trade_id: int | None = None,
+    # Trading parameters (what config was used)
+    atr_multiplier: float | None = None,
+    rr_ratio: float | None = None,
+    min_confidence_threshold: float | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a live trade record and return its ID."""
@@ -756,9 +790,10 @@ def insert_live_trade(
                 ml_risk_multiplier, ml_risk_reason, ml_model_version,
                 ml_loss_proba, ml_model_used,
                 minutes_to_next_event, next_event_type, next_event_impact,
-                indicator_scores_json, tp1_price, tp_level, parent_trade_id)
+                indicator_scores_json, tp1_price, tp_level, parent_trade_id,
+                atr_multiplier, rr_ratio, min_confidence_threshold)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (account_id, timestamp, direction, symbol, entry_price, stop_loss,
              take_profit, lot_size, confidence, regime, session, d1_trend,
              reason, trading_mode, strategy_id, signal_id, ticket,
@@ -766,7 +801,8 @@ def insert_live_trade(
              ml_risk_multiplier, ml_risk_reason, ml_model_version,
              ml_loss_proba, ml_model_used,
              minutes_to_next_event, next_event_type, next_event_impact,
-             indicator_scores_json, tp1_price, tp_level, parent_trade_id),
+             indicator_scores_json, tp1_price, tp_level, parent_trade_id,
+             atr_multiplier, rr_ratio, min_confidence_threshold),
         )
         conn.commit()
         return cursor.lastrowid
@@ -1086,14 +1122,17 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                     trading_mode, strategy_id, entry_price, exit_price, profit,
                     profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
                     mfe, mae, mfe_pct, mae_pct,
-                    exit_regime, exit_d1_trend, exit_h4_trend)
+                    exit_regime, exit_d1_trend, exit_h4_trend,
+                    pnl, pnl_pct)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?)""",
                 (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
                  mode, strategy, entry_price, exit_price, pnl, pnl_pct,
                  outcome, holding_minutes, exit_reason, features_json,
                  mfe, mae, mfe_pct, mae_pct,
-                 exit_regime, exit_d1_trend, exit_h4_trend),
+                 exit_regime, exit_d1_trend, exit_h4_trend,
+                 pnl, pnl_pct),
             )
             stats["linked"] += 1
             stats["outcomes"][outcome] += 1
@@ -1154,6 +1193,9 @@ def insert_synthetic_trade(
     lot_size: float = 0.01,
     confidence: float = 0.0,
     h4_trend: str | None = None,
+    atr_multiplier: float | None = None,
+    rr_ratio: float | None = None,
+    min_confidence_threshold: float | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a minimal live_trades row for a synthetic backtest trade.
@@ -1165,24 +1207,26 @@ def insert_synthetic_trade(
 
     conn = get_connection(db_path)
     try:
-        # Handle h4_trend column — may not exist in older schemas
+        # Check if trading parameter columns exist (added via migration)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(live_trades)").fetchall()}
-        h4_col = "h4_trend" if "h4_trend" in cols else None
+        has_atr_cols = "atr_multiplier" in cols
 
-        if h4_col:
+        if has_atr_cols:
             cursor = conn.execute(
                 """INSERT INTO live_trades
                    (account_id, timestamp, direction, symbol, entry_price, stop_loss,
                     take_profit, lot_size, confidence, regime, session, d1_trend,
-                    h4_trend, reason, trading_mode, strategy_id, is_open,
-                    exit_price, exit_time, pnl, pnl_pct, exit_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
-                           ?, ?, ?, ?, ?)""",
+                    reason, trading_mode, strategy_id, is_open,
+                    exit_price, exit_time, pnl, pnl_pct, exit_reason,
+                    atr_multiplier, rr_ratio, min_confidence_threshold)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                           ?, ?, ?, ?, ?,
+                           ?, ?, ?)""",
                 (SYNTHETIC_ACCOUNT_ID, entry_time, direction, symbol, entry_price,
                  stop_loss, take_profit, lot_size, confidence, regime, session,
-                 d1_trend, h4_trend, f"backtest_{exit_reason}", trading_mode,
-                 strategy_id,
-                 exit_price, exit_time, pnl, pnl_pct, exit_reason),
+                 d1_trend, f"backtest_{exit_reason}", trading_mode, strategy_id,
+                 exit_price, exit_time, pnl, pnl_pct, exit_reason,
+                 atr_multiplier, rr_ratio, min_confidence_threshold),
             )
         else:
             cursor = conn.execute(
@@ -1229,6 +1273,9 @@ def insert_synthetic_trade_outcome(
     exit_regime: str | None = None,
     exit_d1_trend: str | None = None,
     exit_h4_trend: str | None = None,
+    atr_multiplier: float | None = None,
+    rr_ratio: float | None = None,
+    min_confidence_threshold: float | None = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a trade_outcomes row for a synthetic backtest trade.
@@ -1255,20 +1302,48 @@ def insert_synthetic_trade_outcome(
         features["exit_d1_trend"] = exit_d1_trend
     if exit_h4_trend is not None:
         features["exit_h4_trend"] = exit_h4_trend
+    if atr_multiplier is not None:
+        features["atr_multiplier"] = atr_multiplier
+    if rr_ratio is not None:
+        features["rr_ratio"] = rr_ratio
+    if min_confidence_threshold is not None:
+        features["min_confidence_threshold"] = min_confidence_threshold
     enriched_json = json.dumps(features)
 
     conn = get_connection(db_path)
     try:
-        cursor = conn.execute(
-            """INSERT INTO trade_outcomes
-               (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
-                trading_mode, strategy_id, entry_price, exit_price, profit,
-                profit_pct, outcome_label, holding_minutes, exit_reason, features_json)
-               VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (trade_id, SYNTHETIC_ACCOUNT_ID, symbol, direction,
-             trading_mode, strategy_id, entry_price, exit_price, profit,
-             profit_pct, outcome_label, holding_minutes, exit_reason, enriched_json),
-        )
+        # Check if atr_multiplier column exists (migration may not have run yet)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_outcomes)").fetchall()}
+        has_atr_cols = "atr_multiplier" in cols
+
+        if has_atr_cols:
+            cursor = conn.execute(
+                """INSERT INTO trade_outcomes
+                   (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                    trading_mode, strategy_id, entry_price, exit_price, profit,
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                    pnl, pnl_pct, atr_multiplier, rr_ratio, min_confidence_threshold)
+                   VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?)""",
+                (trade_id, SYNTHETIC_ACCOUNT_ID, symbol, direction,
+                 trading_mode, strategy_id, entry_price, exit_price, profit,
+                 profit_pct, outcome_label, holding_minutes, exit_reason, enriched_json,
+                 profit, profit_pct, atr_multiplier, rr_ratio, min_confidence_threshold),
+            )
+        else:
+            cursor = conn.execute(
+                """INSERT INTO trade_outcomes
+                   (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                    trading_mode, strategy_id, entry_price, exit_price, profit,
+                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                    pnl, pnl_pct)
+                   VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?)""",
+                (trade_id, SYNTHETIC_ACCOUNT_ID, symbol, direction,
+                 trading_mode, strategy_id, entry_price, exit_price, profit,
+                 profit_pct, outcome_label, holding_minutes, exit_reason, enriched_json,
+                 profit, profit_pct),
+            )
         conn.commit()
         return cursor.lastrowid
     finally:

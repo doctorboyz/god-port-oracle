@@ -163,7 +163,7 @@ class ForwardEngine:
         circuit_breaker = CircuitBreaker()
         trade_id = 0
 
-        atr = calculate_atr(df["High"], df["Low"], df["Close"], period=14)
+        atr = calculate_atr(df["high"], df["low"], df["close"], period=14)
         d1_trend_series = self._compute_d1_trend(df, d1_df)
 
         position: Optional[ForwardTrade] = None
@@ -177,12 +177,12 @@ class ForwardEngine:
         last_exit_idx = -self.cooldown_bars - 1
 
         for i in range(warmup, len(df)):
-            close_slice = df["Close"].iloc[:i+1]
-            high_slice = df["High"].iloc[:i+1]
-            low_slice = df["Low"].iloc[:i+1]
-            volume_slice = df["Volume"].iloc[:i+1]
+            close_slice = df["close"].iloc[:i+1]
+            high_slice = df["high"].iloc[:i+1]
+            low_slice = df["low"].iloc[:i+1]
+            volume_slice = df["volume"].iloc[:i+1]
 
-            current_price = float(df["Close"].iloc[i])
+            current_price = float(df["close"].iloc[i])
             current_atr = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 5.0
 
             # Check exit on existing position
@@ -296,8 +296,8 @@ class ForwardEngine:
             if len(d1_df) < 200:
                 return None
 
-            ema50 = calculate_ema(d1_df["Close"], 50)
-            ema200 = calculate_ema(d1_df["Close"], 200)
+            ema50 = calculate_ema(d1_df["close"], 50)
+            ema200 = calculate_ema(d1_df["close"], 200)
 
             trend = pd.Series(index=d1_df.index, dtype=object)
             for i in range(len(d1_df)):
@@ -320,8 +320,8 @@ class ForwardEngine:
         equity: float,
     ) -> tuple[Optional[ForwardTrade], float, bool]:
         """Check if position should be exited at current candle."""
-        high = float(df["High"].iloc[idx])
-        low = float(df["Low"].iloc[idx])
+        high = float(df["high"].iloc[idx])
+        low = float(df["low"].iloc[idx])
         closed = False
 
         # Time-based exit

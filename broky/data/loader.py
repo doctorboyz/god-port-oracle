@@ -1,7 +1,10 @@
 """Load XAUUSD Premium Data CSVs.
 
-Premium CSV format: no header, columns are Date,Open,High,Low,Close,Volume.
+Premium CSV format: no header, columns are date,open,high,low,close,volume.
 Date format varies but typically YYYY.MM.DD or similar.
+
+All column names are standardized to lowercase for consistency across
+the pipeline (live trading, backtesting, ML feature computation).
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-COLUMN_NAMES = ["Date", "Open", "High", "Low", "Close", "Volume"]
+# Standardized lowercase column names — used throughout the pipeline
+COLUMN_NAMES = ["date", "open", "high", "low", "close", "volume"]
 
 TIMEFRAME_MAP = {
     "M1": "1min",
@@ -39,8 +43,8 @@ def load_csv(
             If None, pandas will try to infer.
 
     Returns:
-        DataFrame with columns: Date, Open, High, Low, Close, Volume.
-        Date is parsed as datetime, set as index.
+        DataFrame with lowercase columns: open, high, low, close, volume.
+        Indexed by datetime (date column).
 
     Example:
         >>> df = load_csv("data/xau-data/XAUUSD_M5.csv")
@@ -54,17 +58,17 @@ def load_csv(
         filepath,
         header=None,
         names=COLUMN_NAMES,
-        parse_dates=["Date"],
+        parse_dates=["date"],
         date_format=date_format,
     )
-    df = df.set_index("Date").sort_index()
+    df = df.set_index("date").sort_index()
     df = df.dropna()
 
-    for col in ["Open", "High", "Low", "Close"]:
+    for col in ["open", "high", "low", "close"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
 
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    df = df.dropna(subset=["open", "high", "low", "close"])
 
     logger.info("Loaded %d rows from %s", len(df), filepath.name)
     return df
