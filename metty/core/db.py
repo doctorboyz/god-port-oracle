@@ -363,9 +363,9 @@ CREATE INDEX IF NOT EXISTS idx_rejected_reason ON rejected_signals(rejection_rea
 """
 
 
-def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
+def get_connection(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
     """Get a connection to the SQLite database with WAL mode."""
-    path = db_path or DB_PATH
+    path = Path(db_path) if isinstance(db_path, str) else (db_path or DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
