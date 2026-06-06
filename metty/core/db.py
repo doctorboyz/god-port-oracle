@@ -1129,7 +1129,7 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
     from datetime import datetime, timedelta
 
     conn = get_connection(db_path)
-    stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
+    stats = {"linked": 0, "skipped": 0, "updated": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
 
     try:
         # Check if trading parameter columns exist (may not in older schemas)
@@ -1172,12 +1172,22 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                 exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
                 lt_atr, lt_rr, lt_conf = None, None, None
 
-            # Skip if already in trade_outcomes
+            # Check if already in trade_outcomes
             existing = conn.execute(
-                "SELECT id FROM trade_outcomes WHERE trade_id = ?", (t_id,)
+                "SELECT id, atr_multiplier FROM trade_outcomes WHERE trade_id = ?", (t_id,)
             ).fetchone()
             if existing:
-                stats["skipped"] += 1
+                # Update trading params if they're NULL but available from live_trades
+                if has_trading_params and existing[1] is None and lt_atr is not None:
+                    conn.execute(
+                        """UPDATE trade_outcomes
+                           SET atr_multiplier = ?, rr_ratio = ?, min_confidence_threshold = ?
+                           WHERE trade_id = ?""",
+                        (lt_atr, lt_rr, lt_conf, t_id),
+                    )
+                    stats["updated"] = stats.get("updated", 0) + 1
+                else:
+                    stats["skipped"] += 1
                 continue
 
             # Determine signal_id if not directly linked
