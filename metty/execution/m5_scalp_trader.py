@@ -12,6 +12,7 @@ Runs alongside the M5 swing trader and M1 scalp trader. Uses:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -806,6 +807,41 @@ class M5ScalpTrader:
         direction = signal.signal_type.value  # "BUY" or "SELL"
 
         if self.dry_run:
+            # Record dry-run trade in DB for performance tracking
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            insert_live_trade(
+                account_id=self.account_id,
+                timestamp=now_str,
+                direction=direction,
+                entry_price=signal.price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                lot_size=lot_size,
+                confidence=signal.confidence,
+                regime=signal.regime or "unknown",
+                session=session,
+                d1_trend=d1_trend,
+                reason=f"dry_run_{signal.reason}",
+                trading_mode=TradingMode.M5_SCALP.value,
+                strategy_id=self.strategy_id,
+                signal_id=get_latest_signal_id(self.account_id, self.db_path),
+                atr_at_entry=float(latest_atr) if latest_atr else None,
+                indicator_scores_json=json.dumps(signal.indicators) if signal.indicators else None,
+                spread_at_entry=spread if spread and spread > 0 else None,
+                ml_risk_multiplier=ml_risk_multiplier if ml_risk_multiplier != 1.0 else None,
+                ml_risk_reason=ml_risk_reason,
+                ml_loss_proba=ml_loss_proba,
+                ml_model_used=ml_model_used,
+                ml_model_version=ml_model_version,
+                minutes_to_next_event=minutes_to_next_event,
+                next_event_type=next_event_type,
+                next_event_impact=next_event_impact,
+                tp1_price=tp1_price,
+                atr_multiplier=self.risk.atr_multiplier,
+                rr_ratio=self.risk.risk_reward_ratio,
+                min_confidence_threshold=self.risk.min_confidence,
+                db_path=self.db_path,
+            )
             log_trade(logger, "OPENED", account=self.account, direction=direction,
                      price=signal.price, lots=lot_size, sl=stop_loss, tp=take_profit,
                      confidence=signal.confidence, reason=signal.reason)

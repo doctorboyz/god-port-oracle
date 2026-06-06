@@ -912,7 +912,13 @@ def close_live_trade(
     remaining_lots: float | None = None,
     db_path: Optional[Path] = None,
 ) -> None:
-    """Close a live trade by marking it as closed with exit details."""
+    """Close a live trade by marking it as closed with exit details.
+
+    Also creates a trade_outcomes row with the trading parameters from live_trades.
+    """
+    import json
+    from datetime import datetime
+
     conn = get_connection(db_path)
     try:
         conn.execute(
@@ -929,6 +935,120 @@ def close_live_trade(
              tp1_price, tp_level, parent_trade_id, remaining_lots,
              trade_id),
         )
+
+        # Create a trade_outcomes row from the closed trade
+        # Skip if already exists (idempotent)
+        existing = conn.execute(
+            "SELECT id FROM trade_outcomes WHERE trade_id = ?", (trade_id,)
+        ).fetchone()
+        if not existing:
+            trade_row = conn.execute(
+                "SELECT * FROM live_trades WHERE id = ?", (trade_id,)
+            ).fetchone()
+            if trade_row:
+                trade_cols = [desc[0] for desc in conn.execute(
+                    "SELECT * FROM live_trades LIMIT 0"
+                ).description]
+                t = dict(zip(trade_cols, trade_row))
+
+                # Determine outcome label
+                outcome = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
+
+                # Calculate holding minutes
+                holding_minutes = None
+                if t.get("exit_time") and t.get("timestamp"):
+                    try:
+                        entry_dt = datetime.fromisoformat(t["timestamp"])
+                        exit_dt = datetime.fromisoformat(t["exit_time"])
+                        holding_minutes = int((exit_dt - entry_dt).total_seconds() / 60)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Build features_json from trade context
+                features = {}
+                if t.get("regime"):
+                    features["regime"] = t["regime"]
+                if t.get("d1_trend"):
+                    features["d1_trend"] = t["d1_trend"]
+                if t.get("h4_trend"):
+                    features["h4_trend"] = t["h4_trend"]
+                if t.get("session"):
+                    features["session"] = t["session"]
+                if t.get("atr_at_entry"):
+                    features["atr_at_entry"] = t["atr_at_entry"]
+                if t.get("confidence"):
+                    features["confidence"] = t["confidence"]
+                if t.get("indicator_scores_json"):
+                    try:
+                        scores = json.loads(t["indicator_scores_json"])
+                        features.update(scores)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if t.get("ml_risk_multiplier"):
+                    features["ml_risk_multiplier"] = t["ml_risk_multiplier"]
+                if t.get("ml_risk_reason"):
+                    features["ml_risk_reason"] = t["ml_risk_reason"]
+                if t.get("ml_loss_proba"):
+                    features["ml_loss_proba"] = t["ml_loss_proba"]
+                # Include trading parameters in features_json for ML
+                if t.get("atr_multiplier"):
+                    features["atr_multiplier"] = t["atr_multiplier"]
+                if t.get("rr_ratio"):
+                    features["rr_ratio"] = t["rr_ratio"]
+                if t.get("min_confidence_threshold"):
+                    features["min_confidence_threshold"] = t["min_confidence_threshold"]
+                features_json = json.dumps(features, separators=(",", ":")) if features else None
+
+                # Check which columns exist in trade_outcomes
+                to_cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_outcomes)").fetchall()}
+                has_trading_params = "atr_multiplier" in to_cols
+
+                if has_trading_params:
+                    conn.execute(
+                        """INSERT INTO trade_outcomes
+                           (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                            trading_mode, strategy_id, entry_price, exit_price, profit,
+                            profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                            mfe, mae, mfe_pct, mae_pct,
+                            exit_regime, exit_d1_trend, exit_h4_trend,
+                            pnl, pnl_pct,
+                            atr_multiplier, rr_ratio, min_confidence_threshold)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?,
+                                   ?, ?, ?)""",
+                        (trade_id, t.get("signal_id"), None, t.get("account_id"),
+                         t.get("symbol", "XAUUSD"), t.get("direction"),
+                         t.get("trading_mode", "swing"), t.get("strategy_id"),
+                         t.get("entry_price"), exit_price, pnl, pnl_pct,
+                         outcome, holding_minutes, exit_reason, features_json,
+                         mfe, mae, mfe_pct, mae_pct,
+                         exit_regime, exit_d1_trend, exit_h4_trend,
+                         pnl, pnl_pct,
+                         t.get("atr_multiplier"), t.get("rr_ratio"), t.get("min_confidence_threshold")),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO trade_outcomes
+                           (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                            trading_mode, strategy_id, entry_price, exit_price, profit,
+                            profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                            mfe, mae, mfe_pct, mae_pct,
+                            exit_regime, exit_d1_trend, exit_h4_trend,
+                            pnl, pnl_pct)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?, ?, ?, ?, ?, ?,
+                                   ?, ?)""",
+                        (trade_id, t.get("signal_id"), None, t.get("account_id"),
+                         t.get("symbol", "XAUUSD"), t.get("direction"),
+                         t.get("trading_mode", "swing"), t.get("strategy_id"),
+                         t.get("entry_price"), exit_price, pnl, pnl_pct,
+                         outcome, holding_minutes, exit_reason, features_json,
+                         mfe, mae, mfe_pct, mae_pct,
+                         exit_regime, exit_d1_trend, exit_h4_trend,
+                         pnl, pnl_pct),
+                    )
+
         conn.commit()
     finally:
         conn.close()
@@ -1012,13 +1132,23 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
     stats = {"linked": 0, "skipped": 0, "total": 0, "outcomes": {"WIN": 0, "LOSS": 0, "BREAKEVEN": 0}}
 
     try:
-        # Get all closed trades with results (including MFE/MAE)
-        trades = conn.execute(
-            """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
+        # Check if trading parameter columns exist (may not in older schemas)
+        all_lt_cols = {r[1] for r in conn.execute("PRAGMA table_info(live_trades)").fetchall()}
+        all_to_cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_outcomes)").fetchall()}
+        has_trading_params = "atr_multiplier" in all_lt_cols and "atr_multiplier" in all_to_cols
+
+        # Build SELECT columns dynamically based on schema
+        base_select = """SELECT id, account_id, timestamp, direction, symbol, trading_mode,
                       strategy_id, entry_price, exit_price, pnl, pnl_pct,
                       exit_reason, signal_id, exit_time,
                       mfe, mae, mfe_pct, mae_pct,
-                      exit_regime, exit_d1_trend, exit_h4_trend
+                      exit_regime, exit_d1_trend, exit_h4_trend"""
+        if has_trading_params:
+            base_select += ", atr_multiplier, rr_ratio, min_confidence_threshold"
+
+        # Get all closed trades with results (including MFE/MAE)
+        trades = conn.execute(
+            f"""{base_select}
                FROM live_trades
                WHERE is_open = 0 AND pnl IS NOT NULL AND exit_price IS NOT NULL
                ORDER BY id"""
@@ -1027,11 +1157,20 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
         stats["total"] = len(trades)
 
         for t in trades:
-            t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
-            entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
-            signal_id, exit_time = t[12], t[13]
-            mfe, mae, mfe_pct, mae_pct = t[14], t[15], t[16], t[17]
-            exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
+            if has_trading_params:
+                t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
+                entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
+                signal_id, exit_time = t[12], t[13]
+                mfe, mae, mfe_pct, mae_pct = t[14], t[15], t[16], t[17]
+                exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
+                lt_atr, lt_rr, lt_conf = t[21], t[22], t[23]
+            else:
+                t_id, acc_id, ts, direction, symbol, mode, strategy = t[0], t[1], t[2], t[3], t[4], t[5], t[6]
+                entry_price, exit_price, pnl, pnl_pct, exit_reason = t[7], t[8], t[9], t[10], t[11]
+                signal_id, exit_time = t[12], t[13]
+                mfe, mae, mfe_pct, mae_pct = t[14], t[15], t[16], t[17]
+                exit_regime, exit_d1_trend, exit_h4_trend = t[18], t[19], t[20]
+                lt_atr, lt_rr, lt_conf = None, None, None
 
             # Skip if already in trade_outcomes
             existing = conn.execute(
@@ -1116,24 +1255,48 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)
 
-            conn.execute(
-                """INSERT INTO trade_outcomes
-                   (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
-                    trading_mode, strategy_id, entry_price, exit_price, profit,
-                    profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
-                    mfe, mae, mfe_pct, mae_pct,
-                    exit_regime, exit_d1_trend, exit_h4_trend,
-                    pnl, pnl_pct)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?)""",
-                (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
-                 mode, strategy, entry_price, exit_price, pnl, pnl_pct,
-                 outcome, holding_minutes, exit_reason, features_json,
-                 mfe, mae, mfe_pct, mae_pct,
-                 exit_regime, exit_d1_trend, exit_h4_trend,
-                 pnl, pnl_pct),
-            )
+            # Build INSERT dynamically based on whether trading param columns exist
+            if has_trading_params:
+                conn.execute(
+                    """INSERT INTO trade_outcomes
+                       (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                        trading_mode, strategy_id, entry_price, exit_price, profit,
+                        profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                        mfe, mae, mfe_pct, mae_pct,
+                        exit_regime, exit_d1_trend, exit_h4_trend,
+                        pnl, pnl_pct,
+                        atr_multiplier, rr_ratio, min_confidence_threshold)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?,
+                               ?, ?, ?)""",
+                    (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
+                     mode, strategy, entry_price, exit_price, pnl, pnl_pct,
+                     outcome, holding_minutes, exit_reason, features_json,
+                     mfe, mae, mfe_pct, mae_pct,
+                     exit_regime, exit_d1_trend, exit_h4_trend,
+                     pnl, pnl_pct,
+                     lt_atr, lt_rr, lt_conf),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO trade_outcomes
+                       (trade_id, signal_id, snapshot_id, account_id, symbol, direction,
+                        trading_mode, strategy_id, entry_price, exit_price, profit,
+                        profit_pct, outcome_label, holding_minutes, exit_reason, features_json,
+                        mfe, mae, mfe_pct, mae_pct,
+                        exit_regime, exit_d1_trend, exit_h4_trend,
+                        pnl, pnl_pct)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?)""",
+                    (t_id, resolved_signal_id, snapshot_id, acc_id, symbol, direction,
+                     mode, strategy, entry_price, exit_price, pnl, pnl_pct,
+                     outcome, holding_minutes, exit_reason, features_json,
+                     mfe, mae, mfe_pct, mae_pct,
+                     exit_regime, exit_d1_trend, exit_h4_trend,
+                     pnl, pnl_pct),
+                )
             stats["linked"] += 1
             stats["outcomes"][outcome] += 1
 
