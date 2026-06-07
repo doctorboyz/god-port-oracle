@@ -16,11 +16,11 @@ def _make_market_df(n: int = 500, start_price: float = 1900.0, trend: float = 0.
     spreads = np.random.uniform(1, 4, n)
 
     return pd.DataFrame({
-        "Open": closes - spreads * np.random.uniform(0.2, 0.8, n),
-        "High": closes + spreads,
-        "Low": closes - spreads,
-        "Close": closes,
-        "Volume": np.random.uniform(1000, 5000, n),
+        "open": closes - spreads * np.random.uniform(0.2, 0.8, n),
+        "high": closes + spreads,
+        "low": closes - spreads,
+        "close": closes,
+        "volume": np.random.uniform(1000, 5000, n),
     }, index=dates)
 
 

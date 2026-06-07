@@ -181,10 +181,10 @@ class TestMFEAndMAE:
     def test_buy_mfe_mae(self):
         trade = self._make_trade(10, 20, 2000.0, "BUY")
         df = pd.DataFrame({
-            "High": [2005, 2010, 2015, 2020, 2018,
+            "high": [2005, 2010, 2015, 2020, 2018,
                      2016, 2022, 2025, 2021, 2019,
                      2008] + [2010] * 10,
-            "Low": [1995, 1998, 2000, 2003, 1997,
+            "low": [1995, 1998, 2000, 2003, 1997,
                     1999, 2005, 2008, 2002, 1996,
                     1992] + [1995] * 10,
         })
@@ -199,10 +199,10 @@ class TestMFEAndMAE:
     def test_sell_mfe_mae(self):
         trade = self._make_trade(10, 20, 2000.0, "SELL")
         df = pd.DataFrame({
-            "High": [2005, 2010, 2015, 2020, 2018,
+            "high": [2005, 2010, 2015, 2020, 2018,
                      2016, 2022, 2025, 2021, 2019,
                      2008] + [2010] * 10,
-            "Low": [1995, 1998, 2000, 2003, 1997,
+            "low": [1995, 1998, 2000, 2003, 1997,
                     1999, 2005, 2008, 2002, 1996,
                     1992] + [1995] * 10,
         })
@@ -214,7 +214,7 @@ class TestMFEAndMAE:
 
     def test_missing_exit_idx(self):
         trade = self._make_trade(10, None, 2000.0)
-        df = pd.DataFrame({"High": [2005], "Low": [1995]})
+        df = pd.DataFrame({"high": [2005], "low": [1995]})
         mfe, mae, mfe_pct, mae_pct = self.pipeline._compute_mfe_mae(trade, df)
         assert mfe == 0.0
         assert mae == 0.0

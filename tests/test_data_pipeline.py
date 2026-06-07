@@ -43,7 +43,8 @@ class TestLoadCSV:
         filepath = _create_test_csv(tmp_path, n_rows=100)
         df = load_csv(filepath)
         assert len(df) == 100
-        assert set(df.columns) == {"Open", "High", "Low", "Close", "Volume"}
+        # loader.py standardizes to lowercase columns
+        assert set(df.columns) == {"open", "high", "low", "close", "volume"}
 
     def test_load_csv_has_datetime_index(self, tmp_path):
         filepath = _create_test_csv(tmp_path, n_rows=50)
@@ -62,7 +63,7 @@ class TestLoadCSV:
     def test_load_csv_no_nulls_in_ohlcv(self, tmp_path):
         filepath = _create_test_csv(tmp_path, n_rows=50)
         df = load_csv(filepath)
-        for col in ["Open", "High", "Low", "Close"]:
+        for col in ["open", "high", "low", "close"]:
             assert df[col].notna().all()
 
 
@@ -99,12 +100,13 @@ class TestResampleTimeframe:
         assert len(d1) < len(df)
 
     def test_resample_preserves_ohlv_relationships(self, tmp_path):
-        """After resampling: High >= max(Open,Close), Low <= min(Open,Close)."""
+        """After resampling: high >= max(open,close), low <= min(open,close)."""
         filepath = _create_test_csv(tmp_path, n_rows=500, freq="5min")
         df = load_csv(filepath)
         h1 = resample_timeframe(df, "H1")
-        assert (h1["High"] >= h1[["Open", "Close"]].max(axis=1)).all()
-        assert (h1["Low"] <= h1[["Open", "Close"]].min(axis=1)).all()
+        # resampler returns lowercase columns
+        assert (h1["high"] >= h1[["open", "close"]].max(axis=1)).all()
+        assert (h1["low"] <= h1[["open", "close"]].min(axis=1)).all()
 
     def test_resample_unknown_timeframe_raises(self, tmp_path):
         filepath = _create_test_csv(tmp_path, n_rows=50)
@@ -120,4 +122,12 @@ class TestResampleTimeframe:
         for idx in h1.index:
             source_mask = (df.index >= idx) & (df.index < idx + pd.Timedelta(hours=1))
             if source_mask.any():
-                assert abs(h1.loc[idx, "Volume"] - df.loc[source_mask, "Volume"].sum()) < 1e-6
+                assert abs(h1.loc[idx, "volume"] - df.loc[source_mask, "volume"].sum()) < 1e-6
+
+    def test_resampler_returns_lowercase_columns(self, tmp_path):
+        """Resampler always returns lowercase columns (pipeline convention)."""
+        filepath = _create_test_csv(tmp_path, n_rows=100, freq="5min")
+        df = load_csv(filepath)
+        h1 = resample_timeframe(df, "H1")
+        for col in h1.columns:
+            assert col == col.lower(), f"Column '{col}' is not lowercase"

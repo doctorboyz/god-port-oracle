@@ -18,16 +18,19 @@ from broky.ml.trade_outcome_predictor import (
 
 
 def _make_test_candles(n: int = 200) -> dict[str, pd.DataFrame]:
-    """Create realistic M5 candle data for testing."""
+    """Create realistic M5 + H1 candle data for testing."""
     np.random.seed(42)
     dates = pd.date_range("2026-05-21 14:00", periods=n, freq="5min")
     price = 2650 + np.cumsum(np.random.randn(n) * 2)
     close = pd.Series(price, index=dates)
     high = close + abs(np.random.randn(n) * 5)
     low = close - abs(np.random.randn(n) * 5)
+    open_ = close - np.random.randn(n) * 1.5
     volume = pd.Series(np.random.randint(100, 1000, n), index=dates)
-    m5 = pd.DataFrame({"close": close, "high": high, "low": low, "volume": volume})
-    return {"M5": m5}
+    m5 = pd.DataFrame({"open": open_, "close": close, "high": high, "low": low, "volume": volume})
+    # Resample M5 → H1 for realistic multi-timeframe setup
+    h1 = m5.resample("1h").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+    return {"M5": m5, "H1": h1}
 
 
 class TestFeatureComputation:
@@ -64,8 +67,11 @@ class TestFeatureComputation:
     def test_numeric_values_are_finite(self):
         candles = _make_test_candles()
         features = compute_features_from_candles(candles, "BUY")
+        # Some features are NaN by design (no broker data at training time,
+        # or higher-timeframe data not available in test candles)
+        known_nan = {"long_short_ratio", "h4_close", "d1_close"}
         for k, v in features.items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)) and k not in known_nan:
                 assert np.isfinite(v), f"{k} = {v} is not finite"
 
     def test_empty_candles_returns_empty_dict(self):
@@ -84,7 +90,9 @@ class TestTradeOutcomePredictor:
         p = TradeOutcomePredictor(model_dir=str(tmp_path))
         assert not p.enabled
         assert p.should_skip({}) == (False, "ML filter disabled")
-        assert p.predict_loss_proba({}) is None
+        # predict_loss_proba returns (loss_proba, model_used) tuple when disabled
+        result = p.predict_loss_proba({})
+        assert result == (None, None)
 
     def test_should_skip_returns_false_when_disabled(self):
         p = TradeOutcomePredictor(model_dir="nonexistent/path")
@@ -94,15 +102,16 @@ class TestTradeOutcomePredictor:
 
     def test_predict_loss_proba_returns_none_when_disabled(self):
         p = TradeOutcomePredictor(model_dir="nonexistent/path")
-        assert p.predict_loss_proba({}) is None
+        # Returns (None, None) tuple when disabled
+        assert p.predict_loss_proba({}) == (None, None)
 
     def test_model_name_resolution(self):
         """Test model name fallback: regime×direction > direction > regime > overall."""
         p = TradeOutcomePredictor(model_dir="nonexistent/path")
-        # Without models, should return None
-        assert p.predict_loss_proba({}, regime="trending", direction="BUY") is None
-        assert p.predict_loss_proba({}, direction="SELL") is None
-        assert p.predict_loss_proba({}, regime="ranging") is None
+        # Without models, should return (None, None)
+        assert p.predict_loss_proba({}, regime="trending", direction="BUY") == (None, None)
+        assert p.predict_loss_proba({}, direction="SELL") == (None, None)
+        assert p.predict_loss_proba({}, regime="ranging") == (None, None)
 
 
 class TestMLFilterIntegration:
@@ -137,7 +146,7 @@ class TestMLFilterIntegration:
         """Edge: None regime/direction → should fall back to overall model."""
         p = TradeOutcomePredictor(model_dir="nonexistent_dir")
         features = compute_features_from_candles(_make_test_candles(), "BUY")
-        proba = p.predict_loss_proba(features, regime=None, direction=None)
+        proba, model_used = p.predict_loss_proba(features, regime=None, direction=None)
         assert proba is None or 0 <= proba <= 1
 
     def test_loss_threshold_configurable(self):
@@ -163,5 +172,5 @@ class TestPredictorWithRandomFeatures:
         features["session"] = "london"
         features["d1_trend"] = "bullish"
         features["price_vs_cloud"] = "above"
-        proba = p.predict_loss_proba(features)
+        proba, model_used = p.predict_loss_proba(features)
         assert proba is None or 0 <= proba <= 1
