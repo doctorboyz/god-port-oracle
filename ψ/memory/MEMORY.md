@@ -45,6 +45,8 @@
 - [Counter-Trend Bollinger Mean Reversion](learnings/2026-06-05_counter-trend-bollinger-mean-reversion.md) — hard block counter-trend when H4 overrides D1; allow mean-reversion at Bollinger extremes (boll_pos ≤0.15 or ≥0.85) with trend_mult=0.3
 - [Partial TP Backtest Option C](learnings/2026-06-05_partial-tp-backtest-option-c.md) — Option C (close TP1, scale-in) improves PnL by ~$14,698; 34.6% of trades reach TP1 but not final TP; ~46% of SL trades likely reached TP1 first; Monte Carlo estimate (no M5 candle data for trade dates)
 - [Data Integrity Backfill Chain](learnings/2026-06-07_data-integrity-backfill-chain.md) — Data chains must be verified end-to-end; backfill must UPDATE existing rows not just INSERT; get_connection must accept str|Path; account_id → fixed params mapping
+- [ML v4 vs v5 Backtest](learnings/2026-06-07_ml-v4-vs-v5-backtest.md) — v4 outperforms v5 at all thresholds; regime_encoded fix in features.py; ENCODED_FEATURES added to ALL_FEATURE_COLS; VPS switched to v4 model; partial TP enabled on Account C
+- [Partial TP Bug Fix + Analysis](learnings/2026-06-07_partial-tp-bug-fix-and-analysis.md) — tp1_ratio hardcoded to 0.5 fixed in 3 traders; Option C estimation +$14,698 but M5 candle data shows tighter scale-in SL
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
