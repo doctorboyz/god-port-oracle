@@ -28,7 +28,7 @@ def fetch_xauusd(
         ticker: Yahoo Finance ticker symbol.
 
     Returns:
-        DataFrame with columns: Open, High, Low, Close, Volume. DatetimeIndex.
+        DataFrame with columns: open, high, low, close, volume (lowercase, matching loader.py convention). DatetimeIndex.
     """
     try:
         import yfinance as yf
@@ -45,9 +45,10 @@ def fetch_xauusd(
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # Keep only OHLCV
+    # Keep only OHLCV and normalize to lowercase (pipeline convention)
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[keep].copy()
+    df.columns = [c.lower() for c in df.columns]
 
     # Remove timezone from index for compatibility
     if df.index.tz is not None:
@@ -73,7 +74,7 @@ def fetch_xauusd_range(
         ticker: Yahoo Finance ticker.
 
     Returns:
-        DataFrame with OHLCV columns.
+        DataFrame with columns: open, high, low, close, volume (lowercase, matching loader.py convention). DatetimeIndex.
     """
     try:
         import yfinance as yf
@@ -91,6 +92,7 @@ def fetch_xauusd_range(
 
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
     df = df[keep].copy()
+    df.columns = [c.lower() for c in df.columns]
 
     if df.index.tz is not None:
         df.index = df.index.tz_convert("UTC").tz_localize(None)

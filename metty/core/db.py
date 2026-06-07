@@ -382,8 +382,89 @@ def init_db(db_path: Optional[Path] = None) -> None:
         # Migrate: add trading_mode and strategy_id columns if missing
         _migrate_trading_columns(conn)
         conn.commit()
+
+        # Verify data integrity on startup
+        integrity = check_data_integrity(db_path)
+        if not integrity.get("healthy", True):
+            import logging
+            logging.getLogger(__name__).warning(
+                "Data integrity check failed on startup. Run backfill_trade_outcomes() to fix."
+            )
     finally:
         conn.close()
+
+
+def check_data_integrity(db_path: Optional[Path | str] = None) -> dict:
+    """Verify that required trading parameters are populated in all rows.
+
+    Returns a dict with table names as keys and integrity stats as values.
+    Logs warnings for any NULL columns found.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    conn = get_connection(db_path)
+    results = {}
+
+    try:
+        # Check live_trades trading params
+        lt_total = conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+        lt_null_atr = conn.execute("SELECT COUNT(*) FROM live_trades WHERE atr_multiplier IS NULL").fetchone()[0]
+        lt_null_rr = conn.execute("SELECT COUNT(*) FROM live_trades WHERE rr_ratio IS NULL").fetchone()[0]
+        lt_null_conf = conn.execute("SELECT COUNT(*) FROM live_trades WHERE min_confidence_threshold IS NULL").fetchone()[0]
+
+        results["live_trades"] = {
+            "total": lt_total,
+            "null_atr_multiplier": lt_null_atr,
+            "null_rr_ratio": lt_null_rr,
+            "null_min_confidence_threshold": lt_null_conf,
+            "healthy": lt_null_atr == 0 and lt_null_rr == 0 and lt_null_conf == 0,
+        }
+
+        # Check trade_outcomes trading params
+        to_total = conn.execute("SELECT COUNT(*) FROM trade_outcomes").fetchone()[0]
+        to_null_atr = conn.execute("SELECT COUNT(*) FROM trade_outcomes WHERE atr_multiplier IS NULL").fetchone()[0]
+        to_null_rr = conn.execute("SELECT COUNT(*) FROM trade_outcomes WHERE rr_ratio IS NULL").fetchone()[0]
+        to_null_conf = conn.execute("SELECT COUNT(*) FROM trade_outcomes WHERE min_confidence_threshold IS NULL").fetchone()[0]
+
+        results["trade_outcomes"] = {
+            "total": to_total,
+            "null_atr_multiplier": to_null_atr,
+            "null_rr_ratio": to_null_rr,
+            "null_min_confidence_threshold": to_null_conf,
+            "healthy": to_null_atr == 0 and to_null_rr == 0 and to_null_conf == 0,
+        }
+
+        # Check features_json has d1_trend and h4_trend
+        to_no_d1 = conn.execute(
+            "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL AND features_json NOT LIKE '%d1_trend%'"
+        ).fetchone()[0]
+        to_no_h4 = conn.execute(
+            "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL AND features_json NOT LIKE '%h4_trend%'"
+        ).fetchone()[0]
+
+        results["trade_outcomes"]["null_d1_trend_in_json"] = to_no_d1
+        results["trade_outcomes"]["null_h4_trend_in_json"] = to_no_h4
+
+        # Overall health
+        all_healthy = results["live_trades"]["healthy"] and results["trade_outcomes"]["healthy"]
+        results["healthy"] = all_healthy
+
+        if not all_healthy:
+            logger.warning(
+                f"Data integrity check FAILED: live_trades has {lt_null_atr} NULL atr_multiplier, "
+                f"{lt_null_rr} NULL rr_ratio, {lt_null_conf} NULL min_confidence_threshold; "
+                f"trade_outcomes has {to_null_atr} NULL atr_multiplier, "
+                f"{to_null_rr} NULL rr_ratio, {to_null_conf} NULL min_confidence_threshold. "
+                f"Run backfill_trade_outcomes() to fix."
+            )
+        else:
+            logger.info(f"Data integrity check PASSED: {lt_total} live_trades, {to_total} trade_outcoes all have trading params")
+
+    finally:
+        conn.close()
+
+    return results
 
 
 def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
@@ -1264,6 +1345,17 @@ def backfill_trade_outcomes(db_path: Optional[Path] = None) -> dict:
                                 "trading_mode", "strategy_id"]:
                         snap_dict.pop(key, None)
                     features_json = json.dumps(snap_dict)
+
+                    # Validate critical ML features are present
+                    if features_json:
+                        critical_keys = {"d1_trend", "h4_trend"}
+                        missing = critical_keys - set(snap_dict.keys())
+                        if missing:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                f"Backfill trade {t_id}: features_json missing critical keys {missing}. "
+                                f"Available keys: {list(snap_dict.keys())[:10]}"
+                            )
 
             # Build INSERT dynamically based on whether trading param columns exist
             if has_trading_params:

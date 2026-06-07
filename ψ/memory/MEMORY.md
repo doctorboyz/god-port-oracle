@@ -44,6 +44,7 @@
 - [ML Data Pipeline Return Values](learnings/2026-06-05_ml-data-pipeline-return-values.md) — return values > instance variables; _last_loss_proba hack caused NULL in DB; changed to 4-tuple return
 - [Counter-Trend Bollinger Mean Reversion](learnings/2026-06-05_counter-trend-bollinger-mean-reversion.md) — hard block counter-trend when H4 overrides D1; allow mean-reversion at Bollinger extremes (boll_pos ≤0.15 or ≥0.85) with trend_mult=0.3
 - [Partial TP Backtest Option C](learnings/2026-06-05_partial-tp-backtest-option-c.md) — Option C (close TP1, scale-in) improves PnL by ~$14,698; 34.6% of trades reach TP1 but not final TP; ~46% of SL trades likely reached TP1 first; Monte Carlo estimate (no M5 candle data for trade dates)
+- [Data Integrity Backfill Chain](learnings/2026-06-07_data-integrity-backfill-chain.md) — Data chains must be verified end-to-end; backfill must UPDATE existing rows not just INSERT; get_connection must accept str|Path; account_id → fixed params mapping
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
@@ -52,3 +53,4 @@
 - [2026-06-04 ML Parameter Audit + Deploy](retrospectives/2026-06/04/07.52_ml-parameter-audit-deploy.md) — audit 8 bugs, deploy 3 fixes, 2 บั๊กที่พบหลัง deploy (h4_trend NameError, INSERT placeholder mismatch)
 - [2026-06-04 v4 Deploy Fresh Start](retrospectives/2026-06/04/21.48_v4-deploy-fresh-start.md) — pipeline → v4 training → sklearn version fix → deploy → fresh start
 - [2026-06-05 ML Data Pipeline Fix + Counter-Trend](retrospectives/2026-06/05/20.03_ml-data-pipeline-fix-counter-trend.md) — ml_loss_proba NULL bug fix, counter-trend hard block + mean-reversion exception, deploy
+- [2026-06-07 Data Integrity Trading Params](retrospectives/2026-06/07/08.48_data-integrity-trading-params.md) — 4 VPS deploys to fix data chain; backfill must UPDATE not just INSERT; 100% coverage on 10,167 trade_outcomes

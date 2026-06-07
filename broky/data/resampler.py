@@ -23,7 +23,7 @@ def resample_timeframe(
         target_timeframe: Target timeframe (M15, H1, H4, D1).
 
     Returns:
-        Resampled DataFrame with the same columns.
+        Resampled DataFrame with lowercase column names (open, high, low, close, volume).
 
     Example:
         >>> m5 = load_timeframe("data/xau-data", "M5")
@@ -45,7 +45,7 @@ def resample_timeframe(
                 df = df.set_index(col)
                 break
 
-    # Normalize column names to Title Case for resampling
+    # Normalize column names to Title Case for resampling (pandas convention)
     col_map = {}
     for lower, title in [("open", "Open"), ("high", "High"), ("low", "Low"),
                          ("close", "Close"), ("volume", "Volume")]:
@@ -63,9 +63,7 @@ def resample_timeframe(
 
     resampled = df.resample(pandas_freq).agg(agg_map).dropna()
 
-    # Restore original column name casing if we renamed
-    reverse_map = {v: k for k, v in col_map.items()}
-    if reverse_map:
-        resampled = resampled.rename(columns=reverse_map)
+    # Always return lowercase (pipeline convention)
+    resampled.columns = [c.lower() for c in resampled.columns]
 
     return resampled

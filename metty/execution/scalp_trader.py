@@ -66,7 +66,7 @@ class ScalpRiskConfig:
     spread_buffer: float = 1.5          # Tighter buffer
     consecutive_loss_limit: int = 5    # Same as swing
     daily_loss_limit_pct: float = 0.03  # 3% (tighter than 5% for scalping)
-    max_spread_points: float = 35      # Skip if spread > 35 pts
+    max_spread_points: float = 35      # Skip if spread > max (overridden per-account: A=40, B/C=30)
     bar_seconds: int = 60              # M1 = 60s
     # Partial TP (Option C): close at TP1, open scale-in position
     partial_tp_enabled: bool = False  # Feature flag — must be explicitly enabled
@@ -103,9 +103,9 @@ class ScalpTrader:
         self.risk = risk_config or ScalpRiskConfig()
         # Per-account max spread override (Account A = XAUUSDm Standard, wider spread)
         per_account_spread = {
-            "A": float(os.environ.get("SCALP_MAX_SPREAD_A", os.environ.get("SCALP_MAX_SPREAD", "35"))),
-            "B": float(os.environ.get("SCALP_MAX_SPREAD_B", os.environ.get("SCALP_MAX_SPREAD", "35"))),
-            "C": float(os.environ.get("SCALP_MAX_SPREAD_C", os.environ.get("SCALP_MAX_SPREAD", "35"))),
+            "A": float(os.environ.get("SCALP_MAX_SPREAD_A", os.environ.get("SCALP_MAX_SPREAD", "40"))),
+            "B": float(os.environ.get("SCALP_MAX_SPREAD_B", os.environ.get("SCALP_MAX_SPREAD", "30"))),
+            "C": float(os.environ.get("SCALP_MAX_SPREAD_C", os.environ.get("SCALP_MAX_SPREAD", "30"))),
         }
         self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
         # Partial TP overrides per account
@@ -502,6 +502,65 @@ class ScalpTrader:
         if 13 <= hour < 22:
             return "ny"
         return "asian"
+
+    def _check_trend_flips(self, d1_trend: str, h4_trend: str | None) -> None:
+        """Detect D1/H4 trend changes and send Telegram alert + EventBus."""
+        if self._notifier is None or not self._notifier.enabled:
+            return
+
+        from datetime import timezone
+        now = datetime.now(timezone.utc).strftime("%H:%M")
+        alerts = []
+
+        if self._last_d1_trend is not None and d1_trend != "unknown":
+            if d1_trend != self._last_d1_trend:
+                direction = "🟢 BULLISH" if d1_trend == "bullish" else "🔴 BEARISH"
+                alerts.append(
+                    f"<b>D1 Trend Flip</b> {now}\n"
+                    f"Account {self.account}: {self._last_d1_trend} → {direction}"
+                )
+                if self.event_bus:
+                    self.event_bus.publish(Event(
+                        type=EventType.TREND_FLIP,
+                        data={
+                            "timeframe": "D1",
+                            "direction": d1_trend,
+                            "old_direction": self._last_d1_trend,
+                            "symbol": "XAUUSD",
+                            "account": self.account,
+                        },
+                    ))
+
+        if self._last_h4_trend is not None and h4_trend and h4_trend != "unknown":
+            if h4_trend != self._last_h4_trend:
+                direction = "🟢 BULLISH" if h4_trend == "bullish" else "🔴 BEARISH"
+                alerts.append(
+                    f"<b>H4 Trend Flip</b> {now}\n"
+                    f"Account {self.account}: {self._last_h4_trend} → {direction}"
+                )
+                if self.event_bus:
+                    self.event_bus.publish(Event(
+                        type=EventType.TREND_FLIP,
+                        data={
+                            "timeframe": "H4",
+                            "direction": h4_trend,
+                            "old_direction": self._last_h4_trend,
+                            "symbol": "XAUUSD",
+                            "account": self.account,
+                        },
+                    ))
+
+        # Update tracking (only after comparison)
+        if d1_trend != "unknown":
+            self._last_d1_trend = d1_trend
+        if h4_trend and h4_trend != "unknown":
+            self._last_h4_trend = h4_trend
+
+        for msg in alerts:
+            try:
+                self._notifier.send(msg)
+            except Exception:
+                pass
 
     def _determine_m1_trend(self, m1: pd.DataFrame) -> str:
         """Determine short-term trend from EMA 21/50 on M1 data."""
@@ -1000,6 +1059,9 @@ class ScalpTrader:
         # Store trend state for exit context (scalp uses M1 as D1 proxy)
         self._last_d1_trend = _d1_proxy  # H1 EMA50-based proxy
         self._last_h4_trend = "unknown"  # scalp doesn't fetch H4
+
+        # Detect trend flips and send Telegram alert
+        self._check_trend_flips(_d1_proxy, None)
 
         # Build indicator scores JSON for debugging/feature importance
         import json as _json

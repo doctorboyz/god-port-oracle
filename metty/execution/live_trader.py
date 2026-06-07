@@ -512,6 +512,31 @@ class LiveTrader:
             except Exception:
                 pass
 
+        # Also emit TREND_FLIP events via EventBus for programmatic consumers
+        if self.event_bus:
+            if self._last_d1_trend is not None and d1_trend != "unknown" and d1_trend != self._last_d1_trend:
+                self.event_bus.publish(Event(
+                    type=EventType.TREND_FLIP,
+                    data={
+                        "timeframe": "D1",
+                        "direction": d1_trend,
+                        "old_direction": self._last_d1_trend,
+                        "symbol": "XAUUSD",
+                        "account": self.account,
+                    },
+                ))
+            if self._last_h4_trend is not None and h4_trend and h4_trend != "unknown" and h4_trend != self._last_h4_trend:
+                self.event_bus.publish(Event(
+                    type=EventType.TREND_FLIP,
+                    data={
+                        "timeframe": "H4",
+                        "direction": h4_trend,
+                        "old_direction": self._last_h4_trend,
+                        "symbol": "XAUUSD",
+                        "account": self.account,
+                    },
+                ))
+
     def _compute_d1_trend_strength(self, d1: Optional[pd.DataFrame]) -> Optional[float]:
         """Compute normalized D1 trend strength from EMA 50/200 spread.
 

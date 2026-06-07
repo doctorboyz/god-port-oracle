@@ -129,7 +129,7 @@ class M5ScalpTrader:
             "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.50"))),
         }
         per_account_spread = {
-            "A": float(os.environ.get("M5_MAX_SPREAD_A", os.environ.get("M5_MAX_SPREAD", "30"))),
+            "A": float(os.environ.get("M5_MAX_SPREAD_A", os.environ.get("M5_MAX_SPREAD", "40"))),
             "B": float(os.environ.get("M5_MAX_SPREAD_B", os.environ.get("M5_MAX_SPREAD", "30"))),
             "C": float(os.environ.get("M5_MAX_SPREAD_C", os.environ.get("M5_MAX_SPREAD", "30"))),
         }
@@ -260,6 +260,57 @@ class M5ScalpTrader:
             logger.warning("[M5Scalp:%s] Bridge candle fetch failed: %s", self.account, e)
 
         return None
+
+    def _check_trend_flips(
+        self, d1_trend: str, h4_trend: str | None,
+        prev_d1: str | None, prev_h4: str | None,
+    ) -> None:
+        """Detect D1/H4 trend changes and send Telegram alert + EventBus."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc).strftime("%H:%M")
+        alerts = []
+
+        if prev_d1 is not None and d1_trend != "unknown" and d1_trend != prev_d1:
+            direction = "🟢 BULLISH" if d1_trend == "bullish" else "🔴 BEARISH"
+            alerts.append(
+                f"<b>D1 Trend Flip</b> {now}\n"
+                f"Account {self.account}: {prev_d1} → {direction}"
+            )
+            if self.event_bus:
+                self.event_bus.publish(Event(
+                    type=EventType.TREND_FLIP,
+                    data={
+                        "timeframe": "D1",
+                        "direction": d1_trend,
+                        "old_direction": prev_d1,
+                        "symbol": "XAUUSD",
+                        "account": self.account,
+                    },
+                ))
+
+        if prev_h4 is not None and h4_trend and h4_trend != "unknown" and h4_trend != prev_h4:
+            direction = "🟢 BULLISH" if h4_trend == "bullish" else "🔴 BEARISH"
+            alerts.append(
+                f"<b>H4 Trend Flip</b> {now}\n"
+                f"Account {self.account}: {prev_h4} → {direction}"
+            )
+            if self.event_bus:
+                self.event_bus.publish(Event(
+                    type=EventType.TREND_FLIP,
+                    data={
+                        "timeframe": "H4",
+                        "direction": h4_trend,
+                        "old_direction": prev_h4,
+                        "symbol": "XAUUSD",
+                        "account": self.account,
+                    },
+                ))
+
+        for msg in alerts:
+            try:
+                self._notifier.send(msg)
+            except Exception:
+                pass
 
     def _compute_d1_trend(self, candles: dict) -> Optional[str]:
         """Compute D1 trend from H1 data (50 EMA as proxy for D1 direction)."""
@@ -672,9 +723,18 @@ class M5ScalpTrader:
         # 6. Compute HTF trends
         d1_trend = self._compute_d1_trend(candles)
         h4_trend = self._compute_h4_trend(candles)
+
+        # Detect trend flips before updating state
+        prev_d1 = self._last_d1_trend
+        prev_h4 = self._last_h4_trend
+
         # Store for exit context
         self._last_d1_trend = d1_trend
         self._last_h4_trend = h4_trend
+
+        # Send trend flip alerts
+        if self._notifier and self._notifier.enabled:
+            self._check_trend_flips(d1_trend, h4_trend, prev_d1, prev_h4)
 
         # 7. Generate M5 scalp signal (learning_mode passed to bypass generator filters)
         signal = generate_m5_scalp_signal(

@@ -23,6 +23,7 @@ class EventType(str, Enum):
     TRADE_CLOSED = "trade_closed"
     CIRCUIT_BREAKER_TRIGGERED = "circuit_breaker_triggered"
     CIRCUIT_BREAKER_RESET = "circuit_breaker_reset"
+    TREND_FLIP = "trend_flip"
     PRICE_UPDATE = "price_update"
     SCALING_ACTION = "scaling_action"
     DAILY_SUMMARY = "daily_summary"

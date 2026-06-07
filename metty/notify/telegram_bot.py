@@ -104,6 +104,7 @@ class TelegramNotifier:
         bus.subscribe(EventType.TRADE_OPENED, self.on_trade_opened)
         bus.subscribe(EventType.TRADE_CLOSED, self.on_trade_closed)
         bus.subscribe(EventType.CIRCUIT_BREAKER_TRIGGERED, self.on_circuit_breaker)
+        bus.subscribe(EventType.TREND_FLIP, self.on_trend_flip)
 
     # --- Event handlers ---
 
@@ -156,6 +157,23 @@ class TelegramNotifier:
             f"⚠️ <b>Circuit Breaker</b> — Account {d.get('account', '?')}\n"
             f"Consecutive losses: {d.get('consecutive_losses', '?')}\n"
             f"Daily loss: {d.get('daily_loss_pct', 0):.1f}%"
+        )
+        self.send(msg)
+
+    def on_trend_flip(self, event: Event) -> None:
+        """Format and send trend flip alert (D1 or H4 direction change)."""
+        d = event.data
+        tf = d.get("timeframe", "?")
+        direction = d.get("direction", "?")
+        old_direction = d.get("old_direction", "?")
+        symbol = d.get("symbol", "XAUUSD")
+        price = d.get("price", 0)
+        # Flip emojis: bullish = 📈, bearish = 📉
+        emoji = "📈" if direction == "bullish" else "📉"
+        msg = (
+            f"🔄 <b>Trend Flip</b> — {symbol} {tf}\n"
+            f"{old_direction} → {emoji} <b>{direction}</b>\n"
+            f"Price: {price:.2f}"
         )
         self.send(msg)
 
