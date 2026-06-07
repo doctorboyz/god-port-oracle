@@ -110,6 +110,16 @@ services:
       - SCALP_MAX_SPREAD_A=${SCALP_MAX_SPREAD_A:-50}
       - SCALP_MAX_SPREAD_B=${SCALP_MAX_SPREAD_B:-35}
       - SCALP_MAX_SPREAD_C=${SCALP_MAX_SPREAD_C:-35}
+      # Partial TP (Option C): close at TP1, open scale-in position
+      - PARTIAL_TP_ENABLED_A=${PARTIAL_TP_ENABLED_A:-0}
+      - PARTIAL_TP_ENABLED_B=${PARTIAL_TP_ENABLED_B:-0}
+      - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-1}
+      - TP1_RATIO_A=${TP1_RATIO_A:-0.5}
+      - TP1_RATIO_B=${TP1_RATIO_B:-0.5}
+      - TP1_RATIO_C=${TP1_RATIO_C:-0.5}
+      - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
+      - RR_SCALE_IN_B=${RR_SCALE_IN_B:-2.5}
+      - RR_SCALE_IN_C=${RR_SCALE_IN_C:-2.5}
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
       - MT5_SERVER_A=${MT5_SERVER_A:-Exness-MT5Trial17}

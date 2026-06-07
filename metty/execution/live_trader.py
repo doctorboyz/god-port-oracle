@@ -1211,7 +1211,8 @@ class LiveTrader:
                     session=session,
                     sentiment=sentiment_data,
                 )
-                regime = d1_trend if d1_trend and d1_trend not in ("neutral", "unknown") else "trending"
+                # Regime from features (derived from ADX), NOT d1_trend
+                regime = ml_features.get("regime", "trending")
                 ml_risk_multiplier, ml_reason, ml_loss_proba, ml_model_used = self._ml_predictor.get_risk_multiplier(
                     ml_features, regime, str(signal.signal_type.value),
                 )
@@ -1258,12 +1259,12 @@ class LiveTrader:
             price, sl, direction, self.risk.risk_reward_ratio,
         )
 
-        # TP1 = 50% of TP distance (for partial TP tracking)
+        # TP1 = tp1_ratio of TP distance (for partial TP tracking)
         tp_distance = abs(tp - price)
         if direction == "BUY":
-            tp1_price = round(price + tp_distance * 0.5, 2)
+            tp1_price = round(price + tp_distance * self.risk.tp1_ratio, 2)
         else:
-            tp1_price = round(price - tp_distance * 0.5, 2)
+            tp1_price = round(price - tp_distance * self.risk.tp1_ratio, 2)
 
         equity = self._get_equity()
         lots = self._calculate_lots(equity, price, sl, atr_val)

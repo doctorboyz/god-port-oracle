@@ -52,7 +52,7 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
 ]
 
 # Categorical features that need encoding
-CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud", "mfi_signal"]
+CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud", "mfi_signal", "regime"]
 
 # Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
 # BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow
@@ -60,16 +60,28 @@ BUY_TOP_FEATURES = [
     "dema_21", "atr", "ema_200", "ichimoku_senkou_b", "boll_bw",
     "fear_greed_value", "atr_to_price", "ichimoku_senkou_a", "sma_10",
     "ema_9_21_diff", "macd_hist", "ema_21", "adx", "ad_line_slope", "sma_20",
+    # Encoded categorical features (regime + trend context)
+    "regime_encoded", "h4_trend_encoded", "mfi_signal_encoded",
 ]
 SELL_TOP_FEATURES = [
     "dema_21", "session_strength", "price_vs_cloud_encoded", "sma_10",
     "atr_to_price", "ema_200", "plus_di", "atr", "macd_hist",
     "fear_greed_value", "minus_di", "ema_50", "sma_20", "mfi",
     "tick_volume_ratio",
+    # Encoded categorical features (regime + trend context)
+    "regime_encoded", "h4_trend_encoded", "mfi_signal_encoded",
 ]
 
-# All features used for training
-ALL_FEATURE_COLS = EXTENDED_FEATURES + CATEGORICAL_COLS
+# Encoded categorical + derived features (added by FeatureEngineer)
+ENCODED_FEATURES = [
+    "session_strength",  # numeric but not in EXTENDED_FEATURES
+    "price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded",
+    "mfi_signal_encoded", "regime_encoded",
+    "ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
+]
+
+# All features used for training (raw categoricals are swapped for encoded at train time)
+ALL_FEATURE_COLS = EXTENDED_FEATURES + CATEGORICAL_COLS + ENCODED_FEATURES
 
 
 @dataclass
@@ -239,15 +251,20 @@ class TradeOutcomeTrainer:
         features_df["pnl"] = df["profit"].values
         features_df["pnl_pct"] = df["profit_pct"].values
         features_df["confidence"] = df["confidence"].fillna(0.5).values
-        # Regime: prefer live_trades, fallback to deriving from ADX in features
+        # Regime: prefer features_json.regime (injected), then live_trades, then ADX-derived
+        regime_fj = features_df.get("regime")
         regime_lt = df["regime"]
         if "adx" in features_df.columns:
             adx_derived = features_df["adx"].apply(
                 lambda v: "trending" if pd.notna(v) and v > 25 else "ranging"
             )
-            features_df["regime"] = regime_lt.fillna(adx_derived).values
         else:
-            features_df["regime"] = regime_lt.fillna("unknown").values
+            adx_derived = pd.Series(["unknown"] * len(features_df))
+        # Priority: features_json > live_trades > ADX-derived
+        if regime_fj is not None and regime_fj.notna().any():
+            features_df["regime"] = regime_fj.fillna(regime_lt).fillna(adx_derived).values
+        else:
+            features_df["regime"] = regime_lt.fillna(adx_derived).values
         features_df["direction"] = df["lt_direction"].fillna(df["to_direction"]).values
         features_df["trading_mode"] = df["trading_mode"].values
         features_df["is_open"] = 0
@@ -285,7 +302,8 @@ class TradeOutcomeTrainer:
         derived = [c for c in df_transformed.columns
                    if c in ("ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
                              "price_vs_cloud_encoded", "d1_trend_encoded",
-                             "h4_trend_encoded", "mfi_signal_encoded")
+                             "h4_trend_encoded", "mfi_signal_encoded",
+                             "regime_encoded")
                    or c.startswith("session_")]
         available += derived
         available = list(dict.fromkeys(available))  # deduplicate preserving order
@@ -298,6 +316,7 @@ class TradeOutcomeTrainer:
             "h4_trend": ["h4_trend_encoded"],
             "price_vs_cloud": ["price_vs_cloud_encoded"],
             "mfi_signal": ["mfi_signal_encoded"],
+            "regime": ["regime_encoded"],
         }
         for raw_col, encoded_cols in raw_cats_with_encodings.items():
             if raw_col in available and any(e in available for e in encoded_cols):

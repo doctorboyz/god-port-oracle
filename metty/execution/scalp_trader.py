@@ -992,7 +992,7 @@ class ScalpTrader:
                     sentiment=_sentiment,
                 )
                 ml_risk_multiplier, ml_risk_reason, ml_loss_proba, ml_model_used = self._ml_predictor.get_risk_multiplier(
-                    ml_features, "trending", str(signal.signal_type.value),
+                    ml_features, ml_features.get("regime", "trending"), str(signal.signal_type.value),
                 )
                 # ML filter succeeded — reset failure counter
                 self._ml_fail_count = 0
@@ -1028,12 +1028,12 @@ class ScalpTrader:
             signal.price, sl, direction, self.risk.risk_reward_ratio,
         )
 
-        # TP1 = 50% of TP distance (for partial TP tracking)
+        # TP1 = tp1_ratio of TP distance (for partial TP tracking)
         tp_distance = abs(tp - signal.price)
         if direction == "BUY":
-            tp1_price = round(signal.price + tp_distance * 0.5, 2)
+            tp1_price = round(signal.price + tp_distance * self.risk.tp1_ratio, 2)
         else:
-            tp1_price = round(signal.price - tp_distance * 0.5, 2)
+            tp1_price = round(signal.price - tp_distance * self.risk.tp1_ratio, 2)
 
         equity = self._get_equity()
         lots = calculate_position_size(

@@ -804,7 +804,8 @@ class M5ScalpTrader:
                     session=session,
                     sentiment=_sentiment,
                 )
-                regime = d1_trend if d1_trend and d1_trend != "neutral" else "trending"
+                # Regime from features (derived from ADX), NOT d1_trend
+                regime = ml_features.get("regime", "trending")
                 ml_risk_multiplier, ml_risk_reason, ml_loss_proba, ml_model_used = self._ml_predictor.get_risk_multiplier(
                     ml_features, regime, str(signal.signal_type.value),
                 )
@@ -841,12 +842,12 @@ class M5ScalpTrader:
             stop_loss = float(signal.price + sl_distance)
             take_profit = float(signal.price - sl_distance * self.risk.risk_reward_ratio)
 
-        # TP1 = 50% of TP distance (for partial TP tracking)
+        # TP1 = tp1_ratio of TP distance (for partial TP tracking)
         tp_distance = abs(take_profit - signal.price)
         if signal.signal_type == SignalType.BUY:
-            tp1_price = round(signal.price + tp_distance * 0.5, 2)
+            tp1_price = round(signal.price + tp_distance * self.risk.tp1_ratio, 2)
         else:
-            tp1_price = round(signal.price - tp_distance * 0.5, 2)
+            tp1_price = round(signal.price - tp_distance * self.risk.tp1_ratio, 2)
 
         # Position sizing
         balance = self._get_balance()

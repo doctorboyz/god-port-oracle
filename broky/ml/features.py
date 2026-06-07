@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Categorical features that need encoding
-CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend", "mfi_signal"}
+CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend", "mfi_signal", "regime"}
 
 # Numeric features organized by group
 VOLUME_FEATURES = [
@@ -111,6 +111,11 @@ class FeatureEngineer:
             mfi_map = {"oversold": 1, "neutral": 0, "overbought": -1}
             result["mfi_signal_encoded"] = result["mfi_signal"].map(mfi_map).fillna(0).astype(int)
 
+        # Encode regime: trending=1, ranging=0, volatile=-1, unknown=0
+        if "regime" in result.columns:
+            regime_map = {"trending": 1, "ranging": 0, "volatile": -1}
+            result["regime_encoded"] = result["regime"].map(regime_map).fillna(0).astype(int)
+
         # Fill NaN in numeric features with median (if fitted) or 0
         # Also force all numeric features to float dtype (SQLite may return mixed types)
         if self.fillna:
@@ -148,7 +153,7 @@ class FeatureEngineer:
             if col in df.columns:
                 cols.append(col)
         # Encoded categorical features
-        for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded", "mfi_signal_encoded"]:
+        for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded", "mfi_signal_encoded", "regime_encoded"]:
             if col in df.columns:
                 cols.append(col)
         # One-hot session columns (use cached order if available)

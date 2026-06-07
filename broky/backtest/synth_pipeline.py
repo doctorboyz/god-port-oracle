@@ -117,6 +117,8 @@ class BacktestToMLPipeline:
         contract_size: float = 100.0,
         target_regimes: list[str] | None = None,
         use_h1_fallback: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
         dry_run: bool = False,
         verbose: bool = False,
     ):
@@ -137,6 +139,8 @@ class BacktestToMLPipeline:
         self.contract_size = contract_size
         self.target_regimes = target_regimes  # e.g. ["bearish"] for targeted
         self.use_h1_fallback = use_h1_fallback
+        self.start_date = pd.Timestamp(start_date) if start_date else None
+        self.end_date = pd.Timestamp(end_date) if end_date else None
         self.dry_run = dry_run
         self.verbose = verbose
 
@@ -170,12 +174,18 @@ class BacktestToMLPipeline:
             periods = self._identify_bearish_periods()
             self._log(f"Found {len(periods)} bearish D1 period(s)")
         else:
-            # Run on full date range
+            # Run on full date range (respect start_date/end_date if set)
             primary = self._candles[self.primary_tf.lower()]
-            start = primary.index[0]
-            end = primary.index[-1]
+            start = self.start_date if self.start_date is not None else primary.index[0]
+            end = self.end_date if self.end_date is not None else primary.index[-1]
+            # Normalize tz for comparison
+            if isinstance(primary.index, pd.DatetimeIndex) and primary.index.tz is not None:
+                if isinstance(start, pd.Timestamp) and start.tz is None:
+                    start = start.tz_localize(primary.index.tz)
+                if isinstance(end, pd.Timestamp) and end.tz is None:
+                    end = end.tz_localize(primary.index.tz)
             periods = [(start, end)]
-            self._log(f"Running on full range: {start} to {end}")
+            self._log(f"Running on range: {start} to {end}")
 
         # Run pipeline for each period
         all_outcomes: list[SynthTradeOutcome] = []
@@ -259,7 +269,20 @@ class BacktestToMLPipeline:
         if self._d1_trend_series is None or len(self._d1_trend_series) == 0:
             return []
 
-        bearish_mask = self._d1_trend_series == "bearish"
+        trend = self._d1_trend_series
+        # Apply date filter if specified
+        if self.start_date is not None:
+            start = pd.Timestamp(self.start_date)
+            if isinstance(trend.index, pd.DatetimeIndex) and trend.index.tz is not None and start.tz is None:
+                start = start.tz_localize(trend.index.tz)
+            trend = trend[trend.index >= start]
+        if self.end_date is not None:
+            end = pd.Timestamp(self.end_date)
+            if isinstance(trend.index, pd.DatetimeIndex) and trend.index.tz is not None and end.tz is None:
+                end = end.tz_localize(trend.index.tz)
+            trend = trend[trend.index <= end]
+
+        bearish_mask = trend == "bearish"
         periods = []
         start = None
 
@@ -658,9 +681,15 @@ class BacktestToMLPipeline:
 
             # Write to database
             try:
-                # Enrich features with regime and exit context (not computed by
-                # compute_features_from_candles, but needed for ML training)
-                enriched_features = {**outcome.features, "regime": outcome.regime}
+                # Enrich features with regime, trading params, and exit context
+                # (not computed by compute_features_from_candles, but needed for ML training)
+                enriched_features = {
+                    **outcome.features,
+                    "regime": outcome.regime,
+                    "atr_multiplier": outcome.atr_multiplier,
+                    "rr_ratio": outcome.rr_ratio,
+                    "min_confidence_threshold": outcome.min_confidence_threshold,
+                }
                 if outcome.exit_d1_trend:
                     enriched_features["exit_d1_trend"] = outcome.exit_d1_trend
                 if outcome.exit_h4_trend:

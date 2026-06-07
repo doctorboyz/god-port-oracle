@@ -183,7 +183,12 @@ class TradeOutcomePredictor:
         # Ensure numeric and fill NaN
         X = df.select_dtypes(include=[np.number]).fillna(0)
 
-        # Match feature columns from training
+        # Add missing columns with 0 (XGBoost requires exact feature names match)
+        for c in cols:
+            if c not in X.columns:
+                X[c] = 0
+
+        # Select only the columns the model expects, in the correct order
         available_cols = [c for c in cols if c in X.columns]
         if not available_cols:
             return None
@@ -503,6 +508,17 @@ def compute_features_from_candles(
     # MFI signal (derived from MFI value computed above)
     mfi_val = features.get("mfi", 50.0)
     features["mfi_signal"] = "oversold" if mfi_val < 20 else ("overbought" if mfi_val > 80 else "neutral")
+
+    # Regime: derived from ADX + Bollinger bandwidth
+    # Matches injection logic: trending if ADX>25, volatile if ADX>25+boll_bw>0.04, ranging otherwise
+    adx_val = features.get("adx", 0)
+    boll_bw_val = features.get("boll_bw", 0)
+    if adx_val > 25 and boll_bw_val > 0.04:
+        features["regime"] = "volatile"
+    elif adx_val > 25:
+        features["regime"] = "trending"
+    else:
+        features["regime"] = "ranging"
 
     # Balance/leverage (not available before trade entry)
     features["balance_at_entry"] = 0.0
