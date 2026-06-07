@@ -887,7 +887,7 @@ class M5ScalpTrader:
                 strategy_id=self.strategy_id,
                 signal_id=get_latest_signal_id(self.account_id, self.db_path),
                 atr_at_entry=float(latest_atr) if latest_atr else None,
-                indicator_scores_json=json.dumps(signal.indicators) if signal.indicators else None,
+                indicator_scores_json=json.dumps({**signal.indicators, "h4_trend": h4_trend}) if signal.indicators and h4_trend else (json.dumps(signal.indicators) if signal.indicators else None),
                 spread_at_entry=spread if spread and spread > 0 else None,
                 ml_risk_multiplier=ml_risk_multiplier if ml_risk_multiplier != 1.0 else None,
                 ml_risk_reason=ml_risk_reason,
@@ -965,8 +965,15 @@ class M5ScalpTrader:
             )
 
             # Build indicator scores JSON for debugging
+            # Include h4_trend so it's available in features_json during backfill
             import json as _json
-            indicator_scores_json = _json.dumps(signal.indicators) if signal.indicators else None
+            if signal.indicators:
+                _scores = dict(signal.indicators)
+                if h4_trend and h4_trend != "unknown":
+                    _scores["h4_trend"] = h4_trend
+                indicator_scores_json = _json.dumps(_scores)
+            else:
+                indicator_scores_json = None
 
             insert_live_trade(
                 account_id=self.account_id,

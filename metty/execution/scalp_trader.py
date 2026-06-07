@@ -1064,8 +1064,15 @@ class ScalpTrader:
         self._check_trend_flips(_d1_proxy, None)
 
         # Build indicator scores JSON for debugging/feature importance
+        # Include h4_trend so it's available in features_json during backfill
         import json as _json
-        indicator_scores_json = _json.dumps(signal.indicators) if signal.indicators else None
+        if signal.indicators:
+            _scores = dict(signal.indicators)
+            if self._last_h4_trend and self._last_h4_trend != "unknown":
+                _scores["h4_trend"] = self._last_h4_trend
+            indicator_scores_json = _json.dumps(_scores)
+        else:
+            indicator_scores_json = None
         ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
 
         if self.dry_run:

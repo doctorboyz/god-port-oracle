@@ -24,9 +24,24 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit, cross_val_score
 from sklearn.preprocessing import LabelEncoder
 
-from broky.ml.features import FeatureEngineer
+from broky.ml.features import (
+    FeatureEngineer,
+    ALL_FEATURE_COLS,
+    ENCODED_FEATURES,
+    CATEGORICAL_FEATURES,
+    ALL_NUMERIC_FEATURES,
+    ENCODED_CATEGORICAL_MAP,
+    DERIVED_FEATURES,
+    validate_feature_registry,
+)
 
 logger = logging.getLogger(__name__)
+
+# Validate feature registry at import time — fail fast if inconsistent
+_registry_issues = validate_feature_registry()
+if _registry_issues:
+    for issue in _registry_issues:
+        logger.warning("Feature registry issue: %s", issue)
 
 # Consensus top features from feature importance analysis (2026-05-13)
 # These appeared in top 15 across ALL 3 methods: RF, GB, correlation
@@ -51,8 +66,8 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
     "h1_close", "h4_close", "d1_close", "m5_high", "m5_low",
 ]
 
-# Categorical features that need encoding
-CATEGORICAL_COLS = ["session", "d1_trend", "h4_trend", "price_vs_cloud", "mfi_signal", "regime"]
+# Categorical features — derive from features.py's canonical registry
+CATEGORICAL_COLS = sorted(CATEGORICAL_FEATURES)
 
 # Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
 # BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow
@@ -71,17 +86,6 @@ SELL_TOP_FEATURES = [
     # Encoded categorical features (regime + trend context)
     "regime_encoded", "h4_trend_encoded", "mfi_signal_encoded",
 ]
-
-# Encoded categorical + derived features (added by FeatureEngineer)
-ENCODED_FEATURES = [
-    "session_strength",  # numeric but not in EXTENDED_FEATURES
-    "price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded",
-    "mfi_signal_encoded", "regime_encoded",
-    "ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
-]
-
-# All features used for training (raw categoricals are swapped for encoded at train time)
-ALL_FEATURE_COLS = EXTENDED_FEATURES + CATEGORICAL_COLS + ENCODED_FEATURES
 
 
 @dataclass

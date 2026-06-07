@@ -1,4 +1,14 @@
-"""Feature engineering for ML pipeline — normalize, encode, and scale indicators."""
+"""Feature engineering for ML pipeline — normalize, encode, and scale indicators.
+
+FEATURE REGISTRY (single source of truth):
+All feature lists are derived from the registry below. When adding a new feature,
+add it to ONE place in the registry and it propagates to ALL consumers.
+
+Convention:
+- Raw categorical features → encoded by FeatureEngineer.transform()
+- Encoded features → produced by transform(), listed in ENCODED_FEATURES
+- Derived features → produced by transform(), listed in DERIVED_FEATURES
+"""
 
 from __future__ import annotations
 
@@ -10,7 +20,12 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Categorical features that need encoding
+# ═══════════════════════════════════════════════════════════════════════════
+# FEATURE REGISTRY — single source of truth for ALL features
+# When adding a feature, add it HERE and it propagates everywhere.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Raw categorical features that need encoding (string values → numeric)
 CATEGORICAL_FEATURES = {"price_vs_cloud", "session", "d1_trend", "h4_trend", "mfi_signal", "regime"}
 
 # Numeric features organized by group
@@ -50,6 +65,77 @@ MULTI_TF_PRICE_FEATURES = [
 ]
 
 ALL_NUMERIC_FEATURES = VOLUME_FEATURES + OB_OS_FEATURES + MA_FEATURES + SENTIMENT_FEATURES + BROKY_FEATURES + EXTERNAL_SENTIMENT_FEATURES + MULTI_TF_PRICE_FEATURES
+
+# Encoded categorical features — produced by FeatureEngineer.transform()
+# Maps raw categorical → encoded numeric. Must include ALL categoricals.
+ENCODED_CATEGORICAL_MAP = {
+    "price_vs_cloud": "price_vs_cloud_encoded",  # above=1, inside=0, below=-1
+    "d1_trend": "d1_trend_encoded",              # bullish=1, bearish=-1, other=0
+    "h4_trend": "h4_trend_encoded",               # bullish=1, bearish=-1, other=0
+    "mfi_signal": "mfi_signal_encoded",           # oversold=1, neutral=0, overbought=-1
+    "regime": "regime_encoded",                   # trending=1, ranging=0, volatile=-1
+}
+
+# Derived features — computed by FeatureEngineer.transform() from other features
+DERIVED_FEATURES = [
+    "ema_9_21_diff",       # ema_9 - ema_21
+    "di_diff",             # plus_di - minus_di
+    "boll_pct_b_clipped",  # boll_pct_b clipped to [0, 1]
+]
+
+# Full list of all encoded/derived features produced by FeatureEngineer
+# (excludes one-hot session columns which are dynamic)
+# NOTE: session_strength is already in ALL_NUMERIC_FEATURES (via SENTIMENT_FEATURES),
+# so we don't duplicate it here. ENCODED_FEATURES lists features that are ONLY
+# produced by FeatureEngineer.transform() and NOT in ALL_NUMERIC_FEATURES.
+ENCODED_FEATURES_ONLY = list(ENCODED_CATEGORICAL_MAP.values()) + DERIVED_FEATURES
+# For backward compat: the full list including session_strength (used by trainer)
+ENCODED_FEATURES = ENCODED_FEATURES_ONLY + ["session_strength"]
+
+# Complete feature list for training.
+# Uses dict.fromkeys to deduplicate while preserving order
+# (session_strength appears in both SENTIMENT_FEATURES and ENCODED_FEATURES)
+ALL_FEATURE_COLS = list(dict.fromkeys(
+    ALL_NUMERIC_FEATURES + list(CATEGORICAL_FEATURES) + ENCODED_FEATURES
+))
+
+
+def validate_feature_registry() -> list[str]:
+    """Validate feature registry consistency.
+
+    Returns list of issues found. Empty list = all good.
+    """
+    issues = []
+
+    # Check ENCODED_CATEGORICAL_MAP covers ALL categoricals
+    for cat in CATEGORICAL_FEATURES:
+        if cat not in ENCODED_CATEGORICAL_MAP and cat != "session":
+            issues.append(f"Categorical '{cat}' missing from ENCODED_CATEGORICAL_MAP")
+
+    # Check all encoded features are in ALL_FEATURE_COLS
+    for feat in ENCODED_FEATURES:
+        if feat not in ALL_FEATURE_COLS:
+            issues.append(f"Encoded feature '{feat}' missing from ALL_FEATURE_COLS")
+
+    # Check no duplicates in ALL_FEATURE_COLS
+    seen = set()
+    for feat in ALL_FEATURE_COLS:
+        if feat in seen:
+            issues.append(f"Duplicate feature '{feat}' in ALL_FEATURE_COLS")
+        seen.add(feat)
+
+    # Check derived features have their source features available
+    derived_deps = {
+        "ema_9_21_diff": ["ema_9", "ema_21"],
+        "di_diff": ["plus_di", "minus_di"],
+        "boll_pct_b_clipped": ["boll_pct_b"],
+    }
+    for derived, deps in derived_deps.items():
+        for dep in deps:
+            if dep not in ALL_NUMERIC_FEATURES:
+                issues.append(f"Derived feature '{derived}' depends on '{dep}' which is not in ALL_NUMERIC_FEATURES")
+
+    return issues
 
 
 class FeatureEngineer:

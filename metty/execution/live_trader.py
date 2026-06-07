@@ -1287,10 +1287,14 @@ class LiveTrader:
         )
 
         # Build indicator scores JSON for debugging/feature importance
+        # Include h4_trend so it's available in features_json during backfill
         indicator_scores_json = None
         if signal.indicators:
             import json
-            indicator_scores_json = json.dumps(signal.indicators)
+            scores = dict(signal.indicators)
+            if h4_trend and h4_trend != "unknown":
+                scores["h4_trend"] = h4_trend
+            indicator_scores_json = json.dumps(scores)
 
         # Calendar context
         minutes_to_next, next_event_type, next_event_impact = self._get_calendar_context()
