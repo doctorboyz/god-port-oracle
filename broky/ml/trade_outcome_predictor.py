@@ -21,6 +21,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from broky.signals.generator import classify_regime
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOSS_THRESHOLD = 0.65
@@ -509,16 +511,10 @@ def compute_features_from_candles(
     mfi_val = features.get("mfi", 50.0)
     features["mfi_signal"] = "oversold" if mfi_val < 20 else ("overbought" if mfi_val > 80 else "neutral")
 
-    # Regime: derived from ADX + Bollinger bandwidth
-    # Matches injection logic: trending if ADX>25, volatile if ADX>25+boll_bw>0.04, ranging otherwise
+    # Regime: single source of truth via classify_regime()
     adx_val = features.get("adx", 0)
     boll_bw_val = features.get("boll_bw", 0)
-    if adx_val > 25 and boll_bw_val > 0.04:
-        features["regime"] = "volatile"
-    elif adx_val > 25:
-        features["regime"] = "trending"
-    else:
-        features["regime"] = "ranging"
+    features["regime"] = classify_regime(adx_val, boll_bw_val)
 
     # Balance/leverage (not available before trade entry)
     features["balance_at_entry"] = 0.0

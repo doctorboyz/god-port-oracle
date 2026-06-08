@@ -69,9 +69,22 @@ SESSION_CONFIDENCE_MULTIPLIER = {
 MIN_CONFIDENCE = 0.60
 STRONG_SIGNAL = 0.75
 
+# Volatile regime Bollinger Band width threshold.
+# M5 XAUUSD data shows boll_bw range 0.002-0.014, so the old threshold of 0.035
+# (appropriate for H1/D1) made volatile classification impossible on M5.
+# This threshold marks the top ~10% of high-ADX periods as volatile.
+VOLATILE_BW_THRESHOLD = 0.01
+
+# ADX thresholds for regime classification
+TRENDING_ADX_THRESHOLD = 25
+RANGING_ADX_THRESHOLD = 20
+
 
 def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -> str:
     """Classify market regime based on ADX and Bollinger Band width.
+
+    Single source of truth for regime classification — all consumers should
+    call this function instead of duplicating the logic.
 
     Args:
         latest_adx: Current ADX value.
@@ -80,12 +93,12 @@ def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -
     Returns:
         Regime string: 'trending', 'ranging', or 'volatile'.
     """
-    if latest_adx >= 25:
-        # Strong trend — check for volatility
-        if boll_bandwidth is not None and boll_bandwidth > 0.035:
+    if latest_adx >= TRENDING_ADX_THRESHOLD:
+        # Strong trend — check for volatility (high ADX + wide bands = volatile)
+        if boll_bandwidth is not None and boll_bandwidth > VOLATILE_BW_THRESHOLD:
             return MarketRegime.VOLATILE.value
         return MarketRegime.TRENDING.value
-    elif latest_adx >= 20:
+    elif latest_adx >= RANGING_ADX_THRESHOLD:
         # Trend forming — classify as ranging (choppy)
         return MarketRegime.RANGING.value
     else:

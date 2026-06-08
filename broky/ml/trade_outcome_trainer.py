@@ -34,6 +34,7 @@ from broky.ml.features import (
     DERIVED_FEATURES,
     validate_feature_registry,
 )
+from broky.signals.generator import classify_regime
 
 logger = logging.getLogger(__name__)
 
@@ -255,13 +256,20 @@ class TradeOutcomeTrainer:
         features_df["pnl"] = df["profit"].values
         features_df["pnl_pct"] = df["profit_pct"].values
         features_df["confidence"] = df["confidence"].fillna(0.5).values
-        # Regime: prefer features_json.regime (injected), then live_trades, then ADX-derived
+        # Regime: prefer features_json.regime (injected), then live_trades, then classify_regime()
+        # Uses classify_regime() (single source of truth) with ADX + boll_bw,
+        # so volatile regime is properly classified instead of being absorbed into trending.
         regime_fj = features_df.get("regime")
         regime_lt = df["regime"]
         if "adx" in features_df.columns:
-            adx_derived = features_df["adx"].apply(
-                lambda v: "trending" if pd.notna(v) and v > 25 else "ranging"
-            )
+            boll_bw_series = features_df.get("boll_bw")
+            adx_derived = pd.Series([
+                classify_regime(
+                    float(row_adx),
+                    float(row_bw) if boll_bw_series is not None and pd.notna(boll_bw_series.iloc[i]) else None
+                ) if pd.notna(row_adx) else "unknown"
+                for i, row_adx in enumerate(features_df["adx"])
+            ], index=features_df.index)
         else:
             adx_derived = pd.Series(["unknown"] * len(features_df))
         # Priority: features_json > live_trades > ADX-derived

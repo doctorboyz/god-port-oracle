@@ -144,7 +144,8 @@ conn = sqlite3.connect(\"/app/data/oracle.db\")
 cur = conn.cursor()
 cur.execute(\"PRAGMA table_info(live_trades)\")
 cols = [row[1] for row in cur.fetchall()]
-required = [\"tp1_price\", \"parent_trade_id\", \"tp_level\", \"remaining_lots\", \"atr_multiplier\", \"rr_ratio\", \"min_confidence_threshold\", \"h4_trend\"]
+required = [\"tp1_price\", \"parent_trade_id\", \"tp_level\", \"remaining_lots\", \"atr_multiplier\", \"rr_ratio\", \"min_confidence_threshold\"]
+	# h4_trend is stored inside indicator_scores_json, not a separate column
 missing = [c for c in required if c not in cols]
 if missing:
     print(f\"MISSING: {missing}\")
@@ -184,8 +185,9 @@ conn.close()
 
     # 4e. Verify recent logs (no errors)
     info "  Checking recent logs for errors..."
-    error_count=$(ssh "$VPS_HOST" "docker logs oracle-engine --tail 20 2>&1 | grep -ci 'ERROR\|Traceback\|exception'" || echo "0")
-    if [ "$error_count" -le 1 ]; then
+    error_count=$(ssh "$VPS_HOST" "docker logs oracle-engine --tail 20 2>&1 | grep -ci 'ERROR\|Traceback\|exception'" 2>/dev/null || echo "0")
+    error_count=$(echo "$error_count" | tr -d '[:space:]')
+    if [ "$error_count" -le 1 ] 2>/dev/null; then
         info "  ✅ No recent errors in logs"
     else
         warn "  ⚠️  $error_count potential errors in recent logs"

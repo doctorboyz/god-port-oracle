@@ -25,6 +25,7 @@ from broky.data.loader import load_timeframe
 from broky.data.resampler import resample_timeframe
 from broky.indicators.ema import calculate_ema
 from broky.ml.trade_outcome_predictor import compute_features_from_candles
+from broky.signals.generator import classify_regime
 from metty.core.db import (
     SYNTHETIC_ACCOUNT_ID,
     insert_synthetic_trade,
@@ -353,31 +354,24 @@ class BacktestToMLPipeline:
     def _determine_regime(self, features: dict) -> str:
         """Classify market regime from ADX and Bollinger bandwidth in features.
 
-        Matches the regime classification used in signal generation.
+        Delegates to classify_regime() — single source of truth.
         """
         adx = features.get("adx", 20.0)
-        boll_bw = features.get("boll_bw", 0.02)
+        boll_bw = features.get("boll_bw", None)
 
         if isinstance(adx, str):
-            adx = 20.0
-        if isinstance(boll_bw, str):
-            boll_bw = 0.02
+            try:
+                adx = float(adx)
+            except (ValueError, TypeError):
+                adx = 20.0
 
-        try:
-            adx = float(adx)
-            boll_bw = float(boll_bw)
-        except (ValueError, TypeError):
-            adx = 20.0
-            boll_bw = 0.02
+        if boll_bw is not None and not isinstance(boll_bw, (int, float)):
+            try:
+                boll_bw = float(boll_bw)
+            except (ValueError, TypeError):
+                boll_bw = None
 
-        if adx >= 25 and boll_bw > 0.035:
-            return "volatile"
-        elif adx >= 25:
-            return "trending"
-        elif adx >= 20:
-            return "ranging"
-        else:
-            return "ranging"
+        return classify_regime(adx, boll_bw)
 
     def _slice_candles_at_timestamp(
         self,

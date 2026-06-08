@@ -197,9 +197,14 @@ class FeatureEngineer:
             mfi_map = {"oversold": 1, "neutral": 0, "overbought": -1}
             result["mfi_signal_encoded"] = result["mfi_signal"].map(mfi_map).fillna(0).astype(int)
 
-        # Encode regime: trending=1, ranging=0, volatile=-1, unknown=0
+        # Encode regime: trending=1, ranging=0, volatile=2, unknown=0
+        # NOTE: Previous encoding used volatile=-1 (ordinal implying volatile < ranging),
+        # which was semantically wrong. Changed to volatile=2 so all non-ranging regimes
+        # have positive values. This is still ordinal but avoids the misleading negative.
+        # TODO: Switch to one-hot (regime_trending, regime_ranging, regime_volatile) in v6
+        #       when we retrain from scratch and can change feature count.
         if "regime" in result.columns:
-            regime_map = {"trending": 1, "ranging": 0, "volatile": -1}
+            regime_map = {"trending": 1, "ranging": 0, "volatile": 2}
             result["regime_encoded"] = result["regime"].map(regime_map).fillna(0).astype(int)
 
         # Fill NaN in numeric features with median (if fitted) or 0

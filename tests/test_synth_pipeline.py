@@ -143,11 +143,13 @@ class TestRegimeClassification:
         self.pipeline = BacktestToMLPipeline(data_dir="data/xau-data", dry_run=True)
 
     def test_trending_regime(self):
-        features = {"adx": 30.0, "boll_bw": 0.03}
+        # boll_bw=0.005 is below VOLATILE_BW_THRESHOLD (0.01), so trending
+        features = {"adx": 30.0, "boll_bw": 0.005}
         assert self.pipeline._determine_regime(features) == "trending"
 
     def test_volatile_regime(self):
-        features = {"adx": 30.0, "boll_bw": 0.05}
+        # boll_bw=0.02 is above VOLATILE_BW_THRESHOLD (0.01), so volatile
+        features = {"adx": 30.0, "boll_bw": 0.02}
         assert self.pipeline._determine_regime(features) == "volatile"
 
     def test_ranging_regime(self):

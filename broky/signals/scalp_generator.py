@@ -26,6 +26,7 @@ from broky.indicators.volume import calculate_volume_ratio
 from broky.risk.spread_filter import check_spread
 from shared.models import Signal, SignalType, TradingMode
 from broky.signals.registry import strategy
+from broky.signals.generator import classify_regime
 
 # M1 Scalp indicator weights
 # Momentum-heavy: MACD is king on M1, EMA cross for quick direction
@@ -222,18 +223,13 @@ def generate_scalp_signal(
         else:
             scores["volume"] = -0.3
 
-    # Regime classification
+    # Regime classification — uses single source of truth from generator.py
     boll_bw = None
     if pd.notna(latest_upper) and pd.notna(latest_middle) and latest_middle != 0:
         boll_bw = (latest_upper - latest_lower) / latest_middle
 
     adx_val = latest_adx if pd.notna(latest_adx) else 0.0
-    if adx_val >= 25:
-        regime = "volatile" if boll_bw and boll_bw > 0.04 else "trending"
-    elif adx_val >= SCALP_ADX_THRESHOLD:
-        regime = "ranging"
-    else:
-        regime = "ranging"
+    regime = classify_regime(adx_val, boll_bw)
 
     # ADX threshold filter
     if adx_val < SCALP_ADX_THRESHOLD:
