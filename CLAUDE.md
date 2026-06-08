@@ -126,6 +126,47 @@ god-port-trading/
 8. **Grow Gradually**: ทำกำไรโตขึ้นเรื่อยๆ ไม่ต้องรวดเร็ว แต่ต้องต่อเนื่อง
 9. **Mistakes Are Data**: ผิดพลาดได้ แต่ต้องแก้แผนทันท่วงที — ทุกการสูญเสียคือบทเรียน
 
+## Trading Rules — Trend-Following Only
+
+### กฎเหล็ก: ไม่แทงสวนเทรนด์
+
+**Counter-trend ในระบบเรา = ห้ามทำ:**
+- Uptrend (higher high) → ห้าม SELL ย่อย แม้จะมีสัญญาณ overbought
+- Downtrend (lower low) → ห้าม BUY ย่อย แม้จะมีสัญญาณ oversold
+- "แทงสวน" = เข้าสวนทิศทางหลักของ trend ระยะกลาง → **bad habit ห้ามทำ**
+
+**สิ่งที่ยอมได้ (ไม่ใช่ counter-trend):**
+- Uptrend → BUY หลัก (trend-following)
+- Uptrend → ยอม SELL **ถ้า** มี reversal signal ชัดเจน + overbought + lower low เกิดขึ้นแล้ว (reversal trade ≠ counter-trend)
+- Downtrend → SELL หลัก (trend-following)
+- Downtrend → ยอม BUY **ถ้า** มี reversal signal ชัดเจน + oversold + higher high (reversal trade)
+
+### กฎเหล็ก: Ranging = พัก
+
+**Ranging (ADX < 25 หรือ trend ไม่ชัด) → ห้ามเข้าเทรด:**
+- ไม่เข้าเทรดเมื่อตลาดไร้ทิศทาง — รอให้เห็น trend ชัดเจน
+- Signal TF (M5) ต้องแสดง trend ชัดเจนก่อนออกสัญญาณ
+- Higher TF (D1/H4) ใช้เป็น confirmation เพิ่ม confidence — ไม่ใช่ใช้ออกสัญญาณ
+- ถ้า M5 บอก BUY แต่ D1 บอก bearish → ลด confidence หรือข้าม
+
+### นิยามที่ใช้ในระบบ
+
+| คำ | นิยาม | การใช้ |
+|-----|--------|--------|
+| **Trend-following** | เข้าตามทิศทาง trend หลัก (BUY in uptrend, SELL in downtrend) | ✅ หลัก |
+| **Reversal trade** | เข้าสวนเมื่อมี reversal signal ชัด (overbought + lower low ใน uptrend) | ⚠️ ยอมได้ ถ้ามีหลักฐาน |
+| **Counter-trend** | เข้าสวน trend ย่อยโดยไม่มี reversal signal (SELL pullback ใน uptrend) | ❌ ห้าม |
+| **Ranging** | ADX < 25 หรือ trend ไม่ชัด ใน signal TF | 🛑 พัก รอ trend |
+
+### ML Training Implications
+
+ตอน train ML model (v6+):
+- **Label ว่า "good trade"** เฉพาะ trades ที่เข้าตาม trend หรือมี reversal signal ชัด
+- **Penalty** สำหรับ counter-trend trades ที่ขาดทุน (เพิ่ม weight ของ stop_loss ใน counter-trend)
+- **Feature**: เพิ่ม `is_counter_trend` flag (BUY when d1_trend=bearish, SELL when d1_trend=bullish โดยไม่มี reversal signal)
+- **Feature**: เพิ่ม `trend_alignment` = 1 (aligned), 0 (neutral), -1 (counter)
+- **Ranging filter**: ลด confidence หรือ skip เมื่อ regime=ranging
+
 ## Phases
 
 | Phase | ทำอะไร | เงื่อนไขผ่าน |

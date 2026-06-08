@@ -48,6 +48,7 @@
 - [ML v4 vs v5 Backtest](learnings/2026-06-07_ml-v4-vs-v5-backtest.md) — v4 outperforms v5 at all thresholds; regime_encoded fix in features.py; ENCODED_FEATURES added to ALL_FEATURE_COLS; VPS switched to v4 model; partial TP enabled on Account C
 - [Partial TP Bug Fix + Analysis](learnings/2026-06-07_partial-tp-bug-fix-and-analysis.md) — tp1_ratio hardcoded to 0.5 fixed in 3 traders; Option C estimation +$14,698 but M5 candle data shows tighter scale-in SL
 - [v4 Deploy + Partial TP + Feature Validation](learnings/2026-06-07_v4-deploy-partial-tp-feature-validation.md) — v4 deployed to production, partial TP on Account C; feature pipeline needs single source of truth; manual deploy error-prone
+- [Trading Philosophy: Trend-Following Only](learnings/2026-06-08_trading-philosophy-trend-following.md) — counter-trend = ห้าม (SELL pullback in uptrend), reversal = ยอมได้ (overbought + lower low), ranging = พัก (ADX<25 no trade), ML must learn trend_alignment feature
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
