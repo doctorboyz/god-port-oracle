@@ -848,8 +848,12 @@ def generate_signal(
         pass
 
     if pd.notna(scores.get("adx")):
-        _latest_pdi_val = float(plus_di.iloc[-1]) if pd.notna(plus_di.iloc[-1]) else None
-        _latest_mdi_val = float(minus_di.iloc[-1]) if pd.notna(minus_di.iloc[-1]) else None
+        try:
+            _adx_s, _plus_di_s, _minus_di_s = calculate_adx(high, low, close, period=14)
+            _latest_pdi_val = float(_plus_di_s.iloc[-1]) if pd.notna(_plus_di_s.iloc[-1]) else None
+            _latest_mdi_val = float(_minus_di_s.iloc[-1]) if pd.notna(_minus_di_s.iloc[-1]) else None
+        except Exception:
+            pass
 
     # Compute weighted_score for all paths (needed for Signal constructor even in ranging mode)
     weighted_score = calculate_weighted_score(scores)
