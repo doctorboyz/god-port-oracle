@@ -1,12 +1,30 @@
 ---
 name: trading-philosophy-trend-following
-description: Trading philosophy from doctorboyz — trend-following only, no counter-trend, ranging = pause
+description: Trading philosophy from doctorboyz — trend-following only, no counter-trend, ranging = pause, indicator priority
 metadata:
   type: project
   created: 2026-06-08
 ---
 
-# Trading Philosophy: Trend-Following Only
+# Trading Philosophy: Trend-Following Only + Indicator Priority
+
+## Indicator Priority (จาก doctorboyz)
+
+### สัญญาณเข้าเทรด (Signal Indicators) — เชื่อมาก
+เรียงตามความเชื่อมั่น สูง → ต่ำ:
+1. **Volume** — ปริมาณยืนยันทิศทาง ถ้า volume ไม่สนับสนุน สัญญาณอ่อน
+2. **Overbought/Oversold** — จุดกลับตัว
+3. **Stochastic** — โมเมนตัมกลับตัว %K ตัด %D
+4. **RSI** — ยืนยันความแข็งแกร่ง/อ่อนแอของ trend
+5. **Bollinger Band** — ความผันผัน + จุดกลับตัว (boll_pct_b ≥ 0.85 = overbought, ≤ 0.15 = oversold)
+
+### ตัวหาจุดราคา (Price Level Indicators) — ใช้หาจุดเข้า/ออก ไม่ใช่ตัดสินใจเทรด
+- **MA ทุกชนิด** (SMA, EMA, DEMA, TEMA, Ichimoku) — หาจุด entry/exit/TP/SL
+- **ATR** — หาขนาด stop loss และ TP
+- **ADX** — ยืนยันว่ามี trend หรือไม่ (regime classification)
+- **Price levels** (h1_close, h4_close, d1_close, m5_high, m5_low) — context ราคา
+
+**หมายเหตุสำคัญ:** ถ้า Volume ไม่สนับสนุน สัญญาณเทรดอ่อนลง แม้ indicator อื่นจะชี้ดีก็ตาม
 
 ## Context
 วิเคราะห์ performance วันศุกร์ 5 มิ.ย. (WR 62%, PnL +$387) vs วันอาทิตย์ 8 มิ.ย. (WR 40%, PnL +$40) พบว่า:
@@ -38,6 +56,8 @@ metadata:
 - Penalize counter-trend losses (increase weight)
 - Reduce confidence or skip when regime=ranging
 - Label "good trades" only when trend-following or clear reversal
+- **Volume weight สูงสุด** ใน feature importance — ถ้า volume ไม่สนับสนุน ลด confidence
+- **MA/price levels ใช้หาจุดราคา ไม่ใช่ตัดสินใจเทรด**
 
 ## Related
 - [[volatile-regime-threshold-fix]] — BW threshold fix for M5

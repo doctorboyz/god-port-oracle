@@ -126,6 +126,26 @@ god-port-trading/
 8. **Grow Gradually**: ทำกำไรโตขึ้นเรื่อยๆ ไม่ต้องรวดเร็ว แต่ต้องต่อเนื่อง
 9. **Mistakes Are Data**: ผิดพลาดได้ แต่ต้องแก้แผนทันท่วงที — ทุกการสูญเสียคือบทเรียน
 
+## Indicator Priority — หมอเชื่ออะไร
+
+Indicators แบ่งเป็น 2 กลุ่ม ตามหน้าที่:
+
+### สัญญาณเข้าเทรด (Signal Indicators) — เชื่อมาก
+เรียงตามความเชื่อมั่น สูง → ต่ำ:
+1. **Volume** — ปริมาณยืนยันทิศทาง ถ้า volume ไม่สนับสนุน สัญญาณอ่อน
+2. **Overbought/Oversold** — จุดกลับตัว ถ้า RSI หรือ Stochastic บอก overbought ใน uptrend → reversal ใกล้
+3. **Stochastic** — โมเมนตัมกลับตัว %K ตัด %D สำคัญกว่าค่าตัวเลข
+4. **RSI** — ยืนยันความแข็งแกร่ง/อ่อนแอของ trend
+5. **Bollinger Band** — ความผันผัน + จุดกลับตัว (boll_pct_b ≥ 0.85 = overbought, ≤ 0.15 = oversold)
+
+### ตัวหาจุดราคา (Price Level Indicators) — ใช้หาจุดเข้า/ออก ไม่ใช่ตัดสินใจเทรด
+- **MA ทุกชนิด** (SMA, EMA, DEMA, TEMA, Ichimoku) — หาจุด entry/exit/TP/SL ไม่ใช่ตัดสินใจว่าจะเทรดหรือไม่
+- **ATR** — หาขนาด stop loss และ TP
+- **ADX** — ยืนยันว่ามี trend หรือไม่ (ใช้ regime classification)
+- **Price levels** (h1_close, h4_close, d1_close, m5_high, m5_low) — context ราคา
+
+**หมายเหตุสำคัญ:** ถ้า Volume ไม่สนับสนุน สัญญาณเทรดอ่อนลง แม้ indicator อื่นจะชี้ดีก็ตาม
+
 ## Trading Rules — Trend-Following Only
 
 ### กฎเหล็ก: ไม่แทงสวนเทรนด์
