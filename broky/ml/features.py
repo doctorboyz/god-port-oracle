@@ -53,6 +53,7 @@ SENTIMENT_FEATURES = [
 BROKY_FEATURES = [
     "macd_hist", "adx", "plus_di", "minus_di", "boll_pct_b", "boll_bw",
     "atr", "atr_to_price",
+    "has_reversal", "reversal_strength", "trend_alignment",
 ]
 
 EXTERNAL_SENTIMENT_FEATURES = [
@@ -73,7 +74,7 @@ ENCODED_CATEGORICAL_MAP = {
     "d1_trend": "d1_trend_encoded",              # bullish=1, bearish=-1, other=0
     "h4_trend": "h4_trend_encoded",               # bullish=1, bearish=-1, other=0
     "mfi_signal": "mfi_signal_encoded",           # oversold=1, neutral=0, overbought=-1
-    "regime": "regime_encoded",                   # trending=1, ranging=0, volatile=-1
+    "regime": "regime_encoded",                   # trending=1, ranging=0, volatile=2
 }
 
 # Derived features — computed by FeatureEngineer.transform() from other features

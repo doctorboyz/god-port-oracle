@@ -52,12 +52,29 @@ metadata:
 
 ## ML Implications (for v6 training)
 - เพิ่ม `is_counter_trend` flag เป็น feature
-- เพิ่ม `trend_alignment` = 1 (aligned), 0 (neutral), -1 (counter)
+- เพิ่ม `trend_alignment` = 1 (aligned), 0 (neutral), -1 (counter), 2 (reversal)
+- เพิ่ม `has_reversal` = 0/1 (OB/OS + divergence evidence)
+- เพิ่ม `reversal_strength` = 0.0-1.0 (composite reversal confidence)
 - Penalize counter-trend losses (increase weight)
 - Reduce confidence or skip when regime=ranging
 - Label "good trades" only when trend-following or clear reversal
 - **Volume weight สูงสุด** ใน feature importance — ถ้า volume ไม่สนับสนุน ลด confidence
 - **MA/price levels ใช้หาจุดราคา ไม่ใช่ตัดสินใจเทรด**
+
+## has_reversal_signal Verification (4,827 VPS trades)
+
+**ผลที่ไม่คาดคิด**: "Reversal" trades (OB/OS + divergence) WR=31.5% แย่กว่า plain counter-trend WR=43.3%
+- SELL in bullish D1 (reversal): WR=27.2% vs no reversal WR=38.8%
+- BUY in bearish D1 (reversal): WR=35.9% vs no reversal WR=51.6%
+- **OB/OS ใน strong trend เป็น continuation signal ไม่ใช่ reversal signal** (XAUUSD trending market)
+- Feature ยังมีประโยชน์ — ML จะเรียนรู้หลีกเลี่ยง reversal trades (WR ต่ำสุด)
+- `trend_alignment=2` (reversal) = สัญญาณว่า "แย่" ไม่ใช่ "ดี" → ML จะลด confidence
+
+## Data Source
+- **ใช้ VPS production data เป็นแหล่งข้อมูลหลัก (premium data)**
+- VPS oracle.db = live trades 4,827 trades (real trading results)
+- Local oracle.db = only 20 trades (ไม่เพียงพอสำหรับ analysis)
+- ML training ต้องใช้ premium data (VPS) เท่านั้น
 
 ## Related
 - [[volatile-regime-threshold-fix]] — BW threshold fix for M5

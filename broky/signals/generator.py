@@ -18,6 +18,9 @@ from broky.indicators.bollinger import calculate_bollinger
 from broky.indicators.atr import calculate_atr
 from broky.indicators.adx import calculate_adx
 from broky.indicators.volume import calculate_volume_ratio
+from broky.indicators.rsi import calculate_rsi
+from broky.indicators.stochastic import calculate_stochastic
+from broky.indicators.mfi import calculate_mfi
 from broky.signals.scaling import calculate_scaling_action, calculate_entry_and_change
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,178 @@ VOLATILE_BW_THRESHOLD = 0.01
 # ADX thresholds for regime classification
 TRENDING_ADX_THRESHOLD = 25
 RANGING_ADX_THRESHOLD = 20
+
+# Reversal signal thresholds — used by compute_reversal_signal()
+REVERSAL_OB_RSI = 70          # RSI overbought threshold
+REVERSAL_OS_RSI = 30          # RSI oversold threshold
+REVERSAL_OB_STOCH = 80        # Stochastic %K overbought threshold
+REVERSAL_OS_STOCH = 20        # Stochastic %K oversold threshold
+REVERSAL_OB_BOLL = 0.85       # Bollinger %B overbought threshold
+REVERSAL_OS_BOLL = 0.15       # Bollinger %B oversold threshold
+REVERSAL_OB_MFI = 80          # MFI overbought threshold
+REVERSAL_OS_MFI = 20          # MFI oversold threshold
+
+
+def compute_reversal_signal(
+    direction: str,
+    d1_trend: Optional[str],
+    h4_trend: Optional[str],
+    rsi: Optional[float] = None,
+    stoch_k: Optional[float] = None,
+    boll_pct_b: Optional[float] = None,
+    mfi: Optional[float] = None,
+    macd_hist: Optional[float] = None,
+    plus_di: Optional[float] = None,
+    minus_di: Optional[float] = None,
+    boll_bw: Optional[float] = None,
+) -> tuple[bool, float]:
+    """Determine if a counter-trend trade has reversal evidence.
+
+    Based on doctorboyz's trading philosophy:
+    - Counter-trend (SELL pullback in uptrend without reversal) = FORBIDDEN
+    - Reversal trade (SELL with OB + divergence) = ALLOWED with confidence reduction
+    - Ranging = PAUSE (no trade)
+
+    A "reversal signal" requires BOTH:
+    1. Overbought/oversold condition (at least one indicator at extreme)
+    2. Divergence/reversal evidence (momentum turning against the trend)
+
+    Returns:
+        (has_reversal, strength) where:
+        - has_reversal: True if counter-trend trade has legitimate reversal evidence
+        - strength: 0.0-1.0 composite reversal confidence (more evidence = higher)
+    """
+    # Not counter-trend if no trend or trade aligns with trend
+    if d1_trend is None or d1_trend == "unknown":
+        return False, 0.0
+
+    is_counter_sell = direction == "SELL" and d1_trend == "bullish"
+    is_counter_buy = direction == "BUY" and d1_trend == "bearish"
+
+    if not (is_counter_sell or is_counter_buy):
+        # Trend-aligned or no trend — not a reversal situation
+        return False, 0.0
+
+    # ── Step 1: Overbought/Oversold evidence ──
+    ob_os_count = 0
+    ob_os_details = []
+
+    if is_counter_sell:
+        # SELL in bullish D1 — need overbought evidence
+        if rsi is not None and rsi >= REVERSAL_OB_RSI:
+            ob_os_count += 1
+            ob_os_details.append(f"rsi_ob={rsi:.0f}")
+        if stoch_k is not None and stoch_k >= REVERSAL_OB_STOCH:
+            ob_os_count += 1
+            ob_os_details.append(f"stoch_ob={stoch_k:.0f}")
+        if boll_pct_b is not None and boll_pct_b >= REVERSAL_OB_BOLL:
+            ob_os_count += 1
+            ob_os_details.append(f"boll_ob={boll_pct_b:.2f}")
+        if mfi is not None and mfi >= REVERSAL_OB_MFI:
+            ob_os_count += 1
+            ob_os_details.append(f"mfi_ob={mfi:.0f}")
+    else:
+        # BUY in bearish D1 — need oversold evidence
+        if rsi is not None and rsi <= REVERSAL_OS_RSI:
+            ob_os_count += 1
+            ob_os_details.append(f"rsi_os={rsi:.0f}")
+        if stoch_k is not None and stoch_k <= REVERSAL_OS_STOCH:
+            ob_os_count += 1
+            ob_os_details.append(f"stoch_os={stoch_k:.0f}")
+        if boll_pct_b is not None and boll_pct_b <= REVERSAL_OS_BOLL:
+            ob_os_count += 1
+            ob_os_details.append(f"boll_os={boll_pct_b:.2f}")
+        if mfi is not None and mfi <= REVERSAL_OS_MFI:
+            ob_os_count += 1
+            ob_os_details.append(f"mfi_os={mfi:.0f}")
+
+    # No OB/OS evidence → not a reversal, just a bad counter-trend trade
+    if ob_os_count == 0:
+        return False, 0.0
+
+    # ── Step 2: Divergence/reversal evidence ──
+    div_count = 0
+    div_details = []
+
+    if is_counter_sell:
+        # SELL in bullish — divergence means momentum is turning bearish
+        if macd_hist is not None and macd_hist < 0:
+            div_count += 1
+            div_details.append("macd_bearish")
+        if plus_di is not None and minus_di is not None and minus_di > plus_di:
+            div_count += 1
+            div_details.append("di_bearish")
+    else:
+        # BUY in bearish — divergence means momentum is turning bullish
+        if macd_hist is not None and macd_hist > 0:
+            div_count += 1
+            div_details.append("macd_bullish")
+        if plus_di is not None and minus_di is not None and plus_di > minus_di:
+            div_count += 1
+            div_details.append("di_bullish")
+
+    # H4 disagreement counts as divergence signal
+    if h4_trend is not None and h4_trend != "unknown" and h4_trend != d1_trend:
+        div_count += 1
+        div_details.append(f"h4_disagree={h4_trend}")
+
+    # High volatility = stronger reversal potential
+    if boll_bw is not None and boll_bw > VOLATILE_BW_THRESHOLD:
+        div_count += 1
+        div_details.append(f"volatile_bw={boll_bw:.4f}")
+
+    # ── Step 3: Combine into reversal verdict ──
+    # Must have at least 1 OB/OS + at least 1 divergence signal
+    has_reversal = ob_os_count >= 1 and div_count >= 1
+
+    # Strength: weighted score (0.0-1.0)
+    # OB/OS evidence counts 60%, divergence counts 40%
+    ob_os_score = min(ob_os_count / 3.0, 1.0)  # 3+ OB/OS indicators = max
+    div_score = min(div_count / 3.0, 1.0)  # 3+ divergence signals = max
+    strength = round(0.6 * ob_os_score + 0.4 * div_score, 2) if has_reversal else 0.0
+
+    if has_reversal:
+        logger.info(
+            f"Reversal signal detected: {direction} vs {d1_trend} D1 | "
+            f"OB/OS: {ob_os_details} | Divergence: {div_details} | strength={strength:.2f}"
+        )
+
+    return has_reversal, strength
+
+
+def compute_trend_alignment_value(
+    direction: str,
+    d1_trend: Optional[str],
+    h4_trend: Optional[str],
+    has_reversal: bool,
+) -> int:
+    """Compute trend_alignment feature value for ML.
+
+    Values:
+        1  = trend-aligned (trade follows D1 trend)
+        0  = neutral (no trend data)
+       -1  = counter-trend WITHOUT reversal evidence (bad trade)
+        2  = counter-trend WITH reversal evidence (reversal trade — allowed)
+
+    This maps to doctorboyz's philosophy:
+        trend-following > reversal > neutral > counter-trend
+    """
+    if d1_trend is None or d1_trend == "unknown":
+        return 0  # neutral
+
+    is_counter = (
+        (d1_trend == "bullish" and direction == "SELL")
+        or (d1_trend == "bearish" and direction == "BUY")
+    )
+
+    if not is_counter:
+        return 1  # trend-aligned
+
+    # Counter-trend — is it a reversal?
+    if has_reversal:
+        return 2  # reversal trade (allowed with caution)
+    else:
+        return -1  # bad counter-trend (no reversal evidence)
 
 
 def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -> str:
@@ -641,6 +816,41 @@ def generate_signal(
             band_position = (current_price - boll.lower.iloc[-1]) / band_range
     regime = classify_regime(latest_adx, boll_bw)
 
+    # Compute raw indicator values for reversal signal detection (used after signal_type is known)
+    # These are needed to determine if a counter-trend trade has OB/OS + divergence evidence
+    _latest_rsi = None
+    _latest_stoch_k = None
+    _latest_boll_pct_b = band_position  # boll_pct_b = band_position (0=lower, 1=upper)
+    _latest_mfi = None
+    _macd_hist_val = scores.get("macd")
+    _latest_pdi_val = None
+    _latest_mdi_val = None
+
+    try:
+        rsi_series = calculate_rsi(close, period=14)
+        if pd.notna(rsi_series.iloc[-1]):
+            _latest_rsi = float(rsi_series.iloc[-1])
+    except Exception:
+        pass
+
+    try:
+        stoch_result = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+        if pd.notna(stoch_result.k_line.iloc[-1]):
+            _latest_stoch_k = float(stoch_result.k_line.iloc[-1])
+    except Exception:
+        pass
+
+    try:
+        mfi_series = calculate_mfi(high, low, close, volume, period=14)
+        if pd.notna(mfi_series.iloc[-1]):
+            _latest_mfi = float(mfi_series.iloc[-1])
+    except Exception:
+        pass
+
+    if pd.notna(scores.get("adx")):
+        _latest_pdi_val = float(plus_di.iloc[-1]) if pd.notna(plus_di.iloc[-1]) else None
+        _latest_mdi_val = float(minus_di.iloc[-1]) if pd.notna(minus_di.iloc[-1]) else None
+
     # Compute weighted_score for all paths (needed for Signal constructor even in ranging mode)
     weighted_score = calculate_weighted_score(scores)
 
@@ -669,6 +879,33 @@ def generate_signal(
         # Build reason string from active indicators
         active_indicators = [f"{k}={v:+.1f}" for k, v in scores.items() if v != 0]
         reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
+
+    # ── Reversal signal detection ──
+    # Compute whether this counter-trend trade has OB/OS + divergence evidence.
+    # This MUST happen after signal_type is determined (above) but before trend filter (below).
+    has_reversal, reversal_strength = compute_reversal_signal(
+        direction=signal_type.value,
+        d1_trend=d1_trend,
+        h4_trend=h4_trend,
+        rsi=_latest_rsi,
+        stoch_k=_latest_stoch_k,
+        boll_pct_b=_latest_boll_pct_b,
+        mfi=_latest_mfi,
+        macd_hist=_macd_hist_val,
+        plus_di=_latest_pdi_val,
+        minus_di=_latest_mdi_val,
+        boll_bw=boll_bw,
+    )
+    trend_alignment = compute_trend_alignment_value(
+        direction=signal_type.value,
+        d1_trend=d1_trend,
+        h4_trend=h4_trend,
+        has_reversal=has_reversal,
+    )
+    # Store reversal features in scores dict for downstream consumers (ML, DB storage)
+    scores["has_reversal"] = 1.0 if has_reversal else 0.0
+    scores["reversal_strength"] = reversal_strength
+    scores["trend_alignment"] = float(trend_alignment)
 
     # Initialize trend/session intermediate values (may be overwritten by trend logic)
     trend_mult: float = 1.0

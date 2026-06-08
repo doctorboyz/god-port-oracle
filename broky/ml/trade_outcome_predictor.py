@@ -532,5 +532,32 @@ def compute_features_from_candles(
     features["m5_high"] = float(m5["high"].iloc[-1]) if m5 is not None and not m5.empty else float("nan")
     features["m5_low"] = float(m5["low"].iloc[-1]) if m5 is not None and not m5.empty else float("nan")
 
+    # ── Reversal signal features (ML v6) ──
+    # Compute has_reversal, reversal_strength, trend_alignment
+    # using the same thresholds as signal generator
+    from broky.signals.generator import compute_reversal_signal, compute_trend_alignment_value
+    has_reversal, reversal_strength = compute_reversal_signal(
+        direction=direction,
+        d1_trend=d1_trend,
+        h4_trend=h4_trend,
+        rsi=features.get("rsi"),
+        stoch_k=features.get("stoch_k"),
+        boll_pct_b=features.get("boll_pct_b"),
+        mfi=features.get("mfi"),
+        macd_hist=features.get("macd_hist"),
+        plus_di=features.get("plus_di"),
+        minus_di=features.get("minus_di"),
+        boll_bw=features.get("boll_bw"),
+    )
+    trend_alignment = compute_trend_alignment_value(
+        direction=direction,
+        d1_trend=d1_trend,
+        h4_trend=h4_trend,
+        has_reversal=has_reversal,
+    )
+    features["has_reversal"] = 1.0 if has_reversal else 0.0
+    features["reversal_strength"] = reversal_strength
+    features["trend_alignment"] = float(trend_alignment)
+
     return features
 
