@@ -63,9 +63,9 @@ ML_MAX_CONSECUTIVE_FAILS = 5
 @dataclass
 class RiskConfig:
     risk_per_trade: float = 0.02
-    atr_multiplier: float = 2.0
-    risk_reward_ratio: float = 2.5
-    min_confidence: float = 0.45
+    atr_multiplier: float = 2.5    # Account B default (was 2.0)
+    risk_reward_ratio: float = 2.5  # Account B default
+    min_confidence: float = 0.45    # Account B default
     max_holding_bars: int = 36  # 3 hours on M5
     cooldown_bars: int = 12  # 1 hour cooldown after exit
     spread_buffer: float = 2.0

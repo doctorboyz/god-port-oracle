@@ -82,15 +82,28 @@ VOLATILE_BW_THRESHOLD = 0.01
 TRENDING_ADX_THRESHOLD = 25
 RANGING_ADX_THRESHOLD = 20
 
+# ── Regime confidence multipliers ──
+# Ranging market: reduce confidence heavily — ranging BUY WR=33% loses money
+# Volatile market: skip entirely — volatile regime lost -$94 in backtest
+REGIME_RANGING_CONFIDENCE_MULT = 0.3    # Reduce confidence by 70% in ranging
+REGIME_VOLATILE_SKIP = True              # Skip signals entirely in volatile regime
+
+# Counter-trend confidence multiplier (trend_alignment == -1)
+# Counter-trend trades have WR ~5-8% lower than trend-aligned
+COUNTER_TREND_CONFIDENCE_MULT = 0.5     # Reduce confidence by 50% for counter-trend
+
 # Reversal signal thresholds — used by compute_reversal_signal()
-REVERSAL_OB_RSI = 70          # RSI overbought threshold
-REVERSAL_OS_RSI = 30          # RSI oversold threshold
-REVERSAL_OB_STOCH = 80        # Stochastic %K overbought threshold
-REVERSAL_OS_STOCH = 20        # Stochastic %K oversold threshold
-REVERSAL_OB_BOLL = 0.85       # Bollinger %B overbought threshold
-REVERSAL_OS_BOLL = 0.15       # Bollinger %B oversold threshold
-REVERSAL_OB_MFI = 80          # MFI overbought threshold
-REVERSAL_OS_MFI = 20          # MFI oversold threshold
+# Lowered from RSI 70/30, Stoch 80/20, Boll 0.85/0.15, MFI 80/20
+# because backtest showed ZERO reversal trades detected with old thresholds.
+# XAUUSD in strong trend hits OB/OS at milder levels.
+REVERSAL_OB_RSI = 65          # RSI overbought (was 70, lowered for XAUUSD)
+REVERSAL_OS_RSI = 35          # RSI oversold (was 30, lowered for XAUUSD)
+REVERSAL_OB_STOCH = 75        # Stochastic %K overbought (was 80, lowered)
+REVERSAL_OS_STOCH = 25        # Stochastic %K oversold (was 20, lowered)
+REVERSAL_OB_BOLL = 0.80       # Bollinger %B overbought (was 0.85, lowered)
+REVERSAL_OS_BOLL = 0.20       # Bollinger %B oversold (was 0.15, lowered)
+REVERSAL_OB_MFI = 75          # MFI overbought (was 80, lowered)
+REVERSAL_OS_MFI = 25          # MFI oversold (was 20, lowered)
 
 
 def compute_reversal_signal(
@@ -816,6 +829,21 @@ def generate_signal(
             band_position = (current_price - boll.lower.iloc[-1]) / band_range
     regime = classify_regime(latest_adx, boll_bw)
 
+    # ── Volatile regime filter: skip signals entirely ──
+    # Backtest shows volatile regime loses money (-$94, WR=30.2%).
+    # The risk of whipsaw in volatile conditions outweighs potential gains.
+    if REGIME_VOLATILE_SKIP and regime == MarketRegime.VOLATILE.value:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"volatile regime skipped (ADX={latest_adx:.1f}, BW={boll_bw:.4f}) [{regime}]",
+            regime=regime,
+            strategy_id=strategy_id,
+            weighted_score=weighted_score,
+            trend_mult=0.0,
+        )
+
     # Compute raw indicator values for reversal signal detection (used after signal_type is known)
     # These are needed to determine if a counter-trend trade has OB/OS + divergence evidence
     _latest_rsi = None
@@ -859,7 +887,9 @@ def generate_signal(
     weighted_score = calculate_weighted_score(scores)
 
     # Ranging market (ADX < 20): use Bollinger mean-reversion instead of trend-following
-    # Data shows ranging WR 66.7% vs trending 46.2% — mean reversion works in ranges
+    # NOTE: Live data shows ranging BUY WR=33% PnL=-$20 → loses money.
+    # Apply heavy confidence penalty to reduce ranging trade frequency.
+    # In learning mode, still emit signals so we can evaluate them.
     if latest_adx < 20:
         signal = _generate_ranging_signal(
             close=close,
@@ -876,6 +906,23 @@ def generate_signal(
         signal_type = signal.signal_type
         confidence = signal.confidence
         reason = signal.reason
+
+        # Apply ranging confidence penalty (reduce by 70%)
+        # Ranging signals have poor WR in live data — this filters most out
+        if not learning_mode:
+            confidence *= REGIME_RANGING_CONFIDENCE_MULT
+            reason += f" (ranging penalty: x{REGIME_RANGING_CONFIDENCE_MULT})"
+            if confidence < min_confidence:
+                return Signal(
+                    symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=confidence,
+                    price=current_price, timestamp=timestamp, timeframe=timeframe,
+                    indicators=scores,
+                    reason=f"{reason} → confidence {confidence:.2f} below {min_confidence} [ranging]",
+                    regime=regime,
+                    strategy_id=strategy_id,
+                    weighted_score=weighted_score,
+                    trend_mult=0.0,
+                )
     else:
         signal_type = score_to_signal_type(weighted_score, learning_mode=learning_mode)
         confidence = calculate_signal_confidence(scores, weighted_score)
@@ -910,6 +957,14 @@ def generate_signal(
     scores["has_reversal"] = 1.0 if has_reversal else 0.0
     scores["reversal_strength"] = reversal_strength
     scores["trend_alignment"] = float(trend_alignment)
+
+    # ── Counter-trend confidence penalty ──
+    # trend_alignment == -1 means counter-trend WITHOUT reversal evidence.
+    # Live data: counter-trend WR ~5-8% lower than trend-aligned.
+    # Apply additional penalty on top of the existing trend_mult logic.
+    if trend_alignment == -1 and signal_type != SignalType.HOLD and not learning_mode:
+        confidence *= COUNTER_TREND_CONFIDENCE_MULT
+        reason += f" (counter-trend penalty: x{COUNTER_TREND_CONFIDENCE_MULT})"
 
     # Initialize trend/session intermediate values (may be overwritten by trend logic)
     trend_mult: float = 1.0

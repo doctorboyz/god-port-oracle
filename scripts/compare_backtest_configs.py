@@ -112,8 +112,24 @@ def get_trend_at(trend_series, timestamp):
     return None
 
 
+# Regime filters (matching generator.py constants)
+REGIME_RANGING_CONFIDENCE_MULT = 0.3   # Reduce confidence by 70% in ranging
+REGIME_VOLATILE_SKIP = True             # Skip signals entirely in volatile regime
+COUNTER_TREND_CONFIDENCE_MULT = 0.5    # Reduce confidence by 50% for counter-trend
+
+# Lowered reversal thresholds (matching generator.py v6)
+REVERSAL_OB_RSI = 65
+REVERSAL_OS_RSI = 35
+REVERSAL_OB_STOCH = 75
+REVERSAL_OS_STOCH = 25
+REVERSAL_OB_BOLL = 0.80
+REVERSAL_OS_BOLL = 0.20
+REVERSAL_OB_MFI = 75
+REVERSAL_OS_MFI = 25
+
+
 def generate_signal_from_row(row, d1_trend, h4_trend, min_confidence):
-    """Generate signal from pre-computed indicator values."""
+    """Generate signal from pre-computed indicator values with regime filters."""
     adx_val = row.get("adx")
     pdi_val = row.get("plus_di")
     mdi_val = row.get("minus_di")
@@ -127,6 +143,11 @@ def generate_signal_from_row(row, d1_trend, h4_trend, min_confidence):
 
     if pd.isna(adx_val) or pd.isna(atr_val):
         return None
+
+    # ── Volatile regime: skip entirely ──
+    regime = classify_regime(float(adx_val), float(boll_bw) if pd.notna(boll_bw) else None)
+    if REGIME_VOLATILE_SKIP and regime == "volatile":
+        return None  # Skip volatile signals
 
     scores = {}
     # ADX
@@ -172,7 +193,11 @@ def generate_signal_from_row(row, d1_trend, h4_trend, min_confidence):
 
     weighted_score = calculate_weighted_score(scores)
     confidence = abs(weighted_score)
-    regime = classify_regime(adx_val, boll_bw)
+
+    # Note: regime already computed above (volatile already filtered)
+    # Apply ranging confidence penalty
+    if regime == "ranging":
+        confidence *= REGIME_RANGING_CONFIDENCE_MULT
 
     if confidence < min_confidence:
         signal_type = SignalType.HOLD
@@ -198,6 +223,16 @@ def generate_signal_from_row(row, d1_trend, h4_trend, min_confidence):
             boll_bw=float(boll_bw) if pd.notna(boll_bw) else None,
         )
         trend_alignment = compute_trend_alignment_value(direction, d1_trend, h4_trend, has_reversal)
+
+        # Counter-trend penalty (trend_alignment == -1 means no reversal evidence)
+        if trend_alignment == -1:
+            confidence *= COUNTER_TREND_CONFIDENCE_MULT
+
+        # Re-check confidence after penalties
+        if confidence < min_confidence:
+            signal_type = SignalType.HOLD
+            direction = None
+            trend_alignment = 0
 
     return {
         "signal_type": signal_type,
