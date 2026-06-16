@@ -26,6 +26,7 @@ import pandas as pd
 from broky.data.calendar import fetch_calendar, should_avoid_trading
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
+from broky.risk.drawdown_protection import DrawdownProtector, ACCOUNT_DRAWDOWN_CONFIGS, BUY_MIN_CONFIDENCE
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -166,6 +167,20 @@ class LiveTrader:
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
         )
+        # Drawdown protection (stricter for real accounts)
+        dd_config = ACCOUNT_DRAWDOWN_CONFIGS.get(self.account, ACCOUNT_DRAWDOWN_CONFIGS["B"])
+        self._drawdown_protector = DrawdownProtector(
+            initial_equity=float(os.environ.get(f"INITIAL_EQUITY_{self.account}", "500")),
+            daily_limit_pct=dd_config["daily_limit_pct"],
+            weekly_limit_pct=dd_config["weekly_limit_pct"],
+            account_limit_pct=dd_config["account_limit_pct"],
+            cooldown_hours=dd_config["cooldown_hours"],
+        )
+        # BUY confidence filter (stricter for real accounts)
+        self._buy_min_confidence = float(os.environ.get(
+            f"BUY_MIN_CONFIDENCE_{self.account}",
+            str(BUY_MIN_CONFIDENCE.get(self.account, 0.45)),
+        ))
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0
         self._sentiment_cache: dict = {}
@@ -800,6 +815,9 @@ class LiveTrader:
                 else:
                     self.circuit_breaker.record_loss(pnl)
 
+                # Update drawdown protection
+                self._drawdown_protector.record_pnl(round(pnl, 2), equity)
+
                 self._last_exit_time = datetime.now(timezone.utc)
 
                 # Close in MT5 if ticket exists
@@ -924,6 +942,10 @@ class LiveTrader:
             self.circuit_breaker.record_loss(pnl)
 
         self._last_exit_time = datetime.now(timezone.utc)
+
+        # Update drawdown protection for TP1 close
+        equity = self._get_equity()
+        self._drawdown_protector.record_pnl(round(pnl, 2), equity)
 
         # Clean up MFE/MAE state for position 1
         self._mfe_mae_state.pop(trade_id, None)
@@ -1124,6 +1146,36 @@ class LiveTrader:
                 "signal": signal,
             }
 
+        # 4a. BUY confidence filter — require higher confidence for BUY on real accounts
+        if signal.signal_type == SignalType.BUY and signal.confidence < self._buy_min_confidence:
+            self._record_rejection(signal, f"buy_low_confidence:{signal.confidence:.2f}<{self._buy_min_confidence}", session, d1_trend, candles)
+            return {
+                "action": "hold",
+                "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}",
+                "signal": signal,
+            }
+
+        # 4a2. Drawdown protection check (before any risk-sensitive operations)
+        equity = self._get_equity()
+        dd_can_trade, dd_reason = self._drawdown_protector.check(equity)
+        if not dd_can_trade:
+            log_circuit_break(logger, "DRAWDOWN_BLOCK", account=self.account, reason=dd_reason)
+            self._record_rejection(signal, f"drawdown:{dd_reason}", session, d1_trend, candles)
+            if self._notifier and self._notifier.enabled:
+                try:
+                    self._notifier.send(
+                        f"<b>🛑 DRAWDOWN PROTECTION</b> Account {self.account}\n"
+                        f"Reason: {dd_reason}\n"
+                        f"Equity: ${equity:.2f}"
+                    )
+                except Exception:
+                    pass
+            return {
+                "action": "hold",
+                "reason": f"drawdown protection: {dd_reason}",
+                "signal": signal,
+            }
+
         # 4b. Position limit check (always enforced, even in learning mode)
         open_trades = get_open_trades(self.account_id, self.db_path)
         if len(open_trades) >= self.max_positions:
@@ -1266,7 +1318,7 @@ class LiveTrader:
         else:
             tp1_price = round(price - tp_distance * self.risk.tp1_ratio, 2)
 
-        equity = self._get_equity()
+        # Use equity already fetched for drawdown check (avoid extra bridge call)
         lots = self._calculate_lots(equity, price, sl, atr_val)
         lots *= ml_risk_multiplier  # ML risk-scaling
         if lots < 0.01:
@@ -1504,8 +1556,9 @@ class LiveTrader:
                 errors += 1
 
             logger.info(
-                "Cycle %d complete (opened=%d, holds=%d, errors=%d)",
+                "Cycle %d complete (opened=%d, holds=%d, errors=%d, dd_blocked=%s)",
                 cycle, trades_opened, holds, errors,
+                self._drawdown_protector.is_blocked,
             )
 
             if max_cycles > 0 and cycle >= max_cycles:

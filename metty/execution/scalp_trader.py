@@ -24,6 +24,7 @@ import pandas as pd
 
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
+from broky.risk.drawdown_protection import DrawdownProtector, ACCOUNT_DRAWDOWN_CONFIGS, BUY_MIN_CONFIDENCE
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -132,6 +133,19 @@ class ScalpTrader:
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
         )
+        # Drawdown protection (stricter for real accounts)
+        dd_config = ACCOUNT_DRAWDOWN_CONFIGS.get(self.account, ACCOUNT_DRAWDOWN_CONFIGS["B"])
+        self._drawdown_protector = DrawdownProtector(
+            initial_equity=float(os.environ.get(f"INITIAL_EQUITY_{self.account}", "500")),
+            daily_limit_pct=dd_config["daily_limit_pct"],
+            weekly_limit_pct=dd_config["weekly_limit_pct"],
+            account_limit_pct=dd_config["account_limit_pct"],
+            cooldown_hours=dd_config["cooldown_hours"],
+        )
+        self._buy_min_confidence = float(os.environ.get(
+            f"BUY_MIN_CONFIDENCE_{self.account}",
+            str(BUY_MIN_CONFIDENCE.get(self.account, 0.45)),
+        ))
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0
         self._sentiment_cache: dict = {}
@@ -464,6 +478,9 @@ class ScalpTrader:
                 else:
                     self.circuit_breaker.record_loss(pnl)
 
+                # Update drawdown protection
+                self._drawdown_protector.record_pnl(round(pnl, 2), balance)
+
                 self._last_exit_time = datetime.now(timezone.utc)
                 closed.append({
                     "trade_id": trade["id"],
@@ -726,6 +743,9 @@ class ScalpTrader:
             self.circuit_breaker.record_loss(pnl)
 
         self._last_exit_time = datetime.now(timezone.utc)
+
+        # Update drawdown protection for TP1 close
+        self._drawdown_protector.record_pnl(round(pnl, 2), balance)
         self._mfe_mae_state.pop(trade_id, None)
 
         # Close in MT5 if ticket exists
@@ -912,6 +932,25 @@ class ScalpTrader:
             return {
                 "action": "hold",
                 "reason": signal.reason,
+                "signal": signal,
+            }
+
+        # 5b. BUY confidence filter — require higher confidence for BUY on real accounts
+        if signal.signal_type == SignalType.BUY and signal.confidence < self._buy_min_confidence:
+            self._record_rejection(signal, f"buy_low_confidence:{signal.confidence:.2f}<{self._buy_min_confidence}", session=session)
+            return {
+                "action": "hold",
+                "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}",
+                "signal": signal,
+            }
+
+        # 5c. Drawdown protection check
+        dd_can_trade, dd_reason = self._drawdown_protector.check(balance)
+        if not dd_can_trade:
+            self._record_rejection(signal, f"drawdown:{dd_reason}", session=session)
+            return {
+                "action": "hold",
+                "reason": f"drawdown protection: {dd_reason}",
                 "signal": signal,
             }
 

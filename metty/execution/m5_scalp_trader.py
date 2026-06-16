@@ -26,6 +26,7 @@ import pandas as pd
 
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
+from broky.risk.drawdown_protection import DrawdownProtector, ACCOUNT_DRAWDOWN_CONFIGS, BUY_MIN_CONFIDENCE
 from broky.risk.position_sizing import calculate_position_size
 from broky.risk.sizing import SIZING_METHODS, fixed_fraction_size, kelly_size, risk_per_trade_size, volatility_adjusted_size
 from broky.risk.spread_filter import check_spread
@@ -167,6 +168,19 @@ class M5ScalpTrader:
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
         )
+        # Drawdown protection (stricter for real accounts)
+        dd_config = ACCOUNT_DRAWDOWN_CONFIGS.get(self.account, ACCOUNT_DRAWDOWN_CONFIGS["B"])
+        self._drawdown_protector = DrawdownProtector(
+            initial_equity=float(os.environ.get(f"INITIAL_EQUITY_{self.account}", "500")),
+            daily_limit_pct=dd_config["daily_limit_pct"],
+            weekly_limit_pct=dd_config["weekly_limit_pct"],
+            account_limit_pct=dd_config["account_limit_pct"],
+            cooldown_hours=dd_config["cooldown_hours"],
+        )
+        self._buy_min_confidence = float(os.environ.get(
+            f"BUY_MIN_CONFIDENCE_{self.account}",
+            str(BUY_MIN_CONFIDENCE.get(self.account, 0.45)),
+        ))
         self._last_exit_time: Optional[datetime] = None
         self._cycle_count: int = 0
         self._calendar_cache: list = []
@@ -369,11 +383,13 @@ class M5ScalpTrader:
         return "asian"
 
     def record_trade_result(self, pnl: float, equity: float, is_win: bool) -> None:
-        """Record a trade result for circuit breaker tracking."""
+        """Record a trade result for circuit breaker and drawdown tracking."""
         if is_win:
             self.circuit_breaker.record_win(pnl)
         else:
             self.circuit_breaker.record_loss(pnl, equity)
+        # Update drawdown protection
+        self._drawdown_protector.record_pnl(round(pnl, 2), equity)
         self._last_exit_time = datetime.now(timezone.utc)
 
     def _check_cooldown(self) -> bool:
@@ -755,6 +771,18 @@ class M5ScalpTrader:
 
         if signal.signal_type == SignalType.HOLD:
             return {"action": "hold", "reason": signal.reason, "signal": signal}
+
+        # 7b. BUY confidence filter — require higher confidence for BUY on real accounts
+        if signal.signal_type == SignalType.BUY and signal.confidence < self._buy_min_confidence:
+            self._record_rejection(signal, f"buy_low_confidence:{signal.confidence:.2f}<{self._buy_min_confidence}", session=session, d1_trend=d1_trend)
+            return {"action": "hold", "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}"}
+
+        # 7c. Drawdown protection check
+        balance = self._get_balance()
+        dd_can_trade, dd_reason = self._drawdown_protector.check(balance)
+        if not dd_can_trade:
+            self._record_rejection(signal, f"drawdown:{dd_reason}", session=session, d1_trend=d1_trend)
+            return {"action": "hold", "reason": f"drawdown protection: {dd_reason}"}
 
         # 8. Circuit breaker check (learning mode: skip, trade anyway for data)
         if not self.learning_mode:
