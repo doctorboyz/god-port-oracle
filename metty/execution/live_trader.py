@@ -823,6 +823,7 @@ class LiveTrader:
                     self.circuit_breaker.record_loss(pnl)
 
                 # Update drawdown protection
+                equity = self._get_equity()
                 self._drawdown_protector.record_pnl(round(pnl, 2), equity)
 
                 self._last_exit_time = datetime.now(timezone.utc)
