@@ -192,6 +192,13 @@ class LiveTrader:
         self._last_h4_trend: Optional[str] = None
         self._cycle_count: int = 0
         self.strategy_id = f"swing-{self.account}"
+
+        # Account role labels for logging clarity
+        self._account_label = {
+            "A": "V4-DD-Real",
+            "B": "V4-Pro500",
+            "C": "V6-Pro500",
+        }.get(self.account, self.account)
         self.event_bus = event_bus
         # ML filter — risk-scale position size based on P(LOSS) prediction
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
@@ -1530,9 +1537,10 @@ class LiveTrader:
         holds = 0
 
         mode = "DRY-RUN" if self.dry_run else "LIVE"
+        label = self._account_label
         logger.info(
-            "Starting %s trader (interval=%ds, account=%s, mode=%s)",
-            mode, interval, self.account, mode,
+            "Starting %s trader (interval=%ds, account=%s [%s], mode=%s)",
+            mode, interval, self.account, label, mode,
         )
 
         while max_cycles == 0 or cycle < max_cycles:

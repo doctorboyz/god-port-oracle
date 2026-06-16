@@ -190,6 +190,7 @@ class M5ScalpTrader:
         self._mfe_mae_state: dict[int, dict] = {}  # trade_id → {mfe, mae}
         self._last_d1_trend: Optional[str] = None
         self._last_h4_trend: Optional[str] = None
+        self._notifier: Optional[object] = None  # Set by main loop if available
         self.event_bus = event_bus
         # ML filter — only enabled if models have decent accuracy
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
