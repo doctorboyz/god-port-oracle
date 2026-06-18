@@ -129,11 +129,11 @@ class DrawdownProtector:
                 self._block(f"Account drawdown limit: equity ${equity:.2f} <= ${min_equity:.2f} ({self._account_limit_pct*100:.0f}% from ${self._state.initial_equity:.2f})", permanent=True)
                 return False, self._state.block_reason
 
-        # 2. Check peak equity drawdown
+        # 2. Check peak equity drawdown (cooldown, not permanent — floating drawdown from open positions can recover)
         if self._state.peak_equity > 0:
             drawdown_from_peak = (self._state.peak_equity - equity) / self._state.peak_equity
             if drawdown_from_peak >= self._account_limit_pct:
-                self._block(f"Peak drawdown limit: {drawdown_from_peak*100:.1f}% from peak ${self._state.peak_equity:.2f}", permanent=True)
+                self._block(f"Peak drawdown limit: {drawdown_from_peak*100:.1f}% from peak ${self._state.peak_equity:.2f}", permanent=False)
                 return False, self._state.block_reason
 
         # 3. Already blocked (cooldown not expired)

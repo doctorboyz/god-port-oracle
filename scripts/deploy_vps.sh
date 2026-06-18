@@ -17,6 +17,8 @@ COMPOSE_FILE="docker-compose.vps.yml"
 
 # Files that must be deployed (relative to repo root)
 CRITICAL_FILES=(
+    "broky/signals/generator.py"
+    "broky/risk/drawdown_protection.py"
     "broky/ml/features.py"
     "broky/ml/trade_outcome_predictor.py"
     "broky/ml/trade_outcome_trainer.py"
