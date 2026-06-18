@@ -83,8 +83,8 @@ push_files() {
 # ─── Phase 3: Restart container ─────────────────────────────────────────────
 
 restart_container() {
-    info "Restarting oracle-engine container..."
-    ssh "$VPS_HOST" "cd $VPS_DIR && docker compose -f $COMPOSE_FILE restart oracle-engine"
+    info "Rebuilding and restarting oracle-engine container..."
+    ssh "$VPS_HOST" "cd $VPS_DIR && docker compose -f $COMPOSE_FILE up -d --force-recreate --build oracle-engine"
 
     info "Waiting for container to become healthy (max 60s)..."
     for i in $(seq 1 12); do
