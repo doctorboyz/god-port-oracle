@@ -39,7 +39,14 @@ class AccountConfigInfo:
     config from here, not from inline dicts.
     """
     name: str                              # "A", "B", "C", "D"
+    account_type: str                      # "real" or "demo"
     account_id: int                        # 1, 2, 3, 4 (DB primary key)
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable label: 'Real-A', 'Demo-B', etc."""
+        prefix = "Real" if self.account_type == "real" else "Demo"
+        return f"{prefix}-{self.name}"
     broker_login: str
     broker_password: str
     broker_server: str
@@ -80,6 +87,16 @@ def get_active_accounts() -> list[str]:
     return [a.strip().upper() for a in raw.split(",") if a.strip()]
 
 
+def get_display_name(account: str) -> str:
+    """Return human-readable label for an account: 'Real-A', 'Demo-B', etc.
+
+    Reads ACCOUNT_TYPE_<NAME> env var, defaults to 'real' for A, 'demo' for others.
+    """
+    account_type = os.environ.get(f"ACCOUNT_TYPE_{account.upper()}", "real" if account.upper() == "A" else "demo")
+    prefix = "Real" if account_type == "real" else "Demo"
+    return f"{prefix}-{account.upper()}"
+
+
 def get_account_configs(accounts: Optional[list[str]] = None) -> dict[str, AccountConfigInfo]:
     """Build AccountConfigInfo for each active account from env vars.
 
@@ -95,7 +112,7 @@ def get_account_configs(accounts: Optional[list[str]] = None) -> dict[str, Accou
     logger.info(
         "[AccountRegistry] Loaded %d accounts: %s",
         len(configs),
-        list(configs.keys()),
+        [cfg.display_name for cfg in configs.values()],
     )
     return configs
 
@@ -118,14 +135,15 @@ def get_symbol_map(accounts: Optional[list[str]] = None) -> dict[str, str]:
     """Map account name to trading symbol (XAUUSD vs XAUUSDm).
 
     Override per account with MT5_SYMBOL_<NAME> env var.
-    Account A defaults to XAUUSDm (Standard account), others to XAUUSD (Pro account).
+    Real accounts default to XAUUSDm (Standard), demo accounts to XAUUSD (Pro).
     """
     if accounts is None:
         accounts = get_active_accounts()
+    configs = get_account_configs(accounts)
     result = {}
-    for i, name in enumerate(accounts):
-        default_symbol = "XAUUSDm" if name == "A" else "XAUUSD"
-        result[name] = os.environ.get(f"MT5_SYMBOL_{name}", default_symbol)
+    for name in accounts:
+        cfg = configs[name]
+        result[name] = os.environ.get(f"MT5_SYMBOL_{name}", cfg.symbol)
     return result
 
 
@@ -180,6 +198,10 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
     default_bridge_port = _BASE_BRIDGE_PORT + index
     default_bridge_host = f"mt5{name.lower()}"
 
+    # Account type: "real" or "demo" — determines risk limits and display name
+    # Must be read early because symbol, risk, and drawdown defaults depend on it
+    account_type = os.environ.get(f"ACCOUNT_TYPE_{name}", "real" if name == "A" else "demo")
+
     # Check if running inside Docker (use mt5X hostnames) or locally (use vpsdeluna)
     # The env var MT5_BRIDGE_<NAME>_HOST overrides everything
     bridge_host = os.environ.get(f"MT5_BRIDGE_{name}_HOST", default_bridge_host)
@@ -188,9 +210,9 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
         str(default_bridge_port),
     ))
 
-    # Symbol: A uses XAUUSDm (Standard account), others use XAUUSD (Pro account)
+    # Symbol: real accounts use XAUUSDm (Standard), demo accounts use XAUUSD (Pro)
     # Can be overridden with MT5_SYMBOL_<NAME> env var
-    default_symbol = "XAUUSDm" if name == "A" else "XAUUSD"
+    default_symbol = "XAUUSDm" if account_type == "real" else "XAUUSD"
     symbol = os.environ.get(f"MT5_SYMBOL_{name}", default_symbol)
 
     # Signal group: cycle through volume/ob_os/ma, override with env var
@@ -200,20 +222,20 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
         default_groups[index % len(default_groups)],
     )
 
-    # Risk per trade: default 1% for real accounts (A), 2% for demo
-    default_risk = 0.01 if name == "A" else 0.02
+    # Risk per trade: default 1% for real accounts, 2% for demo
+    default_risk = 0.01 if account_type == "real" else 0.02
     risk_per_trade = float(os.environ.get(
         f"RISK_PER_TRADE_{name}",
         os.environ.get("RISK_PER_TRADE", str(default_risk)),
     ))
 
-    # BUY confidence: stricter for real accounts (A=0.50 vs 0.45 for demo)
+    # BUY confidence: stricter for real accounts (0.50 vs 0.45 for demo)
     # BUY has lower WR than SELL, so real accounts need higher confidence
-    default_buy_confidence = 0.50 if name == "A" else 0.45
+    default_buy_confidence = 0.50 if account_type == "real" else 0.45
 
     # Drawdown config from env vars with sensible defaults
-    # Real account (A): strict 20/30/30%, Demo accounts: lenient 10/20/50%
-    if name == "A":
+    # Real accounts: strict 20/30/30%, Demo accounts: lenient 10/20/50%
+    if account_type == "real":
         default_daily = 0.20
         default_weekly = 0.30
         default_account = 0.30
@@ -226,6 +248,7 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
 
     return AccountConfigInfo(
         name=name,
+        account_type=account_type,
         account_id=index + 1,
         broker_login=os.environ.get(f"MT5_LOGIN_{name}", ""),
         broker_password=os.environ.get(f"MT5_PASSWORD_{name}", ""),

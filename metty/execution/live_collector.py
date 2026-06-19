@@ -22,6 +22,7 @@ from broky.data.sentiment import get_sentiment_snapshot
 from broky.data.news import fetch_market_news, news_to_sentiment_score
 from broky.signals.group_engine import GroupCoordinator
 from broky.signals.groups.base import compute_all_indicators
+from metty.core.account_registry import get_display_name
 from metty.core.db import (
     get_connection,
     init_db,
@@ -142,6 +143,7 @@ class LiveCollector:
         data_dir: Optional[Path] = None,
     ):
         self.account = account.upper()
+        self.display_name = get_display_name(self.account)
         self.db_path = db_path
         self.data_dir = data_dir or Path("data/xau-data")
         self.account_id = LIVE_ACCOUNT_IDS.get(self.account, 2)
@@ -240,14 +242,14 @@ class LiveCollector:
 
             config = account_configs.get(self.account)
             if not config:
-                logger.warning("Unknown account: %s", self.account)
+                logger.warning("Unknown account: %s", self.display_name)
                 return None
 
             bridge = MT5Bridge(config)
 
             # Fetch each timeframe in a separate asyncio.run() call
             # (each creates its own event loop + connection)
-            logger.info("Connecting to MT5 bridge for account %s...", self.account)
+            logger.info("Connecting to MT5 bridge for account %s...", self.display_name)
 
             candles = {}
             for tf in ["M5", "H1", "H4", "D1"]:
@@ -257,7 +259,7 @@ class LiveCollector:
                     logger.info("  %s: %d bars from MT5", tf, len(df))
 
             if not candles:
-                logger.warning("No data from MT5 bridge for account %s", self.account)
+                logger.warning("No data from MT5 bridge for account %s", self.display_name)
                 return None
 
             # Resample M5 if higher TFs not available
@@ -440,7 +442,7 @@ class LiveCollector:
         snapshots = 0
         errors = 0
 
-        logger.info("Starting live collection (interval=%ds, account=%s)", interval, self.account)
+        logger.info("Starting live collection (interval=%ds, account=%s)", interval, self.display_name)
 
         while max_cycles == 0 or cycle < max_cycles:
             cycle += 1

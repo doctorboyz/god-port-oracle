@@ -27,6 +27,7 @@ from broky.data.calendar import fetch_calendar, should_avoid_trading
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
 from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_config, get_buy_min_confidence
+from metty.core.account_registry import get_display_name
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -105,6 +106,7 @@ class LiveTrader:
         notifier: Optional["TelegramNotifier"] = None,
     ):
         self.account = account.upper()
+        self.display_name = get_display_name(self.account)
         self.db_path = db_path
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
@@ -210,19 +212,19 @@ class LiveTrader:
                 self._ml_predictor = TradeOutcomePredictor(
                     loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
                 )
-                logger.info("[Swing:%s] ML filter enabled: %s", self.account,
+                logger.info("[Swing:%s] ML filter enabled: %s", self.display_name,
                            "models loaded" if self._ml_predictor.enabled else "no models")
                 # Health check: verify ML predictor can actually produce predictions
                 if self._ml_predictor.enabled:
                     healthy, reason = self._ml_predictor.health_check()
                     if not healthy:
-                        logger.critical("[Swing:%s] ML filter UNHEALTHY: %s — disabling", self.account, reason)
+                        logger.critical("[Swing:%s] ML filter UNHEALTHY: %s — disabling", self.display_name, reason)
                         self._ml_enabled = False
                         self._ml_predictor = None
                     else:
-                        logger.info("[Swing:%s] ML filter health check passed: %s", self.account, reason)
+                        logger.info("[Swing:%s] ML filter health check passed: %s", self.display_name, reason)
             except Exception as e:
-                logger.warning("[Swing:%s] ML filter init failed: %s", self.account, e)
+                logger.warning("[Swing:%s] ML filter init failed: %s", self.display_name, e)
                 self._ml_enabled = False
 
     def _get_calendar(self) -> list:
@@ -244,7 +246,7 @@ class LiveTrader:
                 from metty.execution.live_collector import fetch_live_sentiment
                 self._sentiment_cache = fetch_live_sentiment() or {}
             except Exception as e:
-                logger.warning("[Swing:%s] Sentiment fetch failed: %s", self.account, e)
+                logger.warning("[Swing:%s] Sentiment fetch failed: %s", self.display_name, e)
                 self._sentiment_cache = {}
             self._sentiment_cache_time = now
         return self._sentiment_cache
@@ -289,7 +291,7 @@ class LiveTrader:
                 if spread is not None and spread >= 0:
                     return float(spread)
         except Exception as e:
-            logger.debug("[Swing:%s] Spread fetch failed: %s", self.account, e)
+            logger.debug("[Swing:%s] Spread fetch failed: %s", self.display_name, e)
         return 0.0
 
     def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
@@ -335,7 +337,7 @@ class LiveTrader:
                 db_path=self.db_path,
             )
         except Exception as e:
-            logger.warning("[Swing:%s] Failed to record rejection: %s", self.account, e)
+            logger.warning("[Swing:%s] Failed to record rejection: %s", self.display_name, e)
 
     def _fetch_candles(self) -> Optional[dict[str, pd.DataFrame]]:
         """Fetch candle data from MT5 bridge, fall back to CSV."""
@@ -984,8 +986,7 @@ class LiveTrader:
                 import asyncio
                 asyncio.run(_close())
             except Exception as e:
-                logger.warning("[Swing:%s] Failed to close position %s at TP1 in MT5: %s",
-                               self.account, trade["ticket"], e)
+                logger.warning("[Swing:%s] Failed to close position %s at TP1 in MT5: %s", self.display_name, trade["ticket"], e)
 
         closed.append({
             "trade_id": trade["id"],
@@ -1056,11 +1057,10 @@ class LiveTrader:
                 order_result = asyncio.run(_open())
                 ticket = order_result.ticket if order_result and order_result.success else None
                 if order_result and not order_result.success:
-                    logger.error("[Swing:%s] Scale-in order FAILED at TP1: %s",
-                                 self.account, order_result.error)
+                    logger.error("[Swing:%s] Scale-in order FAILED at TP1: %s", self.display_name, order_result.error)
                     return closed  # Don't insert scale-in if MT5 order failed
             except Exception as e:
-                logger.error("[Swing:%s] Scale-in MT5 error at TP1: %s", self.account, e)
+                logger.error("[Swing:%s] Scale-in MT5 error at TP1: %s", self.display_name, e)
                 return closed  # Don't insert scale-in if MT5 errored
 
         # Insert scale-in trade in DB
@@ -1252,8 +1252,7 @@ class LiveTrader:
         # Circuit breaker: if ML filter has failed too many times, stop trading
         if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:
             logger.critical(
-                "[Swing:%s] ML filter failed %d times consecutively — circuit breaker: holding",
-                self.account, self._ml_fail_count,
+                "[Swing:%s] ML filter failed %d times consecutively — circuit breaker: holding", self.display_name, self._ml_fail_count,
             )
             self._record_rejection(signal, f"ml_filter_circuit_break:{self._ml_fail_count}_fails", session, d1_trend, candles)
             return {"action": "hold", "reason": f"ML circuit breaker ({self._ml_fail_count} consecutive failures)", "signal": signal}
@@ -1283,22 +1282,21 @@ class LiveTrader:
                     if self.learning_mode:
                         # In learning mode, never block — allow trade with min lot
                         # to collect diverse outcomes for ML retraining
-                        logger.info("[Swing:%s] ML would block, but learning mode: allowing min-lot trade (%s)", self.account, ml_reason)
+                        logger.info("[Swing:%s] ML would block, but learning mode: allowing min-lot trade (%s)", self.display_name, ml_reason)
                         ml_risk_multiplier = 0.01  # minimal position for data collection
                     else:
-                        logger.info("[Swing:%s] ML filter blocked trade: %s", self.account, ml_reason)
+                        logger.info("[Swing:%s] ML filter blocked trade: %s", self.display_name, ml_reason)
                         self._record_rejection(signal, f"ml_filter:{ml_reason}", session, d1_trend, candles)
                         return {"action": "hold", "reason": ml_reason, "signal": signal}
                 elif ml_risk_multiplier < 1.0:
-                    logger.info("[Swing:%s] ML risk-scaling: %s", self.account, ml_reason)
+                    logger.info("[Swing:%s] ML risk-scaling: %s", self.display_name, ml_reason)
                 else:
-                    logger.info("[Swing:%s] ML filter pass: %s", self.account, ml_reason)
+                    logger.info("[Swing:%s] ML filter pass: %s", self.display_name, ml_reason)
 
             except Exception as e:
                 self._ml_fail_count += 1
                 logger.error(
-                    "[Swing:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection",
-                    self.account, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
+                    "[Swing:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection", self.display_name, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
                 )
                 # ML filter is down — trade proceeds at full size (1.0) with no ML scaling
                 # Circuit breaker above will stop trading after ML_MAX_CONSECUTIVE_FAILS

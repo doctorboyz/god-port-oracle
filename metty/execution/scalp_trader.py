@@ -32,6 +32,7 @@ from broky.risk.position_sizing import (
 )
 from broky.risk.spread_filter import check_spread
 from broky.signals.scalp_generator import generate_scalp_signal, SCALP_SPREAD_MAX
+from metty.core.account_registry import get_display_name
 from metty.core.db import (
     close_live_trade,
     get_latest_signal_id,
@@ -97,6 +98,7 @@ class ScalpTrader:
         event_bus: Optional[EventBus] = None,
     ):
         self.account = account.upper()
+        self.display_name = get_display_name(self.account)
         self.db_path = db_path
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
@@ -167,19 +169,19 @@ class ScalpTrader:
                 self._ml_predictor = TradeOutcomePredictor(
                     loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
                 )
-                logger.info("[Scalp:%s] ML filter enabled: %s", self.account,
+                logger.info("[Scalp:%s] ML filter enabled: %s", self.display_name,
                            "models loaded" if self._ml_predictor.enabled else "no models")
                 # Health check: verify ML predictor can actually produce predictions
                 if self._ml_predictor.enabled:
                     healthy, reason = self._ml_predictor.health_check()
                     if not healthy:
-                        logger.critical("[Scalp:%s] ML filter UNHEALTHY: %s — disabling", self.account, reason)
+                        logger.critical("[Scalp:%s] ML filter UNHEALTHY: %s — disabling", self.display_name, reason)
                         self._ml_enabled = False
                         self._ml_predictor = None
                     else:
-                        logger.info("[Scalp:%s] ML filter health check passed: %s", self.account, reason)
+                        logger.info("[Scalp:%s] ML filter health check passed: %s", self.display_name, reason)
             except Exception as e:
-                logger.warning("[Scalp:%s] ML filter init failed: %s", self.account, e)
+                logger.warning("[Scalp:%s] ML filter init failed: %s", self.display_name, e)
                 self._ml_enabled = False
 
     def _get_bridge(self):
@@ -613,7 +615,7 @@ class ScalpTrader:
                 from metty.execution.live_collector import fetch_live_sentiment
                 self._sentiment_cache = fetch_live_sentiment()
             except Exception as e:
-                logger.warning("[Scalp:%s] Sentiment fetch failed: %s", self.account, e)
+                logger.warning("[Scalp:%s] Sentiment fetch failed: %s", self.display_name, e)
                 self._sentiment_cache = {}
             self._sentiment_cache_time = now
         return self._sentiment_cache
@@ -676,7 +678,7 @@ class ScalpTrader:
                 db_path=self.db_path,
             )
         except Exception as e:
-            logger.warning("[Scalp:%s] Rejected signal recording failed: %s", self.account, e)
+            logger.warning("[Scalp:%s] Rejected signal recording failed: %s", self.display_name, e)
 
     def _execute_tp1_close(
         self,
@@ -774,8 +776,7 @@ class ScalpTrader:
                 import asyncio
                 asyncio.run(_close())
             except Exception as e:
-                logger.warning("[Scalp:%s] Failed to close position %s at TP1 in MT5: %s",
-                               self.account, trade["ticket"], e)
+                logger.warning("[Scalp:%s] Failed to close position %s at TP1 in MT5: %s", self.display_name, trade["ticket"], e)
 
         closed.append({
             "trade_id": trade["id"],
@@ -786,8 +787,7 @@ class ScalpTrader:
             "pnl_pct": round(pnl_pct, 4),
         })
 
-        logger.info("[Scalp:%s] TP1_CLOSED #%d %s @ %.2f (PnL=%.2f)",
-                     self.account, trade_id, direction, exit_price, pnl)
+        logger.info("[Scalp:%s] TP1_CLOSED #%d %s @ %.2f (PnL=%.2f)", self.display_name, trade_id, direction, exit_price, pnl)
 
         # 2. Open scale-in position (position 2) at current price
         remaining_distance = abs(tp - tp1_price)
@@ -830,11 +830,10 @@ class ScalpTrader:
                 order_result = asyncio.run(_open())
                 ticket = order_result.ticket if order_result and order_result.success else None
                 if order_result and not order_result.success:
-                    logger.error("[Scalp:%s] Scale-in order FAILED at TP1: %s",
-                                 self.account, order_result.error)
+                    logger.error("[Scalp:%s] Scale-in order FAILED at TP1: %s", self.display_name, order_result.error)
                     return closed  # Don't insert scale-in if MT5 order failed
             except Exception as e:
-                logger.error("[Scalp:%s] Scale-in MT5 error at TP1: %s", self.account, e)
+                logger.error("[Scalp:%s] Scale-in MT5 error at TP1: %s", self.display_name, e)
                 return closed  # Don't insert scale-in if MT5 errored
 
         # Insert scale-in trade in DB
@@ -867,8 +866,7 @@ class ScalpTrader:
         # Initialize MFE/MAE tracking for scale-in position
         self._mfe_mae_state[scale_in_id] = {"mfe": 0.0, "mae": 0.0}
 
-        logger.info("[Scalp:%s] SCALE_IN #%d %s @ %.2f SL=%.2f TP=%.2f (from #%d)",
-                     self.account, scale_in_id, direction, current_price, new_sl, tp, trade_id)
+        logger.info("[Scalp:%s] SCALE_IN #%d %s @ %.2f SL=%.2f TP=%.2f (from #%d)", self.display_name, scale_in_id, direction, current_price, new_sl, tp, trade_id)
 
         return closed
 
@@ -999,8 +997,7 @@ class ScalpTrader:
         # Circuit breaker: if ML filter has failed too many times, stop trading
         if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:
             logger.critical(
-                "[Scalp:%s] ML filter failed %d times consecutively — circuit breaker: holding",
-                self.account, self._ml_fail_count,
+                "[Scalp:%s] ML filter failed %d times consecutively — circuit breaker: holding", self.display_name, self._ml_fail_count,
             )
             self._record_rejection(signal, f"ml_filter_circuit_break:{self._ml_fail_count}_fails", session=session)
             return {"action": "hold", "reason": f"ML circuit breaker ({self._ml_fail_count} consecutive failures)", "signal": signal}
@@ -1037,17 +1034,16 @@ class ScalpTrader:
                 self._ml_fail_count = 0
 
                 if ml_risk_multiplier == 0:
-                    logger.info("[Scalp:%s] ML filter blocked trade: %s", self.account, ml_risk_reason)
+                    logger.info("[Scalp:%s] ML filter blocked trade: %s", self.display_name, ml_risk_reason)
                     self._record_rejection(signal, ml_risk_reason or "ml_filter_blocked", session=session)
                     return {"action": "hold", "reason": ml_risk_reason, "signal": signal}
                 elif ml_risk_multiplier < 1.0:
-                    logger.info("[Scalp:%s] ML risk-scaling: %s", self.account, ml_risk_reason)
+                    logger.info("[Scalp:%s] ML risk-scaling: %s", self.display_name, ml_risk_reason)
 
             except Exception as e:
                 self._ml_fail_count += 1
                 logger.error(
-                    "[Scalp:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection",
-                    self.account, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
+                    "[Scalp:%s] ML filter crashed (fail %d/%d): %s — proceeding WITHOUT ML protection", self.display_name, self._ml_fail_count, ML_MAX_CONSECUTIVE_FAILS, e,
                 )
                 # ML filter is down — trade proceeds at full size (1.0) with no ML scaling
 

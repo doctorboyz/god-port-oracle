@@ -6,6 +6,7 @@ import pytest
 # Ensure clean environment for each test
 _ENV_KEYS = [
     "ACCOUNTS",
+    "ACCOUNT_TYPE_A", "ACCOUNT_TYPE_B", "ACCOUNT_TYPE_C", "ACCOUNT_TYPE_D",
     "MT5_LOGIN_A", "MT5_PASSWORD_A", "MT5_SERVER_A",
     "MT5_BRIDGE_A_HOST", "MT5_BRIDGE_A_PORT",
     "MT5_SYMBOL_A", "INITIAL_EQUITY_A", "INITIAL_BALANCE_A",
@@ -376,3 +377,71 @@ class TestDrawdownProtectorIntegration:
         )
         can_trade, reason = protector.check(500.0)
         assert can_trade is True
+
+
+class TestAccountType:
+    """Tests for account_type and display_name features."""
+
+    def test_default_type_a_is_real(self):
+        """Account A defaults to 'real' type."""
+        os.environ["ACCOUNTS"] = "A,B,C"
+        from metty.core.account_registry import get_account_config
+        config = get_account_config("A")
+        assert config.account_type == "real"
+        assert config.display_name == "Real-A"
+
+    def test_default_type_others_are_demo(self):
+        """Accounts B, C, D default to 'demo' type."""
+        os.environ["ACCOUNTS"] = "A,B,C,D"
+        from metty.core.account_registry import get_account_configs
+        configs = get_account_configs()
+        assert configs["B"].account_type == "demo"
+        assert configs["B"].display_name == "Demo-B"
+        assert configs["C"].account_type == "demo"
+        assert configs["C"].display_name == "Demo-C"
+        assert configs["D"].account_type == "demo"
+        assert configs["D"].display_name == "Demo-D"
+
+    def test_env_override_type(self):
+        """ACCOUNT_TYPE_<NAME> env var overrides default."""
+        os.environ["ACCOUNTS"] = "A,B"
+        os.environ["ACCOUNT_TYPE_A"] = "demo"
+        os.environ["ACCOUNT_TYPE_B"] = "real"
+        from metty.core.account_registry import get_account_configs
+        configs = get_account_configs()
+        assert configs["A"].account_type == "demo"
+        assert configs["A"].display_name == "Demo-A"
+        assert configs["B"].account_type == "real"
+        assert configs["B"].display_name == "Real-B"
+
+    def test_get_display_name_standalone(self):
+        """get_display_name() works without full config."""
+        from metty.core.account_registry import get_display_name
+        assert get_display_name("A") == "Real-A"
+        assert get_display_name("B") == "Demo-B"
+        assert get_display_name("C") == "Demo-C"
+        assert get_display_name("D") == "Demo-D"
+
+    def test_type_affects_symbol(self):
+        """Real accounts default to XAUUSDm, demo to XAUUSD."""
+        os.environ["ACCOUNTS"] = "A,B"
+        from metty.core.account_registry import get_account_configs
+        configs = get_account_configs()
+        assert configs["A"].symbol == "XAUUSDm"  # real = Standard
+        assert configs["B"].symbol == "XAUUSD"    # demo = Pro
+
+    def test_type_affects_risk(self):
+        """Real accounts default to 1% risk, demo to 2%."""
+        os.environ["ACCOUNTS"] = "A,B"
+        from metty.core.account_registry import get_account_configs
+        configs = get_account_configs()
+        assert configs["A"].risk_per_trade == 0.01  # real
+        assert configs["B"].risk_per_trade == 0.02  # demo
+
+    def test_type_affects_buy_confidence(self):
+        """Real accounts default to higher BUY min confidence."""
+        os.environ["ACCOUNTS"] = "A,B"
+        from metty.core.account_registry import get_account_configs
+        configs = get_account_configs()
+        assert configs["A"].buy_min_confidence == 0.50  # real
+        assert configs["B"].buy_min_confidence == 0.45  # demo

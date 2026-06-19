@@ -38,6 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("oracle")
 
 # Shared event bus for inter-module communication
+from metty.core.account_registry import get_display_name
 from shared.events import EventBus
 
 _event_bus = EventBus()
@@ -51,17 +52,17 @@ def run_collector(account: str, db_path: str, interval: int):
     from metty.execution.live_collector import LiveCollector
 
     collector = LiveCollector(account=account, db_path=Path(db_path))
-    logger.info("[Collector:%s] Starting (interval=%ds)", account, interval)
+    logger.info("[Collector:%s] Starting (interval=%ds)", get_display_name(account), interval)
 
     while True:
         try:
             result = collector.run_once()
             if result:
-                logger.info("[Collector:%s] Snapshot #%d collected", account, result)
+                logger.info("[Collector:%s] Snapshot #%d collected", get_display_name(account), result)
             else:
-                logger.warning("[Collector:%s] No snapshot collected", account)
+                logger.warning("[Collector:%s] No snapshot collected", get_display_name(account))
         except Exception as e:
-            logger.error("[Collector:%s] Collection error: %s", account, e)
+            logger.error("[Collector:%s] Collection error: %s", get_display_name(account), e)
 
         time.sleep(interval)
 
@@ -83,15 +84,15 @@ def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifie
         notifier=notifier,
     )
     mode = "DRY-RUN" if dry_run else "LIVE"
-    logger.info("[Trader:%s] Starting %s trader (interval=%ds)", account, mode, interval)
+    logger.info("[Trader:%s] Starting %s trader (interval=%ds)", get_display_name(account), mode, interval)
 
     while True:
         try:
             result = trader.run_once()
             action = result.get("action", "unknown")
-            logger.info("[Trader:%s] %s: %s", account, mode, result)
+            logger.info("[Trader:%s] %s: %s", get_display_name(account), mode, result)
         except Exception as e:
-            logger.error("[Trader:%s] Trading error: %s", account, e)
+            logger.error("[Trader:%s] Trading error: %s", get_display_name(account), e)
 
         time.sleep(interval)
 
@@ -392,7 +393,7 @@ def main():
 
         if phase in ("trade", "both"):
             if account in swing_disabled_accounts:
-                logger.info("[Trader:%s] SKIPPED — swing disabled for this account", account)
+                logger.info("[Trader:%s] SKIPPED — swing disabled for this account", get_display_name(account))
             else:
                 t = threading.Thread(
                     target=run_trader,
