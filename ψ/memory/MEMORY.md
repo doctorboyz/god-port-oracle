@@ -51,6 +51,9 @@
 - [Trading Philosophy: Trend-Following Only](learnings/2026-06-08_trading-philosophy-trend-following.md) — counter-trend = ห้าม (SELL pullback in uptrend), reversal = ยอมได้ (overbought + lower low), ranging = พัก (ADX<25 no trade), ML must learn trend_alignment feature
 - [X11 Lock + Watchdog Pattern](learnings/2026-06-19_x11-lock-watchdog-pattern.md) — Docker restart preserves /tmp/ state; stale X11 lock crashes KasmVNC; cleanup + watchdog for MT5 recovery
 - [Dynamic Multi-Account Registry](learnings/2026-06-19_dynamic-multi-account-registry.md) — AccountInfo dataclass from env vars; new account = env vars + docker-compose only; zero code changes
+- [MT5 Source of Truth + Ghost Positions](learnings/2026-06-19_mt5-source-of-truth-ghost-positions.md) — MT5 is source of truth for position state; ghost trades (is_open=1, ticket=None) block all future trades
+- [One-Hot Regime Encoding](learnings/2026-06-19_one-hot-regime-encoding.md) — ordinal encoding ผิดสำหรับ regime; one-hot ทำให้แต่ละ regime เป็น independent feature; v4 compat ด้วย regime_encoded
+- [Dead Code Removal > Deprecation](learnings/2026-06-19_dead-code-removal-over-deprecation.md) — ถ้าไม่มี caller ลบเลย; grep ทุก reference รวม scripts/tests/configs
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
@@ -62,3 +65,5 @@
 - [2026-06-07 Data Integrity Trading Params](retrospectives/2026-06/07/08.48_data-integrity-trading-params.md) — 4 VPS deploys to fix data chain; backfill must UPDATE not just INSERT; 100% coverage on 10,167 trade_outcomes
 - [2026-06-07 v4 Deploy + Partial TP + Cleanup](retrospectives/2026-06/07/19.11_v4-deploy-partial-tp-cleanup.md) — regime_encoded fix, v4>v5 backtest, partial TP on Account C, tp1_ratio bug fix, model cleanup
 - [2026-06-19 Entrypoint Watchdog + X11 Lock Fix](retrospectives/2026-06/19/21.34_entrypoint-watchdog-x11-lock-fix.md) — stale X11 lock crashes KasmVNC on restart; Phase 0 cleanup + Phase 4 watchdog; multi-account registry deployed
+- [2026-06-19 Account Type + Ghost Positions + Deploy](retrospectives/2026-06/19/22.18_account-type-ghost-positions-deploy.md) — Real-A/Demo-B labels, ghost position fix (MT5 source of truth), 4 accounts on VPS
+- [2026-06-19 Ten Issues Fix + Deploy + One-hot](retrospectives/2026-06/19/23.12_ten-issues-fix-deploy-onehot-regime.md) — 10 issues fixed, PersistentMT5Bridge removed, one-hot regime encoding, deploy verified

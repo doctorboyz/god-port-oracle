@@ -251,6 +251,11 @@ class TradeOutcomeTrainer:
         # Expand features_json into columns
         features_df = pd.json_normalize(df["features_json"].apply(json.loads))
 
+        # Coerce all columns to numeric where possible (features_json may store numbers as strings)
+        for col in features_df.columns:
+            if features_df[col].dtype == object:
+                features_df[col] = pd.to_numeric(features_df[col], errors="coerce")
+
         # Add metadata columns (use to_direction as fallback for synthetic trades
         # where live_trades JOIN returns NULL)
         # CRITICAL: use to_.profit (available for ALL trades including synthetic)
@@ -268,7 +273,7 @@ class TradeOutcomeTrainer:
             adx_derived = pd.Series([
                 classify_regime(
                     float(row_adx),
-                    float(row_bw) if boll_bw_series is not None and pd.notna(boll_bw_series.iloc[i]) else None
+                    float(boll_bw_series.iloc[i]) if boll_bw_series is not None and pd.notna(boll_bw_series.iloc[i]) else None
                 ) if pd.notna(row_adx) else "unknown"
                 for i, row_adx in enumerate(features_df["adx"])
             ], index=features_df.index)
