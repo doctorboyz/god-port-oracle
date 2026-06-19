@@ -157,6 +157,11 @@ services:
       - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.20}
       - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.50}
       - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-2}
+      # ═══ Account types (real vs demo) ═══════════════════════════════════
+      - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}
+      - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
+      - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
+      - ACCOUNT_TYPE_D=${ACCOUNT_TYPE_D:-demo}
       # ═══ MT5 Bridge credentials ══════════════════════════════════════════
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
