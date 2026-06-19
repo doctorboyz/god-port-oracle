@@ -48,7 +48,7 @@ IMPORTS=(
     "metty.core.db:insert_live_trade"
     "metty.core.db:close_live_trade"
     "metty.notify.telegram_bot:TelegramNotifier"
-    "metty.bridge.client:PersistentMT5Bridge"
+    "metty.bridge.client:MT5Bridge"
     "broky.signals.m5_scalp_generator:generate_m5_scalp_signal"
     "broky.signals.scalp_generator:generate_scalp_signal"
 )
