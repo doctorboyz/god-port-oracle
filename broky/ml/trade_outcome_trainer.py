@@ -76,16 +76,18 @@ BUY_TOP_FEATURES = [
     "dema_21", "atr", "ema_200", "ichimoku_senkou_b", "boll_bw",
     "fear_greed_value", "atr_to_price", "ichimoku_senkou_a", "sma_10",
     "ema_9_21_diff", "macd_hist", "ema_21", "adx", "ad_line_slope", "sma_20",
-    # Encoded categorical features (regime + trend context)
-    "regime_encoded", "h4_trend_encoded", "mfi_signal_encoded",
+    # Encoded categorical features (regime one-hot + trend context)
+    "regime_trending", "regime_ranging", "regime_volatile",
+    "h4_trend_encoded", "mfi_signal_encoded",
 ]
 SELL_TOP_FEATURES = [
     "dema_21", "session_strength", "price_vs_cloud_encoded", "sma_10",
     "atr_to_price", "ema_200", "plus_di", "atr", "macd_hist",
     "fear_greed_value", "minus_di", "ema_50", "sma_20", "mfi",
     "tick_volume_ratio",
-    # Encoded categorical features (regime + trend context)
-    "regime_encoded", "h4_trend_encoded", "mfi_signal_encoded",
+    # Encoded categorical features (regime one-hot + trend context)
+    "regime_trending", "regime_ranging", "regime_volatile",
+    "h4_trend_encoded", "mfi_signal_encoded",
 ]
 
 
@@ -315,7 +317,7 @@ class TradeOutcomeTrainer:
                    if c in ("ema_9_21_diff", "di_diff", "boll_pct_b_clipped",
                              "price_vs_cloud_encoded", "d1_trend_encoded",
                              "h4_trend_encoded", "mfi_signal_encoded",
-                             "regime_encoded")
+                             "regime_encoded", "regime_trending", "regime_ranging", "regime_volatile")
                    or c.startswith("session_")]
         available += derived
         available = list(dict.fromkeys(available))  # deduplicate preserving order
@@ -328,7 +330,7 @@ class TradeOutcomeTrainer:
             "h4_trend": ["h4_trend_encoded"],
             "price_vs_cloud": ["price_vs_cloud_encoded"],
             "mfi_signal": ["mfi_signal_encoded"],
-            "regime": ["regime_encoded"],
+            "regime": ["regime_encoded", "regime_trending", "regime_ranging", "regime_volatile"],
         }
         for raw_col, encoded_cols in raw_cats_with_encodings.items():
             if raw_col in available and any(e in available for e in encoded_cols):

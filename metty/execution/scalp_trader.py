@@ -157,7 +157,7 @@ class ScalpTrader:
         self._last_h4_trend: Optional[str] = None
         self._last_exit_time: Optional[datetime] = None
         self._cycle_count: int = 0
-        self._bridge = None  # PersistentMT5Bridge, initialized lazily
+        self._bridge = None  # MT5Bridge, initialized lazily
         self.event_bus = event_bus
         # ML filter — only enabled if models have decent accuracy
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
@@ -185,59 +185,30 @@ class ScalpTrader:
                 self._ml_enabled = False
 
     def _get_bridge(self):
-        """Get or create a persistent bridge connection."""
+        """Get or create an MT5Bridge connection (uses account registry)."""
         if self._bridge is not None:
             return self._bridge
 
         try:
-            from metty.bridge.client import PersistentMT5Bridge
-            from metty.core.models import AccountConfig, AccountName
+            from metty.bridge.client import MT5Bridge
+            from metty.core.account_registry import get_account_config
 
-            account_configs = {
-                "A": AccountConfig(
-                    name=AccountName.A,
-                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")),
-                    signal_group="volume",
-                ),
-                "B": AccountConfig(
-                    name=AccountName.B,
-                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                    balance=500.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5006")),
-                    signal_group="ob_os",
-                ),
-                "C": AccountConfig(
-                    name=AccountName.C,
-                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
-                    balance=1000.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5007")),
-                    signal_group="ma",
-                ),
-            }
-            config = account_configs.get(self.account)
-            if not config:
+            cfg = get_account_config(self.account)
+            if not cfg:
                 logger.warning("Unknown account: %s", self.account)
                 return None
 
-            self._bridge = PersistentMT5Bridge(config)
+            self._bridge = MT5Bridge(cfg)
             return self._bridge
 
         except ImportError:
-            logger.warning("PersistentMT5Bridge not available")
+            logger.warning("MT5Bridge not available")
             return None
 
     def _fetch_candles(self, retries: int = 2) -> Optional[dict[str, pd.DataFrame]]:
-        """Fetch M1 candle data from persistent bridge, fall back to CSV.
+        """Fetch M1 candle data from MT5 bridge, fall back to CSV.
 
-        Retries bridge connection on transient failures before falling back.
+        Creates a fresh bridge connection per attempt with retry logic.
         """
         from broky.data.resampler import resample_timeframe
         from metty.execution.historical_collector import _normalize_columns
@@ -246,17 +217,9 @@ class ScalpTrader:
         if bridge is not None:
             for attempt in range(retries + 1):
                 try:
-                    if not bridge.ensure_connected_sync():
-                        logger.warning(
-                            "Bridge M1 fetch: ensure_connected_sync=False (attempt %d/%d)",
-                            attempt + 1, retries + 1,
-                        )
-                        if attempt < retries:
-                            import time as _time
-                            _time.sleep(1.0 * (attempt + 1))
-                        continue
-
-                    m1 = bridge.fetch_candles_persistent_sync("XAUUSD", "M1", 500)
+                    symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD", "D": "XAUUSD"}
+                    symbol = symbol_map.get(self.account, "XAUUSD")
+                    m1 = bridge.fetch_candles_sync(symbol, "M1", 500)
                     if m1 is not None and not m1.empty:
                         m1 = _normalize_columns(m1)
                         candles = {"M1": m1}
@@ -282,6 +245,8 @@ class ScalpTrader:
                     if attempt < retries:
                         import time as _time
                         _time.sleep(1.0 * (attempt + 1))
+                    # Reset bridge for next attempt
+                    self._bridge = None
         else:
             logger.warning("Bridge M1 fetch: _get_bridge() returned None for account %s", self.account)
 
@@ -311,17 +276,19 @@ class ScalpTrader:
             logger.error("CSV fallback failed: %s", e)
             return None
 
-    def _get_spread(self) -> float:
-        """Get current spread from real-time bid/ask."""
-        bridge = self._get_bridge()
+    def _get_spread(self, bridge=None) -> float:
+        """Get current spread from real-time bid/ask using bridge."""
+        if bridge is None:
+            bridge = self._get_bridge()
         if bridge is None:
             return 0.0
 
         try:
-            if bridge.ensure_connected_sync():
-                spread = bridge.get_spread_sync("XAUUSD")
-                if spread is not None and spread > 0:
-                    return spread
+            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD", "D": "XAUUSD"}
+            symbol = symbol_map.get(self.account, "XAUUSD")
+            spread = bridge.get_spread_sync(symbol)
+            if spread is not None and spread > 0:
+                return spread
         except Exception as e:
             logger.warning("Spread fetch failed: %s", e)
 
@@ -336,15 +303,55 @@ class ScalpTrader:
         return elapsed < cooldown_seconds
 
     def _check_existing_scalp_position(self) -> bool:
-        """Check if there's an open scalp position for this strategy."""
-        open_trades = get_open_trades(self.account_id, self.db_path)
-        for trade in open_trades:
-            strategy = trade.get("strategy_id", "") if "strategy_id" in trade else ""
-            # Also check by trading_mode column
-            mode = trade.get("trading_mode", "") if "trading_mode" in trade else ""
-            if strategy == self.strategy_id or mode == "scalp":
-                return True
-        return False
+        """Check if there's an open scalp position for this account.
+
+        Uses MT5 as PRIMARY source of truth — same pattern as LiveTrader.
+        If MT5 has no position at all, closes DB ghost trades and returns False.
+        If MT5 has a position, checks DB for strategy-specific scalp trades.
+        """
+        # Step 1: Check MT5 for any open position (source of truth)
+        try:
+            import rpyc
+            from metty.core.account_registry import get_account_config
+
+            cfg = get_account_config(self.account)
+            conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
+            positions = conn.root.positions_get(symbol=cfg.symbol)
+            conn.close()
+
+            if positions is None or len(positions) == 0:
+                # MT5 says no position — close any DB ghost trades
+                open_trades = get_open_trades(self.account_id, self.db_path)
+                if open_trades:
+                    logger.warning(
+                        "[Scalp:%s] %d ghost trades in DB (is_open=1 but no MT5 position) — closing them",
+                        self.display_name, len(open_trades),
+                    )
+                    from metty.core.db import close_ghost_trades
+                    closed = close_ghost_trades(self.account_id, self.db_path)
+                    if closed:
+                        logger.info("[Scalp:%s] Closed %d ghost trades", self.display_name, closed)
+                return False
+
+            # MT5 has a position — check if it's a scalp trade in DB
+            open_trades = get_open_trades(self.account_id, self.db_path)
+            for trade in open_trades:
+                strategy = trade.get("strategy_id", "") if "strategy_id" in trade else ""
+                mode = trade.get("trading_mode", "") if "trading_mode" in trade else ""
+                if strategy == self.strategy_id or mode == "scalp":
+                    return True
+            return False
+
+        except Exception as e:
+            logger.warning("[Scalp:%s] MT5 position check failed: %s — falling back to DB", self.display_name, e)
+            # Fallback to DB only if MT5 is unreachable
+            open_trades = get_open_trades(self.account_id, self.db_path)
+            for trade in open_trades:
+                strategy = trade.get("strategy_id", "") if "strategy_id" in trade else ""
+                mode = trade.get("trading_mode", "") if "trading_mode" in trade else ""
+                if strategy == self.strategy_id or mode == "scalp":
+                    return True
+            return False
 
     def _monitor_positions(self, candles: dict[str, pd.DataFrame]) -> list[dict]:
         """Check open scalp trades for exit conditions."""

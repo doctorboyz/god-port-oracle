@@ -38,10 +38,133 @@ logging.basicConfig(
 logger = logging.getLogger("oracle")
 
 # Shared event bus for inter-module communication
-from metty.core.account_registry import get_display_name
+from metty.core.account_registry import get_account_config, get_active_accounts, get_display_name
 from shared.events import EventBus
 
 _event_bus = EventBus()
+
+
+def ensure_mt5_logged_in(accounts: list, max_retries: int = 3) -> dict:
+    """Auto-login to MT5 for each account before trading starts.
+
+    After container restart, MT5 terminal runs but is not logged in.
+    This function calls initialize() + login() via the RPyC bridge
+    so trading can proceed without manual VNC login.
+
+    Returns dict of {account: True/False} for login results.
+    """
+    import rpyc
+
+    results = {}
+    for name in accounts:
+        name = name.strip()
+        if not name:
+            continue
+        cfg = get_account_config(name)
+        display = cfg.display_name
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                conn = rpyc.connect(
+                    cfg.bridge_host, cfg.bridge_internal_port,
+                    config={"sync_request_timeout": 15},
+                )
+                # Step 1: Initialize MT5 Python API
+                init_ok = conn.root.initialize()
+                if not init_ok:
+                    err = conn.root.last_error()
+                    logger.warning("[%s] MT5 initialize failed (attempt %d): %s", display, attempt, err)
+                    conn.close()
+                    if attempt < max_retries:
+                        time.sleep(5)
+                    continue
+
+                # Step 2: Login with credentials from env
+                login_ok = conn.root.login(
+                    int(cfg.broker_login),
+                    cfg.broker_password,
+                    cfg.broker_server,
+                )
+                if login_ok:
+                    info = conn.root.account_info()
+                    if info is not None:
+                        balance = info["balance"]
+                        equity = info["equity"]
+                        logger.info(
+                            "[%s] MT5 logged in: login=%s server=%s balance=%.2f equity=%.2f",
+                            display, cfg.broker_login, cfg.broker_server, balance, equity,
+                        )
+                    else:
+                        logger.info("[%s] MT5 logged in (account_info pending)", display)
+                    results[name] = True
+                    conn.close()
+                    break
+                else:
+                    err = conn.root.last_error()
+                    logger.warning("[%s] MT5 login failed (attempt %d): %s", display, attempt, err)
+                    conn.close()
+                    if attempt < max_retries:
+                        time.sleep(5)
+            except Exception as e:
+                logger.warning("[%s] MT5 bridge connect failed (attempt %d): %s", display, attempt, e)
+                if attempt < max_retries:
+                    time.sleep(5)
+
+        if name not in results:
+            logger.error("[%s] MT5 auto-login FAILED after %d attempts — manual VNC login required", display, max_retries)
+            results[name] = False
+
+    return results
+
+
+def _mt5_health_check(account: str) -> bool:
+    """Quick check if MT5 is logged in for an account. Re-login if not.
+
+    Returns True if MT5 is responsive and logged in, False otherwise.
+    Called before each trading/collection cycle to handle disconnections.
+    """
+    import rpyc
+
+    cfg = get_account_config(account)
+    display = cfg.display_name
+    try:
+        conn = rpyc.connect(
+            cfg.bridge_host, cfg.bridge_internal_port,
+            config={"sync_request_timeout": 10},
+        )
+        # Quick check: can we get account_info?
+        info = conn.root.account_info()
+        if info is not None:
+            # Already logged in — just close and return
+            conn.close()
+            return True
+
+        # Not logged in — try to login
+        logger.info("[%s] MT5 not logged in, auto-reconnecting...", display)
+        conn.root.initialize()
+        login_ok = conn.root.login(
+            int(cfg.broker_login),
+            cfg.broker_password,
+            cfg.broker_server,
+        )
+        if login_ok:
+            info = conn.root.account_info()
+            if info is not None:
+                balance = info["balance"]
+                equity = info["equity"]
+                logger.info("[%s] MT5 re-login successful: balance=%.2f equity=%.2f", display, balance, equity)
+                conn.close()
+                return True
+            else:
+                logger.warning("[%s] MT5 login returned True but account_info still None", display)
+        else:
+            err = conn.root.last_error()
+            logger.warning("[%s] MT5 re-login failed: %s", display, err)
+        conn.close()
+    except Exception as e:
+        logger.warning("[%s] MT5 health check failed: %s", display, e)
+
+    return False
 
 
 def run_collector(account: str, db_path: str, interval: int):
@@ -56,6 +179,7 @@ def run_collector(account: str, db_path: str, interval: int):
 
     while True:
         try:
+            _mt5_health_check(account)
             result = collector.run_once()
             if result:
                 logger.info("[Collector:%s] Snapshot #%d collected", get_display_name(account), result)
@@ -88,6 +212,7 @@ def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifie
 
     while True:
         try:
+            _mt5_health_check(account)
             result = trader.run_once()
             action = result.get("action", "unknown")
             logger.info("[Trader:%s] %s: %s", get_display_name(account), mode, result)
@@ -121,6 +246,7 @@ def run_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool):
     try:
         while True:
             try:
+                _mt5_health_check(account)
                 result = trader.run_once()
                 action = result.get("action", "unknown")
                 logger.info("[Scalp:%s] %s: %s", account, mode, result)
@@ -155,6 +281,7 @@ def run_m5_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool
 
     while True:
         try:
+            _mt5_health_check(account)
             result = trader.run_once()
             action = result.get("action", "unknown")
             logger.info("[M5Scalp:%s] %s: %s", account, mode, result)
@@ -225,7 +352,7 @@ def run_daily_learning(db_path: str, notifier=None):
 
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
-    """Send bridge health status every 4 hours."""
+    """Send bridge health status every 4 hours. Auto-reconnects MT5 if needed."""
     while True:
         time.sleep(4 * 3600)  # 4 hours
         try:
@@ -233,46 +360,29 @@ def run_bridge_status(db_path: str, notifier, accounts: list):
             from metty.core.models import AccountConfig, AccountName
 
             bridge_results = {}
-            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
-            account_configs = {
-                "A": AccountConfig(
-                    name=AccountName.A,
-                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "mt5a"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "8001")),
-                    signal_group="volume",
-                ),
-                "B": AccountConfig(
-                    name=AccountName.B,
-                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                    balance=500.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "mt5b"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "8001")),
-                    signal_group="ob_os",
-                ),
-                "C": AccountConfig(
-                    name=AccountName.C,
-                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
-                    balance=1000.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "mt5c"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "8001")),
-                    signal_group="ma",
-                ),
-            }
 
             for account in accounts:
                 account = account.strip()
-                if not account or account not in account_configs:
+                if not account:
                     continue
                 try:
-                    config = account_configs[account]
+                    # Auto-reconnect before status check
+                    _mt5_health_check(account)
+
+                    cfg = get_account_config(account)
+                    config = AccountConfig(
+                        name=account,
+                        broker_login=cfg.broker_login,
+                        broker_server=cfg.broker_server,
+                        balance=cfg.initial_balance,
+                        leverage=cfg.leverage,
+                        bridge_host=cfg.bridge_host,
+                        bridge_port=cfg.bridge_internal_port,
+                        signal_group=cfg.signal_group,
+                    )
                     bridge = MT5Bridge(config)
                     info = bridge.fetch_account_info_sync()
-                    symbol = symbol_map.get(account, "XAUUSD")
+                    symbol = cfg.symbol
                     candles = bridge.fetch_candles_sync(symbol, "M5", 1)
                     price = float(candles["close"].iloc[-1]) if candles is not None and not candles.empty else 0
                     equity = info.equity if info else 0
@@ -285,7 +395,7 @@ def run_bridge_status(db_path: str, notifier, accounts: list):
                         "balance": balance,
                     }
                     logger.info("[BridgeStatus] %s: connected, %s=%.2f, equity=%.2f, balance=%.2f",
-                                account, symbol, price, equity, balance)
+                                cfg.display_name, symbol, price, equity, balance)
                 except Exception as e:
                     bridge_results[account] = {"connected": False}
                     logger.warning("[BridgeStatus] %s: disconnected (%s)", account, e)
@@ -350,6 +460,13 @@ def main():
     logger.info("Phase: %s | Accounts: %s | DB: %s", phase, accounts, db_path)
     logger.info("Collector interval: %ds | Trader interval: %ds | Dry run: %s",
                 collect_interval, trade_interval, dry_run)
+
+    # Auto-login to MT5 before starting trading loops
+    # After container restart, MT5 terminal needs login() to connect to broker
+    logger.info("=== Auto-login MT5 for all accounts ===")
+    login_results = ensure_mt5_logged_in(accounts)
+    logged_in = sum(1 for v in login_results.values() if v)
+    logger.info("MT5 auto-login: %d/%d accounts logged in", logged_in, len(accounts))
 
     scalp_enabled = os.environ.get("SCALP_ENABLED", "0") == "1"
     scalp_interval = int(os.environ.get("SCALP_INTERVAL", "60"))

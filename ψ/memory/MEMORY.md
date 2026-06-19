@@ -49,6 +49,8 @@
 - [Partial TP Bug Fix + Analysis](learnings/2026-06-07_partial-tp-bug-fix-and-analysis.md) — tp1_ratio hardcoded to 0.5 fixed in 3 traders; Option C estimation +$14,698 but M5 candle data shows tighter scale-in SL
 - [v4 Deploy + Partial TP + Feature Validation](learnings/2026-06-07_v4-deploy-partial-tp-feature-validation.md) — v4 deployed to production, partial TP on Account C; feature pipeline needs single source of truth; manual deploy error-prone
 - [Trading Philosophy: Trend-Following Only](learnings/2026-06-08_trading-philosophy-trend-following.md) — counter-trend = ห้าม (SELL pullback in uptrend), reversal = ยอมได้ (overbought + lower low), ranging = พัก (ADX<25 no trade), ML must learn trend_alignment feature
+- [X11 Lock + Watchdog Pattern](learnings/2026-06-19_x11-lock-watchdog-pattern.md) — Docker restart preserves /tmp/ state; stale X11 lock crashes KasmVNC; cleanup + watchdog for MT5 recovery
+- [Dynamic Multi-Account Registry](learnings/2026-06-19_dynamic-multi-account-registry.md) — AccountInfo dataclass from env vars; new account = env vars + docker-compose only; zero code changes
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
@@ -59,3 +61,4 @@
 - [2026-06-05 ML Data Pipeline Fix + Counter-Trend](retrospectives/2026-06/05/20.03_ml-data-pipeline-fix-counter-trend.md) — ml_loss_proba NULL bug fix, counter-trend hard block + mean-reversion exception, deploy
 - [2026-06-07 Data Integrity Trading Params](retrospectives/2026-06/07/08.48_data-integrity-trading-params.md) — 4 VPS deploys to fix data chain; backfill must UPDATE not just INSERT; 100% coverage on 10,167 trade_outcomes
 - [2026-06-07 v4 Deploy + Partial TP + Cleanup](retrospectives/2026-06/07/19.11_v4-deploy-partial-tp-cleanup.md) — regime_encoded fix, v4>v5 backtest, partial TP on Account C, tp1_ratio bug fix, model cleanup
+- [2026-06-19 Entrypoint Watchdog + X11 Lock Fix](retrospectives/2026-06/19/21.34_entrypoint-watchdog-x11-lock-fix.md) — stale X11 lock crashes KasmVNC on restart; Phase 0 cleanup + Phase 4 watchdog; multi-account registry deployed

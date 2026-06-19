@@ -426,28 +426,55 @@ class M5ScalpTrader:
             return risk_per_trade_size(equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE)
 
     def _check_existing_m5_scalp_position(self) -> bool:
-        """Check if there's already an open M5 scalp position for this account."""
+        """Check if there's already an open M5 scalp position for this account.
+
+        Uses MT5 as PRIMARY source of truth — same pattern as LiveTrader.
+        If MT5 has no position at all, closes DB ghost trades and returns False.
+        If MT5 has a position, checks DB for M5 scalp strategy trades.
+        """
+        # Step 1: Check MT5 for any open position (source of truth)
         try:
-            conn = None
-            try:
-                from metty.core.db import get_connection
-                conn = get_connection(self.db_path)
-                rows = conn.execute(
-                    """SELECT id, strategy_id, trading_mode FROM live_trades
-                       WHERE is_open = 1 AND account_id = ?""",
-                    (self.account_id,),
-                ).fetchall()
-                for row in rows:
-                    strategy = row[1] if len(row) > 1 else ""
-                    mode = row[2] if len(row) > 2 else ""
-                    if strategy == self.strategy_id or mode == "m5_scalp":
-                        return True
-            finally:
-                if conn:
-                    conn.close()
+            import rpyc
+            from metty.core.account_registry import get_account_config
+
+            cfg = get_account_config(self.account)
+            conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
+            positions = conn.root.positions_get(symbol=cfg.symbol)
+            conn.close()
+
+            if positions is None or len(positions) == 0:
+                # MT5 says no position — close any DB ghost trades
+                open_trades = get_open_trades(self.account_id, self.db_path)
+                if open_trades:
+                    logger.warning(
+                        "[M5Scalp:%s] %d ghost trades in DB (is_open=1 but no MT5 position) — closing them",
+                        self.display_name, len(open_trades),
+                    )
+                    from metty.core.db import close_ghost_trades
+                    closed = close_ghost_trades(self.account_id, self.db_path)
+                    if closed:
+                        logger.info("[M5Scalp:%s] Closed %d ghost trades", self.display_name, closed)
+                return False
+
+            # MT5 has a position — check if it's an M5 scalp trade in DB
+            open_trades = get_open_trades(self.account_id, self.db_path)
+            for trade in open_trades:
+                strategy = trade.get("strategy_id", "") if "strategy_id" in trade else ""
+                mode = trade.get("trading_mode", "") if "trading_mode" in trade else ""
+                if strategy == self.strategy_id or mode == "m5_scalp":
+                    return True
+            return False
+
         except Exception as e:
-            logger.error("[M5Scalp:%s] Position check error: %s", self.display_name, e)
-        return False
+            logger.warning("[M5Scalp:%s] MT5 position check failed: %s — falling back to DB", self.display_name, e)
+            # Fallback to DB only if MT5 is unreachable
+            open_trades = get_open_trades(self.account_id, self.db_path)
+            for trade in open_trades:
+                strategy = trade.get("strategy_id", "") if "strategy_id" in trade else ""
+                mode = trade.get("trading_mode", "") if "trading_mode" in trade else ""
+                if strategy == self.strategy_id or mode == "m5_scalp":
+                    return True
+            return False
 
     def _compute_tp_levels(self, entry_price: float, atr: float, direction: str) -> list[dict]:
         """Compute 4-level TP targets for position scaling.

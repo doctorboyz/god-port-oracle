@@ -251,48 +251,35 @@ class LiveTrader:
             self._sentiment_cache_time = now
         return self._sentiment_cache
 
-    def _get_current_spread(self) -> float:
-        """Get current spread from MT5 bridge. Returns 0.0 if unavailable."""
+    def _get_current_spread(self) -> float | None:
+        """Get current spread from MT5 bridge. Returns None if unavailable.
+
+        Callers should skip the cycle if spread is None — using 0.0 would
+        calculate stop-loss too tight, risking premature SL hits.
+        """
         try:
             from metty.bridge.client import MT5Bridge
-            from metty.core.models import AccountConfig, AccountName
-            account_configs = {
-                "A": AccountConfig(
-                    name=AccountName.A,
-                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")),
-                    signal_group="volume",
-                ),
-                "B": AccountConfig(
-                    name=AccountName.B,
-                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.102"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5005")),
-                    signal_group="volume",
-                ),
-                "C": AccountConfig(
-                    name=AccountName.C,
-                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.103"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5005")),
-                    signal_group="volume",
-                ),
-            }
-            if self.account in account_configs:
-                bridge = MT5Bridge(account_configs[self.account])
-                spread = bridge.get_spread_sync("XAUUSD")
-                if spread is not None and spread >= 0:
-                    return float(spread)
+            from metty.core.account_registry import get_account_config
+            from metty.core.models import AccountConfig
+
+            cfg = get_account_config(self.account)
+            config = AccountConfig(
+                name=cfg.name,
+                broker_login=cfg.broker_login,
+                broker_server=cfg.broker_server,
+                balance=cfg.initial_balance,
+                leverage=cfg.leverage,
+                bridge_host=cfg.bridge_host,
+                bridge_port=cfg.bridge_internal_port,
+                signal_group=cfg.signal_group,
+            )
+            bridge = MT5Bridge(config)
+            spread = bridge.get_spread_sync(cfg.symbol)
+            if spread is not None and spread >= 0:
+                return float(spread)
         except Exception as e:
-            logger.debug("[Swing:%s] Spread fetch failed: %s", self.display_name, e)
-        return 0.0
+            logger.debug("[%s] Spread fetch failed: %s", self.display_name, e)
+        return None
 
     def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
         """Get minutes to next event, event type, and impact level."""
@@ -614,21 +601,34 @@ class LiveTrader:
             return "ny"
         return "asian"
 
-    def _get_equity(self) -> float:
-        """Get current account equity from MT5."""
+    def _get_equity(self) -> float | None:
+        """Get current account equity from MT5. Returns None if unavailable.
+
+        Callers should skip the cycle if equity is None — using a stale
+        hardcoded value (500.0) would produce incorrect position sizing
+        and drawdown protection.
+        """
         try:
             from metty.bridge.client import MT5Bridge
-            from metty.core.models import AccountConfig, AccountName
+            from metty.core.account_registry import get_account_config
+            from metty.core.models import AccountConfig
 
-            configs = {
-                "A": AccountConfig(name=AccountName.A, bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"), bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")), broker_login="", broker_server=""),
-                "B": AccountConfig(name=AccountName.B, bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.101"), bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5006")), broker_login="", broker_server=""),
-                "C": AccountConfig(name=AccountName.C, bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.101"), bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5007")), broker_login="", broker_server=""),
-            }
-            info = MT5Bridge(configs[self.account]).fetch_account_info_sync()
-            return info.equity if info else 500.0
-        except Exception:
-            return 500.0
+            cfg = get_account_config(self.account)
+            config = AccountConfig(
+                name=cfg.name,
+                broker_login=cfg.broker_login,
+                broker_server=cfg.broker_server,
+                balance=cfg.initial_balance,
+                leverage=cfg.leverage,
+                bridge_host=cfg.bridge_host,
+                bridge_port=cfg.bridge_internal_port,
+                signal_group=cfg.signal_group,
+            )
+            info = MT5Bridge(config).fetch_account_info_sync()
+            return info.equity if info else None
+        except Exception as e:
+            logger.debug("[%s] Equity fetch failed: %s", self.display_name, e)
+            return None
 
     def _check_existing_position(self) -> bool:
         """Check if there's an open position for this account.
@@ -642,10 +642,8 @@ class LiveTrader:
             import rpyc
             from metty.core.account_registry import get_account_config
             cfg = get_account_config(self.account)
-            host = cfg.bridge_host
-            port = cfg.bridge_port
 
-            conn = rpyc.connect(host, port, config={"sync_request_timeout": 10})
+            conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
             positions = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
             has_mt5_position = positions is not None and len(positions) > 0
@@ -845,7 +843,10 @@ class LiveTrader:
 
                 # Update drawdown protection
                 equity = self._get_equity()
-                self._drawdown_protector.record_pnl(round(pnl, 2), equity)
+                if equity is not None:
+                    self._drawdown_protector.record_pnl(round(pnl, 2), equity)
+                else:
+                    logger.warning("[%s] Equity unavailable after close — skipping drawdown update", self.display_name)
 
                 self._last_exit_time = datetime.now(timezone.utc)
 
@@ -974,7 +975,10 @@ class LiveTrader:
 
         # Update drawdown protection for TP1 close
         equity = self._get_equity()
-        self._drawdown_protector.record_pnl(round(pnl, 2), equity)
+        if equity is not None:
+            self._drawdown_protector.record_pnl(round(pnl, 2), equity)
+        else:
+            logger.warning("[%s] Equity unavailable at TP1 close — skipping drawdown update", self.display_name)
 
         # Clean up MFE/MAE state for position 1
         self._mfe_mae_state.pop(trade_id, None)
@@ -1184,6 +1188,9 @@ class LiveTrader:
 
         # 4a2. Drawdown protection check (before any risk-sensitive operations)
         equity = self._get_equity()
+        if equity is None:
+            logger.warning("[%s] Equity unavailable — skipping cycle (MT5 may be disconnected)", self.display_name)
+            return {"action": "skip", "reason": "equity unavailable (MT5 disconnected?)"}
         dd_can_trade, dd_reason = self._drawdown_protector.check(equity)
         if not dd_can_trade:
             log_circuit_break(logger, "DRAWDOWN_BLOCK", account=self.account, reason=dd_reason)
@@ -1267,6 +1274,9 @@ class LiveTrader:
         ml_model_used = None
         ml_risk_reason = None
         _live_spread = self._get_current_spread()
+        if _live_spread is None:
+            logger.warning("[%s] Spread unavailable — skipping cycle (MT5 may be disconnected)", self.display_name)
+            return {"action": "skip", "reason": "spread unavailable (MT5 disconnected?)", "signal": signal}
 
         # Circuit breaker: if ML filter has failed too many times, stop trading
         if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:

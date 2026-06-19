@@ -74,7 +74,8 @@ ENCODED_CATEGORICAL_MAP = {
     "d1_trend": "d1_trend_encoded",              # bullish=1, bearish=-1, other=0
     "h4_trend": "h4_trend_encoded",               # bullish=1, bearish=-1, other=0
     "mfi_signal": "mfi_signal_encoded",           # oversold=1, neutral=0, overbought=-1
-    "regime": "regime_encoded",                   # trending=1, ranging=0, volatile=2
+    "regime": "regime_encoded",                   # trending=1, ranging=0, volatile=2 (ordinal, kept for v4 compat)
+    # One-hot regime columns are added separately in transform() for v6+
 }
 
 # Derived features — computed by FeatureEngineer.transform() from other features
@@ -84,12 +85,15 @@ DERIVED_FEATURES = [
     "boll_pct_b_clipped",  # boll_pct_b clipped to [0, 1]
 ]
 
+# One-hot regime columns produced by FeatureEngineer.transform() (v6+)
+REGIME_ONEHOT_FEATURES = ["regime_trending", "regime_ranging", "regime_volatile"]
+
 # Full list of all encoded/derived features produced by FeatureEngineer
 # (excludes one-hot session columns which are dynamic)
 # NOTE: session_strength is already in ALL_NUMERIC_FEATURES (via SENTIMENT_FEATURES),
 # so we don't duplicate it here. ENCODED_FEATURES lists features that are ONLY
 # produced by FeatureEngineer.transform() and NOT in ALL_NUMERIC_FEATURES.
-ENCODED_FEATURES_ONLY = list(ENCODED_CATEGORICAL_MAP.values()) + DERIVED_FEATURES
+ENCODED_FEATURES_ONLY = list(ENCODED_CATEGORICAL_MAP.values()) + REGIME_ONEHOT_FEATURES + DERIVED_FEATURES
 # For backward compat: the full list including session_strength (used by trainer)
 ENCODED_FEATURES = ENCODED_FEATURES_ONLY + ["session_strength"]
 
@@ -198,15 +202,16 @@ class FeatureEngineer:
             mfi_map = {"oversold": 1, "neutral": 0, "overbought": -1}
             result["mfi_signal_encoded"] = result["mfi_signal"].map(mfi_map).fillna(0).astype(int)
 
-        # Encode regime: trending=1, ranging=0, volatile=2, unknown=0
-        # NOTE: Previous encoding used volatile=-1 (ordinal implying volatile < ranging),
-        # which was semantically wrong. Changed to volatile=2 so all non-ranging regimes
-        # have positive values. This is still ordinal but avoids the misleading negative.
-        # TODO: Switch to one-hot (regime_trending, regime_ranging, regime_volatile) in v6
-        #       when we retrain from scratch and can change feature count.
+        # Encode regime: ordinal (v4 compat) + one-hot (v6+)
+        # Ordinal: trending=1, ranging=0, volatile=2 — kept for backward compat with v4 model
+        # One-hot: regime_trending, regime_ranging, regime_volatile — used by v6+ models
         if "regime" in result.columns:
             regime_map = {"trending": 1, "ranging": 0, "volatile": 2}
             result["regime_encoded"] = result["regime"].map(regime_map).fillna(0).astype(int)
+            # One-hot encoding for v6+ models (avoids ordinal assumption)
+            result["regime_trending"] = (result["regime"] == "trending").astype(int)
+            result["regime_ranging"] = (result["regime"] == "ranging").astype(int)
+            result["regime_volatile"] = (result["regime"] == "volatile").astype(int)
 
         # Fill NaN in numeric features with median (if fitted) or 0
         # Also force all numeric features to float dtype (SQLite may return mixed types)
@@ -246,6 +251,10 @@ class FeatureEngineer:
                 cols.append(col)
         # Encoded categorical features
         for col in ["price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded", "mfi_signal_encoded", "regime_encoded"]:
+            if col in df.columns:
+                cols.append(col)
+        # One-hot regime columns (v6+)
+        for col in ["regime_trending", "regime_ranging", "regime_volatile"]:
             if col in df.columns:
                 cols.append(col)
         # One-hot session columns (use cached order if available)
