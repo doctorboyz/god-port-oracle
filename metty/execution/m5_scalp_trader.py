@@ -50,7 +50,7 @@ from shared.models import SignalType, TradingMode
 
 logger = logging.getLogger(__name__)
 
-ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3}
+ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
 CONTRACT_SIZE = 100.0  # 1 lot XAUUSD = 100 oz
 
 # ML filter circuit breaker: stop trading after N consecutive ML failures
@@ -257,7 +257,7 @@ class M5ScalpTrader:
     def _fetch_candles(self, bridge: MT5Bridge) -> Optional[dict[str, pd.DataFrame]]:
         """Fetch M5 candles from MT5 bridge using an already-connected bridge."""
         try:
-            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
+            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD", "D": "XAUUSD"}
             symbol = symbol_map.get(self.account, "XAUUSD")
             m5 = bridge.fetch_candles_sync(symbol, "M5", 500)
 
@@ -367,7 +367,7 @@ class M5ScalpTrader:
     def _get_spread(self, bridge: MT5Bridge) -> Optional[float]:
         """Get current spread from real-time bid/ask using already-connected bridge."""
         try:
-            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD"}
+            symbol_map = {"A": "XAUUSDm", "B": "XAUUSD", "C": "XAUUSD", "D": "XAUUSD"}
             symbol = symbol_map.get(self.account, "XAUUSD")
             return bridge.get_spread_sync(symbol)
         except Exception as e:
@@ -568,7 +568,7 @@ class M5ScalpTrader:
                 from metty.bridge.client import MT5Bridge
                 from metty.core.models import AccountConfig, AccountName
 
-                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
@@ -618,7 +618,7 @@ class M5ScalpTrader:
                 from metty.bridge.client import MT5Bridge
                 from metty.core.models import AccountConfig, AccountName
 
-                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 

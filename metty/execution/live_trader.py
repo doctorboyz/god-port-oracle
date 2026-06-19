@@ -50,10 +50,10 @@ from shared.models import Signal, SignalType, TradingMode
 logger = logging.getLogger(__name__)
 
 # Account IDs in the database
-ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3}
+ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
 
 # Risk per trade by account (conservative for demo)
-ACCOUNT_RISK = {"A": 0.01, "B": 0.02, "C": 0.02}
+ACCOUNT_RISK = {"A": 0.01, "B": 0.02, "C": 0.02, "D": 0.02}
 
 # Contract size: 1 lot XAUUSD = 100 oz
 CONTRACT_SIZE = 100.0
@@ -856,7 +856,7 @@ class LiveTrader:
                         from metty.bridge.client import MT5Bridge
                         from metty.core.models import AccountConfig, AccountName
 
-                        port_map = {"A": 5005, "B": 5006, "C": 5007}
+                        port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
                         host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                         port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
@@ -989,7 +989,7 @@ class LiveTrader:
                 from metty.bridge.client import MT5Bridge
                 from metty.core.models import AccountConfig, AccountName
 
-                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
@@ -1056,7 +1056,7 @@ class LiveTrader:
                 from metty.bridge.client import MT5Bridge
                 from metty.core.models import AccountConfig, AccountName
 
-                port_map = {"A": 5005, "B": 5006, "C": 5007}
+                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
@@ -1454,7 +1454,7 @@ class LiveTrader:
             from metty.bridge.client import MT5Bridge
             from metty.core.models import AccountConfig, AccountName
 
-            port_map = {"A": 5005, "B": 5006, "C": 5007}
+            port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
             host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
             port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 

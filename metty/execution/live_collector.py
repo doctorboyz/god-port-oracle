@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Account IDs for live data collection
 # These correspond to accounts in the 'accounts' table
-LIVE_ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3}
+LIVE_ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
 
 
 def _classify_session(timestamp: pd.Timestamp | datetime) -> str:
