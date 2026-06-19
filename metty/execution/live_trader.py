@@ -26,7 +26,7 @@ import pandas as pd
 from broky.data.calendar import fetch_calendar, should_avoid_trading
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
-from broky.risk.drawdown_protection import DrawdownProtector, ACCOUNT_DRAWDOWN_CONFIGS, BUY_MIN_CONFIDENCE
+from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_config, get_buy_min_confidence
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -168,7 +168,7 @@ class LiveTrader:
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
         )
         # Drawdown protection (stricter for real accounts)
-        dd_config = ACCOUNT_DRAWDOWN_CONFIGS.get(self.account, ACCOUNT_DRAWDOWN_CONFIGS["B"])
+        dd_config = get_drawdown_config(self.account)
         self._drawdown_protector = DrawdownProtector(
             initial_equity=float(os.environ.get(f"INITIAL_EQUITY_{self.account}", "500")),
             daily_limit_pct=dd_config["daily_limit_pct"],
@@ -179,7 +179,7 @@ class LiveTrader:
         # BUY confidence filter (stricter for real accounts)
         self._buy_min_confidence = float(os.environ.get(
             f"BUY_MIN_CONFIDENCE_{self.account}",
-            str(BUY_MIN_CONFIDENCE.get(self.account, 0.45)),
+            str(get_buy_min_confidence(self.account)),
         ))
         self._calendar_cache: list = []
         self._calendar_cache_time: float = 0

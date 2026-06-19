@@ -7,10 +7,50 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-class AccountName(str, Enum):
+class AccountName(str):
+    """Dynamic account name — accepts any string (A, B, C, D, ...).
+
+    Backward-compatible with Enum usage:
+        AccountName.A       → "A"  (class constant)
+        AccountName["A"]    → "A"  (bracket access)
+        AccountName("D")    → "D"  (dynamic — new accounts)
+        AccountName("A") == "A"  → True  (string comparison)
+
+    Adding a new account requires NO code changes here — just add
+    it to the ACCOUNTS env var and the registry picks it up.
+    """
+
+    # Backward-compatible constants (used throughout codebase)
     A = "A"
     B = "B"
     C = "C"
+
+    def __new__(cls, value: str) -> "AccountName":
+        return str.__new__(cls, value)
+
+    @classmethod
+    def _missing_(cls, value: str) -> "AccountName":
+        """Allow dynamic account names like AccountName("D")."""
+        return AccountName(value)
+
+    # Enum-like interface for compatibility
+    @classmethod
+    def values(cls) -> list[str]:
+        """Return known account names (for display only)."""
+        return [cls.A, cls.B, cls.C]
+
+    def __repr__(self) -> str:
+        return f"AccountName('{self}')"
+
+    @classmethod
+    def __class_getitem__(cls, key: str) -> "AccountName":
+        """Enum-compatible bracket access: AccountName["A"] → AccountName("A").
+
+        This preserves backward compat with the old Enum syntax.
+        Note: In Step 3 (registry refactor), these call sites will be
+        removed entirely, so this is a temporary bridge.
+        """
+        return cls(key)
 
 
 class SignalGroup(str, Enum):
@@ -37,7 +77,7 @@ class ExitReason(str, Enum):
 
 class AccountConfig(BaseModel):
     """Configuration for a single MT5 demo account."""
-    name: AccountName
+    name: str
     broker_login: str = ""
     broker_password: str = ""
     broker_server: str = "Exness-MT5"
@@ -150,4 +190,4 @@ class AccountInfo(BaseModel):
     free_margin: float
     leverage: int
     currency: str = "USD"
-    name: AccountName
+    name: str

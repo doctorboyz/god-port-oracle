@@ -306,34 +306,86 @@ class DrawdownProtector:
         }
 
 
-# Per-account drawdown protection configs
-# Account A = real money ($101) → strict protection
-# Account B/C = demo → lenient (let demo run freely for data collection)
-ACCOUNT_DRAWDOWN_CONFIGS = {
-    "A": {
-        "daily_limit_pct": 0.20,     # 20% daily loss = ~$20
-        "weekly_limit_pct": 0.30,    # 30% weekly loss = ~$30
-        "account_limit_pct": 0.30,   # 30% total drawdown → stop at ~$70 equity
-        "cooldown_hours": 4,         # 4 hour cooldown after daily/weekly limit hit
-    },
-    "B": {
-        "daily_limit_pct": 0.10,     # 10% daily loss (demo still needs some limit)
-        "weekly_limit_pct": 0.20,    # 20% weekly loss
-        "account_limit_pct": 0.50,   # 50% total drawdown
-        "cooldown_hours": 2,
-    },
-    "C": {
-        "daily_limit_pct": 0.10,
-        "weekly_limit_pct": 0.20,
-        "account_limit_pct": 0.50,
-        "cooldown_hours": 2,
-    },
-}
+def get_drawdown_config(account: str) -> dict:
+    """Get drawdown protection config for an account from environment variables.
 
-# BUY signal confidence filter for real accounts
-# BUY has lower WR than SELL, so require higher confidence
-BUY_MIN_CONFIDENCE = {
-    "A": 0.50,  # Real account: stricter BUY filter (0.50 vs 0.45 for SELL)
-    "B": 0.45,  # Demo: same as global
-    "C": 0.45,  # Demo: same as global
-}
+    Falls back to defaults from account_registry if env vars not set.
+    Account A (real) defaults: daily=20%, weekly=30%, account=30%, cooldown=4h
+    Other accounts (demo) defaults: daily=10%, weekly=20%, account=50%, cooldown=2h
+    """
+    from metty.core.account_registry import get_account_config
+
+    try:
+        info = get_account_config(account)
+        return {
+            "daily_limit_pct": info.drawdown_daily_limit_pct,
+            "weekly_limit_pct": info.drawdown_weekly_limit_pct,
+            "account_limit_pct": info.drawdown_account_limit_pct,
+            "cooldown_hours": info.drawdown_cooldown_hours,
+        }
+    except (ValueError, ImportError):
+        # Fallback: demo-friendly defaults for unknown accounts
+        return {
+            "daily_limit_pct": 0.10,
+            "weekly_limit_pct": 0.20,
+            "account_limit_pct": 0.50,
+            "cooldown_hours": 2,
+        }
+
+
+def get_buy_min_confidence(account: str) -> float:
+    """Get minimum BUY confidence threshold for an account.
+
+    Account A (real) defaults to 0.50 (stricter), others to 0.45.
+    Override with BUY_MIN_CONFIDENCE_<NAME> env var.
+    """
+    from metty.core.account_registry import get_account_config
+
+    try:
+        info = get_account_config(account)
+        return info.buy_min_confidence
+    except (ValueError, ImportError):
+        return 0.45
+
+
+# Backward-compatible dicts for code that still uses dict lookup
+# These are built from registry on first access, not hardcoded
+_ACCOUNT_DRAWDOWN_CONFIGS_CACHE: dict | None = None
+_BUY_MIN_CONFIDENCE_CACHE: dict | None = None
+
+
+def ACCOUNT_DRAWDOWN_CONFIGS() -> dict:
+    """Lazy-loaded drawdown configs from registry (backward compat)."""
+    global _ACCOUNT_DRAWDOWN_CONFIGS_CACHE
+    if _ACCOUNT_DRAWDOWN_CONFIGS_CACHE is None:
+        try:
+            from metty.core.account_registry import get_active_accounts
+            _ACCOUNT_DRAWDOWN_CONFIGS_CACHE = {
+                name: get_drawdown_config(name)
+                for name in get_active_accounts()
+            }
+        except ImportError:
+            _ACCOUNT_DRAWDOWN_CONFIGS_CACHE = {
+                "A": {"daily_limit_pct": 0.20, "weekly_limit_pct": 0.30,
+                       "account_limit_pct": 0.30, "cooldown_hours": 4},
+                "B": {"daily_limit_pct": 0.10, "weekly_limit_pct": 0.20,
+                       "account_limit_pct": 0.50, "cooldown_hours": 2},
+                "C": {"daily_limit_pct": 0.10, "weekly_limit_pct": 0.20,
+                       "account_limit_pct": 0.50, "cooldown_hours": 2},
+            }
+    return _ACCOUNT_DRAWDOWN_CONFIGS_CACHE
+
+
+def BUY_MIN_CONFIDENCE() -> dict:
+    """Lazy-loaded BUY confidence thresholds from registry (backward compat)."""
+    global _BUY_MIN_CONFIDENCE_CACHE
+    if _BUY_MIN_CONFIDENCE_CACHE is None:
+        try:
+            from metty.core.account_registry import get_active_accounts
+            _BUY_MIN_CONFIDENCE_CACHE = {
+                name: get_buy_min_confidence(name)
+                for name in get_active_accounts()
+            }
+        except ImportError:
+            _BUY_MIN_CONFIDENCE_CACHE = {"A": 0.50, "B": 0.45, "C": 0.45}
+    return _BUY_MIN_CONFIDENCE_CACHE

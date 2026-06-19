@@ -4,9 +4,9 @@
 # gmag11 provides: Wine + MT5 terminal + Python 3.9 + VNC
 # We add: custom RPyC bridge server (mt5_bridge_server.py) + numpy fix
 #
-# Container names are short: mt5a, mt5b, mt5c
-# Bridge port 8001 inside container → mapped to 5005/5006/5007 externally
-# VNC port 3000 inside container → mapped to 5900/5901/5902 externally
+# Container names are short: mt5a, mt5b, mt5c, mt5d
+# Bridge port 8001 inside container → mapped to 5005/5006/5007/5008 externally
+# VNC port 3000 inside container → mapped to 5900/5901/5902/5903 externally
 #
 # First-time setup:
 #   1. docker compose -f docker-compose.vps.yml up -d
@@ -65,6 +65,25 @@ services:
       - mt5-config-c:/config
     restart: unless-stopped
 
+  # ═══ Account D: V6-Demo2 — Demo Pro $500 ════════════════════════════════
+  # To activate: set MT5_LOGIN_D, MT5_PASSWORD_D, MT5_SERVER_D in .env
+  # and change ACCOUNTS to A,B,C,D
+  mt5d:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    container_name: mt5d
+    environment:
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_D:-} /server:${MT5_SERVER_D:-Exness-MT5Trial7}
+      - CUSTOM_USER=mt5user
+      - PASSWORD=mt5password
+    ports:
+      - "5903:3000"  # VNC web interface
+      - "5008:8001"  # RPyC bridge
+    volumes:
+      - mt5-config-d:/config
+    restart: unless-stopped
+
   oracle-engine:
     build:
       context: .
@@ -120,6 +139,25 @@ services:
       - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
       - RR_SCALE_IN_B=${RR_SCALE_IN_B:-2.5}
       - RR_SCALE_IN_C=${RR_SCALE_IN_C:-2.5}
+      # ═══ Account D config (V6-Demo2) ═══════════════════════════════════
+      - MAX_POSITIONS_D=${MAX_POSITIONS_D:-5}
+      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.5}
+      - RR_RATIO_D=${RR_RATIO_D:-2.5}
+      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
+      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
+      - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
+      - SCALP_MAX_SPREAD_D=${SCALP_MAX_SPREAD_D:-35}
+      - PARTIAL_TP_ENABLED_D=${PARTIAL_TP_ENABLED_D:-0}
+      - TP1_RATIO_D=${TP1_RATIO_D:-0.5}
+      - RR_SCALE_IN_D=${RR_SCALE_IN_D:-2.5}
+      - INITIAL_BALANCE_D=${INITIAL_BALANCE_D:-500}
+      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-500}
+      - LEVERAGE_D=${LEVERAGE_D:-500}
+      - DRAWDOWN_DAILY_LIMIT_D=${DRAWDOWN_DAILY_LIMIT_D:-0.10}
+      - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.20}
+      - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.50}
+      - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-2}
+      # ═══ MT5 Bridge credentials ══════════════════════════════════════════
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
       - MT5_SERVER_A=${MT5_SERVER_A:-Exness-MT5Trial17}
@@ -135,6 +173,12 @@ services:
       - MT5_SERVER_C=${MT5_SERVER_C:-Exness-MT5Trial7}
       - MT5_BRIDGE_C_HOST=mt5c
       - MT5_BRIDGE_C_PORT=8001
+      - MT5_LOGIN_D=${MT5_LOGIN_D:-}
+      - MT5_PASSWORD_D=${MT5_PASSWORD_D:-}
+      - MT5_SERVER_D=${MT5_SERVER_D:-Exness-MT5Trial7}
+      - MT5_BRIDGE_D_HOST=mt5d
+      - MT5_BRIDGE_D_PORT=8001
+      - MT5_SYMBOL_D=${MT5_SYMBOL_D:-XAUUSD}
       - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
@@ -147,6 +191,8 @@ services:
         condition: service_healthy
       mt5c:
         condition: service_healthy
+      mt5d:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
@@ -155,6 +201,8 @@ volumes:
   mt5-config-b:
     driver: local
   mt5-config-c:
+    driver: local
+  mt5-config-d:
     driver: local
   oracle-data:
     driver: local
