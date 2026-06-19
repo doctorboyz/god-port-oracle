@@ -970,6 +970,31 @@ def get_open_trades(
         conn.close()
 
 
+def close_ghost_trades(
+    account_id: int,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Close ghost trades: DB has is_open=1 but no MT5 ticket.
+
+    These are trades that were recorded in DB but never actually
+    sent to MT5 (ticket is NULL). Returns the number of trades closed.
+    """
+    conn = get_connection(db_path)
+    try:
+        from datetime import datetime as _dt
+        now = _dt.utcnow().isoformat()
+        cursor = conn.execute(
+            """UPDATE live_trades
+               SET is_open = 0, exit_reason = 'ghost_no_mt5_ticket', exit_time = ?
+               WHERE account_id = ? AND is_open = 1 AND ticket IS NULL""",
+            (now, account_id),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
 def close_live_trade(
     trade_id: int,
     exit_price: float,

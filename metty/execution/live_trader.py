@@ -631,25 +631,44 @@ class LiveTrader:
             return 500.0
 
     def _check_existing_position(self) -> bool:
-        """Check if there's an open position or trade for this account."""
-        # Check DB for open trades
-        open_trades = get_open_trades(self.account_id, self.db_path)
-        if open_trades:
-            return True
+        """Check if there's an open position for this account.
 
-        # Check MT5 for open positions
+        Uses MT5 as the PRIMARY source of truth — only returns True
+        if MT5 actually has an open position. DB ghost trades
+        (is_open=1 but no MT5 ticket) are closed automatically.
+        """
+        # Check MT5 for open positions (source of truth)
         try:
             import rpyc
-            port_map = {"A": 5005, "B": 5006, "C": 5007}
-            host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
-            port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
+            from metty.core.account_registry import get_account_config
+            cfg = get_account_config(self.account)
+            host = cfg.bridge_host
+            port = cfg.bridge_port
 
             conn = rpyc.connect(host, port, config={"sync_request_timeout": 10})
-            positions = conn.root.positions_get(symbol="XAUUSD")
+            positions = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
-            return positions is not None and len(positions) > 0
-        except Exception:
-            return False
+            has_mt5_position = positions is not None and len(positions) > 0
+
+            if not has_mt5_position:
+                # MT5 says no position — close any DB ghost trades
+                open_trades = get_open_trades(self.account_id, self.db_path)
+                if open_trades:
+                    logger.warning(
+                        "[%s] %d ghost trades in DB (is_open=1 but no MT5 position) — closing them",
+                        self.display_name, len(open_trades),
+                    )
+                    from metty.core.db import close_ghost_trades
+                    closed = close_ghost_trades(self.account_id, self.db_path)
+                    if closed:
+                        logger.info("[%s] Closed %d ghost trades", self.display_name, closed)
+
+            return has_mt5_position
+        except Exception as e:
+            logger.warning("[%s] MT5 position check failed: %s — falling back to DB", self.display_name, e)
+            # Fallback to DB only if MT5 is unreachable
+            open_trades = get_open_trades(self.account_id, self.db_path)
+            return len(open_trades) > 0
 
     def _check_cooldown(self) -> bool:
         """Check if we're still in cooldown after last exit."""
