@@ -1,13 +1,14 @@
 #!/bin/bash
 set -e
 
-# MT5 Bridge Entrypoint — 3-phase startup
+# MT5 Bridge Entrypoint — 4-phase startup
 #
-# Phase 0: VNC services (nginx + KasmVNC)
+# Phase 0: VNC services (nginx + KasmVNC) — cleans stale X11 locks on restart
 # Phase 1: gmag11 initialization (installs Wine, MT5, Python — takes 2-5 min)
 # Phase 1.5: Fix numpy + install rpyc (needs Xvfb running from Phase 1)
 # Phase 2: Start MT5 terminal (user must login manually via VNC the first time)
 # Phase 3: Start custom RPyC bridge server in Wine Python
+# Phase 4: Watchdog — auto-restart MT5 terminal if it crashes (max 10 retries)
 #
 # The bridge server runs as Wine Python (not Linux Python) because
 # MetaTrader5 package only works under Wine where it can talk to MT5 terminal.
@@ -73,6 +74,12 @@ export XDG_RUNTIME_DIR=/config/.XDG
 # Create X11 socket directory (KasmVNC needs this as root before dropping privileges)
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
+
+# CRITICAL: Remove stale X11 lock files from previous container runs.
+# Without this, KasmVNC fails with "Server is already active for display 99"
+# on container restart, which kills X11 → MT5 terminal crash loop (10053).
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
+echo "[Phase 0] Cleaned stale X11 lock files."
 
 nginx &
 echo "[Phase 0] nginx started."
@@ -180,6 +187,47 @@ echo "Bridge: port 8001 (or mapped port)"
 echo ""
 echo "NOTE: If this is a new container, login to MT5 via VNC first!"
 echo "The bridge server cannot connect to MT5 until a successful manual login."
+
+# Phase 4: Watchdog — auto-restart MT5 terminal if it crashes.
+# MT5 under Wine can crash (error 10053 = WSAECONNABORTED) on container restart
+# when the broker server rejects the connection. The watchdog detects this and
+# restarts the terminal, giving it time to reconnect.
+MT5_CRASH_COUNT=0
+MT5_MAX_CRASHES=10  # Give up after 10 rapid crashes (prevent infinite loop)
+MT5_CRASH_WINDOW=60  # Reset crash counter after 60s of stability
+
+echo "[Phase 4] Starting MT5 terminal watchdog..."
+while true; do
+    # Check if terminal64.exe is running
+    if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
+        MT5_CRASH_COUNT=$((MT5_CRASH_COUNT + 1))
+        echo "[Phase 4] MT5 terminal not running (crash #$MT5_CRASH_COUNT). Restarting..."
+
+        if [ $MT5_CRASH_COUNT -ge $MT5_MAX_CRASHES ]; then
+            echo "[Phase 4] ERROR: MT5 terminal crashed $MT5_MAX_CRASHES times. Stopping watchdog."
+            echo "[Phase 4] Login via VNC may be required: http://localhost:3000"
+            break
+        fi
+
+        # Remove stale X11 lock before restart (prevent display conflict)
+        rm -f /tmp/.X99-lock 2>/dev/null
+
+        if [ -f "${MT5_FILE}" ]; then
+            as_abc wine "${MT5_FILE}" ${MT5_CMD_OPTIONS:-} &
+            sleep 30
+        fi
+    else
+        # Terminal is running — reset crash counter after stability window
+        if [ $MT5_CRASH_COUNT -gt 0 ]; then
+            sleep $MT5_CRASH_WINDOW
+            if pgrep -f "terminal64.exe" > /dev/null 2>&1; then
+                echo "[Phase 4] MT5 terminal stable after $MT5_CRASH_COUNT crash(es). Watchdog reset."
+                MT5_CRASH_COUNT=0
+            fi
+        fi
+    fi
+    sleep 10
+done &
 
 # Keep container running — wait for any background process
 wait
