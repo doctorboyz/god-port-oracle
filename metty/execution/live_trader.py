@@ -115,6 +115,7 @@ class LiveTrader:
             "A": int(os.environ.get("MAX_POSITIONS_A", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "B": int(os.environ.get("MAX_POSITIONS_B", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "C": int(os.environ.get("MAX_POSITIONS_C", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "D": int(os.environ.get("MAX_POSITIONS_D", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
         }
         self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
         self.account_id = ACCOUNT_IDS.get(self.account, 3)
@@ -126,16 +127,19 @@ class LiveTrader:
             "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "2.0"))),
             "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "2.0"))),
             "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "2.0"))),
+            "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "2.0"))),
         }
         per_account_rr = {
             "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.5"))),
             "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.5"))),
             "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.5"))),
+            "D": float(os.environ.get("RR_RATIO_D", os.environ.get("RR_RATIO", "2.5"))),
         }
         per_account_conf = {
             "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.45"))),
             "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.45"))),
             "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.45"))),
+            "D": float(os.environ.get("MIN_CONFIDENCE_D", os.environ.get("MIN_CONFIDENCE", "0.45"))),
         }
         if not risk_config:
             self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
@@ -146,16 +150,19 @@ class LiveTrader:
             "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
             "B": os.environ.get("PARTIAL_TP_ENABLED_B", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
             "C": os.environ.get("PARTIAL_TP_ENABLED_C", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
+            "D": os.environ.get("PARTIAL_TP_ENABLED_D", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
         }
         per_account_tp1r = {
             "A": float(os.environ.get("TP1_RATIO_A", os.environ.get("TP1_RATIO", "0.5"))),
             "B": float(os.environ.get("TP1_RATIO_B", os.environ.get("TP1_RATIO", "0.5"))),
             "C": float(os.environ.get("TP1_RATIO_C", os.environ.get("TP1_RATIO", "0.5"))),
+            "D": float(os.environ.get("TP1_RATIO_D", os.environ.get("TP1_RATIO", "0.5"))),
         }
         per_account_rrsi = {
             "A": float(os.environ.get("RR_SCALE_IN_A", os.environ.get("RR_SCALE_IN", "2.5"))),
             "B": float(os.environ.get("RR_SCALE_IN_B", os.environ.get("RR_SCALE_IN", "2.5"))),
             "C": float(os.environ.get("RR_SCALE_IN_C", os.environ.get("RR_SCALE_IN", "2.5"))),
+            "D": float(os.environ.get("RR_SCALE_IN_D", os.environ.get("RR_SCALE_IN", "2.5"))),
         }
         self.risk.partial_tp_enabled = per_account_ptp.get(self.account, self.risk.partial_tp_enabled)
         self.risk.tp1_ratio = per_account_tp1r.get(self.account, self.risk.tp1_ratio)
@@ -330,42 +337,13 @@ class LiveTrader:
         """Fetch candle data from MT5 bridge, fall back to CSV."""
         try:
             from metty.bridge.client import MT5Bridge
-            from metty.core.models import AccountConfig, AccountName
+            from metty.core.account_registry import get_bridge_config
             from broky.data.resampler import resample_timeframe
             from metty.execution.historical_collector import _normalize_columns
 
-            account_configs = {
-                "A": AccountConfig(
-                    name=AccountName.A,
-                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")),
-                    signal_group="volume",
-                ),
-                "B": AccountConfig(
-                    name=AccountName.B,
-                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                    balance=500.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5006")),
-                    signal_group="ob_os",
-                ),
-                "C": AccountConfig(
-                    name=AccountName.C,
-                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
-                    balance=1000.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5007")),
-                    signal_group="ma",
-                ),
-            }
-
-            config = account_configs.get(self.account)
-            if not config:
+            try:
+                config = get_bridge_config(self.account)
+            except ValueError:
                 logger.warning("Unknown account: %s", self.account)
                 return None
 

@@ -111,6 +111,7 @@ class M5ScalpTrader:
             "A": int(os.environ.get("MAX_POSITIONS_A", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "B": int(os.environ.get("MAX_POSITIONS_B", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "C": int(os.environ.get("MAX_POSITIONS_C", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
+            "D": int(os.environ.get("MAX_POSITIONS_D", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
         }
         self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
         self.account_id = ACCOUNT_IDS.get(self.account, 1)
@@ -120,21 +121,25 @@ class M5ScalpTrader:
             "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "1.5"))),
             "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "1.5"))),
             "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "1.5"))),
+            "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "1.5"))),
         }
         per_account_rr = {
             "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.0"))),
             "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.0"))),
             "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.0"))),
+            "D": float(os.environ.get("RR_RATIO_D", os.environ.get("RR_RATIO", "2.0"))),
         }
         per_account_conf = {
             "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.50"))),
             "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.50"))),
             "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.50"))),
+            "D": float(os.environ.get("MIN_CONFIDENCE_D", os.environ.get("MIN_CONFIDENCE", "0.50"))),
         }
         per_account_spread = {
             "A": float(os.environ.get("M5_MAX_SPREAD_A", os.environ.get("M5_MAX_SPREAD", "40"))),
             "B": float(os.environ.get("M5_MAX_SPREAD_B", os.environ.get("M5_MAX_SPREAD", "30"))),
             "C": float(os.environ.get("M5_MAX_SPREAD_C", os.environ.get("M5_MAX_SPREAD", "30"))),
+            "D": float(os.environ.get("M5_MAX_SPREAD_D", os.environ.get("M5_MAX_SPREAD", "30"))),
         }
         if not risk_config:
             self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
@@ -146,16 +151,19 @@ class M5ScalpTrader:
             "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
             "B": os.environ.get("PARTIAL_TP_ENABLED_B", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
             "C": os.environ.get("PARTIAL_TP_ENABLED_C", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
+            "D": os.environ.get("PARTIAL_TP_ENABLED_D", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
         }
         per_account_tp1r = {
             "A": float(os.environ.get("TP1_RATIO_A", os.environ.get("TP1_RATIO", "0.5"))),
             "B": float(os.environ.get("TP1_RATIO_B", os.environ.get("TP1_RATIO", "0.5"))),
             "C": float(os.environ.get("TP1_RATIO_C", os.environ.get("TP1_RATIO", "0.5"))),
+            "D": float(os.environ.get("TP1_RATIO_D", os.environ.get("TP1_RATIO", "0.5"))),
         }
         per_account_rrsi = {
             "A": float(os.environ.get("RR_SCALE_IN_A", os.environ.get("RR_SCALE_IN", "2.5"))),
             "B": float(os.environ.get("RR_SCALE_IN_B", os.environ.get("RR_SCALE_IN", "2.5"))),
             "C": float(os.environ.get("RR_SCALE_IN_C", os.environ.get("RR_SCALE_IN", "2.5"))),
+            "D": float(os.environ.get("RR_SCALE_IN_D", os.environ.get("RR_SCALE_IN", "2.5"))),
         }
         self.risk.partial_tp_enabled = per_account_ptp.get(self.account, self.risk.partial_tp_enabled)
         self.risk.tp1_ratio = per_account_tp1r.get(self.account, self.risk.tp1_ratio)
@@ -220,39 +228,14 @@ class M5ScalpTrader:
                 self._ml_enabled = False
 
     def _get_account_config(self):
-        """Get account config for MT5Bridge (same pattern as LiveCollector)."""
-        from metty.core.models import AccountConfig, AccountName
+        """Get account config for MT5Bridge from registry (single source of truth)."""
+        from metty.core.account_registry import get_bridge_config
 
-        account_configs = {
-            "A": AccountConfig(
-                name=AccountName.A,
-                broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                balance=100.0, leverage=2000,
-                bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "mt5a"),
-                bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "8001")),
-                signal_group="volume",
-            ),
-            "B": AccountConfig(
-                name=AccountName.B,
-                broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                balance=500.0, leverage=500,
-                bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "mt5b"),
-                bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "8001")),
-                signal_group="ob_os",
-            ),
-            "C": AccountConfig(
-                name=AccountName.C,
-                broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
-                balance=1000.0, leverage=500,
-                bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "mt5c"),
-                bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "8001")),
-                signal_group="ma",
-            ),
-        }
-        return account_configs.get(self.account, account_configs["A"])
+        try:
+            return get_bridge_config(self.account)
+        except ValueError:
+            logger.warning("Unknown account: %s, falling back to account A", self.account)
+            return get_bridge_config("A")
 
     def _fetch_candles(self, bridge: MT5Bridge) -> Optional[dict[str, pd.DataFrame]]:
         """Fetch M5 candles from MT5 bridge using an already-connected bridge."""
@@ -572,12 +555,9 @@ class M5ScalpTrader:
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
-                config = AccountConfig(
-                    name=AccountName[self.account],
-                    bridge_host=host,
-                    bridge_port=port,
-                    broker_login="", broker_server="",
-                )
+                from metty.core.account_registry import get_bridge_config
+                config = get_bridge_config(self.account)
+                config = config.model_copy(update={"bridge_host": host, "bridge_port": port})
                 bridge = MT5Bridge(config)
 
                 async def _close():
@@ -622,13 +602,9 @@ class M5ScalpTrader:
                 host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
                 port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
 
-                config = AccountConfig(
-                    name=AccountName[self.account],
-                    bridge_host=host,
-                    bridge_port=port,
-                    broker_login=os.environ.get(f"MT5_LOGIN_{self.account}", ""),
-                    broker_server=os.environ.get(f"MT5_SERVER_{self.account}", "Exness-MT5Trial17"),
-                )
+                from metty.core.account_registry import get_bridge_config
+                config = get_bridge_config(self.account)
+                config = config.model_copy(update={"bridge_host": host, "bridge_port": port})
                 bridge = MT5Bridge(config)
 
                 async def _open():

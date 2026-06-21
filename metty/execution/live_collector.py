@@ -205,43 +205,13 @@ class LiveCollector:
         """
         try:
             from metty.bridge.client import MT5Bridge
-            from metty.core.models import AccountConfig, AccountName
+            from metty.core.account_registry import get_bridge_config
             from broky.data.resampler import resample_timeframe
             from metty.execution.historical_collector import _normalize_columns
 
-            # Map account letter to config
-            account_configs = {
-                "A": AccountConfig(
-                    name=AccountName.A,
-                    broker_login=os.environ.get("MT5_LOGIN_A", ""),
-                    broker_server=os.environ.get("MT5_SERVER_A", "Exness-MT5Trial17"),
-                    balance=100.0, leverage=2000,
-                    bridge_host=os.environ.get("MT5_BRIDGE_A_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_A_PORT", "5005")),
-                    signal_group="volume",
-                ),
-                "B": AccountConfig(
-                    name=AccountName.B,
-                    broker_login=os.environ.get("MT5_LOGIN_B", ""),
-                    broker_server=os.environ.get("MT5_SERVER_B", "Exness-MT5Trial17"),
-                    balance=500.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_B_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_B_PORT", "5006")),
-                    signal_group="ob_os",
-                ),
-                "C": AccountConfig(
-                    name=AccountName.C,
-                    broker_login=os.environ.get("MT5_LOGIN_C", ""),
-                    broker_server=os.environ.get("MT5_SERVER_C", "Exness-MT5Trial7"),
-                    balance=1000.0, leverage=500,
-                    bridge_host=os.environ.get("MT5_BRIDGE_C_HOST", "100.68.106.101"),
-                    bridge_port=int(os.environ.get("MT5_BRIDGE_C_PORT", "5007")),
-                    signal_group="ma",
-                ),
-            }
-
-            config = account_configs.get(self.account)
-            if not config:
+            try:
+                config = get_bridge_config(self.account)
+            except ValueError:
                 logger.warning("Unknown account: %s", self.display_name)
                 return None
 

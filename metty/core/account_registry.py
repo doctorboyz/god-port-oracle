@@ -131,6 +131,34 @@ def get_account_config(name: str) -> AccountConfigInfo:
     return configs[name]
 
 
+def get_bridge_config(name: str):
+    """Get an AccountConfig (Pydantic model) for MT5Bridge.
+
+    Converts AccountConfigInfo from registry into the Pydantic model
+    that MT5Bridge expects. This is the bridge between the registry
+    (single source of truth) and the MT5 client layer.
+
+    Usage:
+        from metty.core.account_registry import get_bridge_config
+        config = get_bridge_config("D")
+        bridge = MT5Bridge(config)
+    """
+    from metty.core.models import AccountConfig, SignalGroup
+
+    info = get_account_config(name)
+    return AccountConfig(
+        name=info.name,
+        broker_login=info.broker_login,
+        broker_password=info.broker_password,
+        broker_server=info.broker_server,
+        bridge_host=info.bridge_host,
+        bridge_port=info.bridge_port,
+        initial_balance=info.initial_balance,
+        leverage=info.leverage,
+        signal_group=SignalGroup(info.signal_group),
+    )
+
+
 def get_symbol_map(accounts: Optional[list[str]] = None) -> dict[str, str]:
     """Map account name to trading symbol (XAUUSD vs XAUUSDm).
 

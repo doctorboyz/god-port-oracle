@@ -67,3 +67,4 @@
 - [2026-06-19 Entrypoint Watchdog + X11 Lock Fix](retrospectives/2026-06/19/21.34_entrypoint-watchdog-x11-lock-fix.md) — stale X11 lock crashes KasmVNC on restart; Phase 0 cleanup + Phase 4 watchdog; multi-account registry deployed
 - [2026-06-19 Account Type + Ghost Positions + Deploy](retrospectives/2026-06/19/22.18_account-type-ghost-positions-deploy.md) — Real-A/Demo-B labels, ghost position fix (MT5 source of truth), 4 accounts on VPS
 - [2026-06-19 Ten Issues Fix + Deploy + One-hot](retrospectives/2026-06/19/23.12_ten-issues-fix-deploy-onehot-regime.md) — 10 issues fixed, PersistentMT5Bridge removed, one-hot regime encoding, deploy verified
+- [2026-06-20 V6 Deploy + Account D Activation](retrospectives/2026-06/20/00.01_deploy-v6-and-account-d.md) — V6 model deployed, Account D activated, MT5 credential fixes, initial balances corrected
