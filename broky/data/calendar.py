@@ -107,7 +107,7 @@ def fetch_calendar_finnhub(
         return events
 
     except Exception as e:
-        logger.error("Finnhub calendar fetch failed: %s", e)
+        logger.debug("Finnhub calendar unavailable: %s", e)
         return []
 
 

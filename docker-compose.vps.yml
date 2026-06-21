@@ -191,7 +191,6 @@ services:
       - MT5_BRIDGE_D_HOST=mt5d
       - MT5_BRIDGE_D_PORT=8001
       - MT5_SYMBOL_D=${MT5_SYMBOL_D:-XAUUSD}
-      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
     volumes:

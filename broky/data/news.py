@@ -59,7 +59,7 @@ def fetch_market_news(
     try:
         news = client.general_news(category)
     except Exception as e:
-        logger.error("Finnhub news fetch failed: %s", e)
+        logger.debug("Finnhub news fetch failed: %s", e)
         return []
 
     # Filter by time
