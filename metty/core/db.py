@@ -1,8 +1,11 @@
 """SQLite database schema and connection management for ML data collection."""
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "oracle.db"
 
@@ -400,9 +403,6 @@ def check_data_integrity(db_path: Optional[Path | str] = None) -> dict:
     Returns a dict with table names as keys and integrity stats as values.
     Logs warnings for any NULL columns found.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     conn = get_connection(db_path)
     results = {}
 
