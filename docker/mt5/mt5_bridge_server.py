@@ -154,13 +154,31 @@ class MT5Service(rpyc.Service):
             return _to_list_of_dicts(mt5.positions_get(ticket=ticket))
         return _to_list_of_dicts(mt5.positions_get())
 
-    def exposed_history_orders_get(self, **kwargs):
-        import MetaTrader5 as mt5
-        return _to_list_of_dicts(mt5.history_orders_get(**kwargs)) if kwargs else _to_list_of_dicts(mt5.history_orders_get())
+    def exposed_history_orders_get(self, date_from=None, date_to=None, **kwargs):
+        """Get historical orders from MT5.
 
-    def exposed_history_deals_get(self, **kwargs):
+        Args can be passed as positional (date_from, date_to) or keyword args.
+        RPyC does not reliably forward **kwargs, so we accept positional args.
+        """
         import MetaTrader5 as mt5
-        return _to_list_of_dicts(mt5.history_deals_get(**kwargs)) if kwargs else _to_list_of_dicts(mt5.history_deals_get())
+        if date_from is not None and date_to is not None:
+            return _to_list_of_dicts(mt5.history_orders_get(date_from, date_to))
+        if kwargs:
+            return _to_list_of_dicts(mt5.history_orders_get(**kwargs))
+        return _to_list_of_dicts(mt5.history_orders_get())
+
+    def exposed_history_deals_get(self, date_from=None, date_to=None, **kwargs):
+        """Get historical deals from MT5.
+
+        Args can be passed as positional (date_from, date_to) or keyword args.
+        RPyC does not reliably forward **kwargs, so we accept positional args.
+        """
+        import MetaTrader5 as mt5
+        if date_from is not None and date_to is not None:
+            return _to_list_of_dicts(mt5.history_deals_get(date_from, date_to))
+        if kwargs:
+            return _to_list_of_dicts(mt5.history_deals_get(**kwargs))
+        return _to_list_of_dicts(mt5.history_deals_get())
 
     def exposed_version(self):
         import MetaTrader5 as mt5
