@@ -106,7 +106,7 @@ services:
       - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
       - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_MODEL_DIR=${ML_MODEL_DIR:-/app/data/models/trade_outcome_v6}
+      - ML_MODEL_DIR=${ML_MODEL_DIR:-/app/data/models/trade_outcome_mixed}
       - ML_MODEL_DIR_A=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}

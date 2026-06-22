@@ -213,6 +213,7 @@ class M5ScalpTrader:
                 # Per-account model dir: real accounts can pin to stable model
                 per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
                 ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
+                logger.info("[%s] ML model dir: %s (per_account=%s)", self.display_name, ml_dir, per_account_dir)
                 self._ml_predictor = TradeOutcomePredictor(
                     model_dir=ml_dir,
                     loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
