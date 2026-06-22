@@ -217,7 +217,11 @@ class LiveTrader:
         if self._ml_enabled:
             try:
                 from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                # Per-account model dir: real accounts can pin to stable model
+                per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
+                ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
                 self._ml_predictor = TradeOutcomePredictor(
+                    model_dir=ml_dir,
                     loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
                 )
                 logger.info("[Swing:%s] ML filter enabled: %s", self.display_name,

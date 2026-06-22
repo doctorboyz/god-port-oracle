@@ -107,6 +107,7 @@ services:
       - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
       - ML_MODEL_DIR=${ML_MODEL_DIR:-/app/data/models/trade_outcome_v6}
+      - ML_MODEL_DIR_A=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       - MAX_POSITIONS_A=${MAX_POSITIONS_A:-5}
@@ -169,6 +170,11 @@ services:
       - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
       - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
       - ACCOUNT_TYPE_D=${ACCOUNT_TYPE_D:-demo}
+      # ═══ Per-account drawdown (V4 strict protection for real A) ══════
+      - DRAWDOWN_DAILY_LIMIT_A=${DRAWDOWN_DAILY_LIMIT_A:-0.20}
+      - DRAWDOWN_WEEKLY_LIMIT_A=${DRAWDOWN_WEEKLY_LIMIT_A:-0.30}
+      - DRAWDOWN_ACCOUNT_LIMIT_A=${DRAWDOWN_ACCOUNT_LIMIT_A:-0.30}
+      - DRAWDOWN_COOLDOWN_HOURS_A=${DRAWDOWN_COOLDOWN_HOURS_A:-4}
       # ═══ MT5 Bridge credentials ══════════════════════════════════════════
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
