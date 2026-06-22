@@ -41,10 +41,10 @@ async def get_deals_from_mt5(account: str, days_back: int = 90) -> list[dict]:
             logger.error("Failed to connect to MT5 bridge for account %s", account)
             return []
 
-        from_dt = datetime.now(timezone.utc) - timedelta(days=days_back)
-        to_dt = datetime.now(timezone.utc)
+        # Use Unix timestamps — RPyC cannot serialize datetime objects reliably
+        from_ts = int((datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp())
+        to_ts = int(datetime.now(timezone.utc).timestamp())
 
-        # Use raw RPyC call with positional args (fixed in bridge server)
         import rpyc
         conn = await asyncio.to_thread(
             rpyc.connect, config.bridge_host, config.bridge_port,
@@ -54,8 +54,9 @@ async def get_deals_from_mt5(account: str, days_back: int = 90) -> list[dict]:
         # Initialize MT5 in this connection
         await asyncio.to_thread(conn.root.initialize)
 
+        # Bridge converts Unix timestamps to datetime internally
         deals = await asyncio.to_thread(
-            conn.root.exposed_history_deals_get, from_dt, to_dt
+            conn.root.exposed_history_deals_get, from_ts, to_ts
         )
 
         conn.close()

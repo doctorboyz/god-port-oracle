@@ -157,10 +157,22 @@ class MT5Service(rpyc.Service):
     def exposed_history_orders_get(self, date_from=None, date_to=None, **kwargs):
         """Get historical orders from MT5.
 
-        Args can be passed as positional (date_from, date_to) or keyword args.
-        RPyC does not reliably forward **kwargs, so we accept positional args.
+        Args:
+            date_from: Unix timestamp (int) or datetime object for start date.
+            date_to: Unix timestamp (int) or datetime object for end date.
+
+        RPyC cannot serialize datetime objects reliably, so we accept Unix
+        timestamps (integers) and convert them to datetime inside the bridge.
         """
         import MetaTrader5 as mt5
+        from datetime import datetime, timezone
+
+        # Convert Unix timestamps to datetime if needed
+        if isinstance(date_from, (int, float)):
+            date_from = datetime.fromtimestamp(date_from, tz=timezone.utc)
+        if isinstance(date_to, (int, float)):
+            date_to = datetime.fromtimestamp(date_to, tz=timezone.utc)
+
         if date_from is not None and date_to is not None:
             return _to_list_of_dicts(mt5.history_orders_get(date_from, date_to))
         if kwargs:
@@ -170,10 +182,22 @@ class MT5Service(rpyc.Service):
     def exposed_history_deals_get(self, date_from=None, date_to=None, **kwargs):
         """Get historical deals from MT5.
 
-        Args can be passed as positional (date_from, date_to) or keyword args.
-        RPyC does not reliably forward **kwargs, so we accept positional args.
+        Args:
+            date_from: Unix timestamp (int) or datetime object for start date.
+            date_to: Unix timestamp (int) or datetime object for end date.
+
+        RPyC cannot serialize datetime objects reliably, so we accept Unix
+        timestamps (integers) and convert them to datetime inside the bridge.
         """
         import MetaTrader5 as mt5
+        from datetime import datetime, timezone
+
+        # Convert Unix timestamps to datetime if needed
+        if isinstance(date_from, (int, float)):
+            date_from = datetime.fromtimestamp(date_from, tz=timezone.utc)
+        if isinstance(date_to, (int, float)):
+            date_to = datetime.fromtimestamp(date_to, tz=timezone.utc)
+
         if date_from is not None and date_to is not None:
             return _to_list_of_dicts(mt5.history_deals_get(date_from, date_to))
         if kwargs:
