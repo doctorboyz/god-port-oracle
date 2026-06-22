@@ -398,7 +398,7 @@ class MT5Bridge:
                 tp,                    # tp
                 20,                    # deviation
                 234000,                # magic
-                f"god-port-{self.config.name.value}",  # comment
+                f"god-port-{self.config.name}",  # comment
                 ORDER_TIME_GTC,        # type_time
                 ORDER_FILLING_FOK,      # type_filling (Exness requires FOK)
                 0,                     # position (0 = new order)
