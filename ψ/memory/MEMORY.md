@@ -54,6 +54,8 @@
 - [MT5 Source of Truth + Ghost Positions](learnings/2026-06-19_mt5-source-of-truth-ghost-positions.md) — MT5 is source of truth for position state; ghost trades (is_open=1, ticket=None) block all future trades
 - [One-Hot Regime Encoding](learnings/2026-06-19_one-hot-regime-encoding.md) — ordinal encoding ผิดสำหรับ regime; one-hot ทำให้แต่ละ regime เป็น independent feature; v4 compat ด้วย regime_encoded
 - [Dead Code Removal > Deprecation](learnings/2026-06-19_dead-code-removal-over-deprecation.md) — ถ้าไม่มี caller ลบเลย; grep ทุก reference รวม scripts/tests/configs
+- [Ghost Trade Prevention](learnings/2026-06-22_ghost-trade-prevention.md) — close_ghost_trades now sets exit_price; reconcile_closed_positions matches MT5 deals; _check_existing_position uses reconciliation; logger scope bug + config.name.value bug
+- [Drawdown DB Sync](learnings/2026-06-22_drawdown-db-sync.md) — drawdown protection now syncs PnL from DB; reconciliation-closed trades bypassed in-memory tracking; daily limits truly enforced
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)

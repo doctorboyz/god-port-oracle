@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,69 @@ class DrawdownProtector:
             self._state.peak_equity = equity
 
         return True, "OK"
+
+    def sync_pnl_from_db(self, account_id: int, db_path: Optional[Path] = None) -> bool:
+        """Synchronize PnL tracking with the database (source of truth).
+
+        Queries live_trades for actual daily and weekly PnL, replacing
+        in-memory counters. This ensures drawdown protection is aware of:
+          - Reconciliation-closed trades (SL/TP hit between oracle cycles)
+          - Trades closed by any code path, not just record_pnl()
+          - State that survives oracle restarts
+
+        Args:
+            account_id: The account to query PnL for.
+            db_path: Path to the SQLite database.
+
+        Returns:
+            True if drawdown protection was triggered after sync.
+        """
+        from metty.core.db import get_pnl_summary
+
+        try:
+            summary = get_pnl_summary(account_id, db_path)
+        except Exception as e:
+            logger.warning(
+                "[DrawdownProtection] DB PnL sync failed: %s — using in-memory state",
+                e,
+            )
+            return False
+
+        # Replace in-memory counters with DB truth
+        db_daily_pnl = summary["daily_pnl"]
+        db_weekly_pnl = summary["weekly_pnl"]
+        db_daily_trades = summary["daily_trades"]
+        db_weekly_trades = summary["weekly_trades"]
+
+        # Log when DB differs significantly from in-memory
+        if abs(db_daily_pnl - self._state.daily_pnl) > 0.01:
+            logger.info(
+                "[DrawdownProtection] Daily PnL sync: in-memory=%.2f → DB=%.2f (%d trades)",
+                self._state.daily_pnl, db_daily_pnl, db_daily_trades,
+            )
+        if abs(db_weekly_pnl - self._state.weekly_pnl) > 0.01:
+            logger.info(
+                "[DrawdownProtection] Weekly PnL sync: in-memory=%.2f → DB=%.2f (%d trades)",
+                self._state.weekly_pnl, db_weekly_pnl, db_weekly_trades,
+            )
+
+        self._state.daily_pnl = db_daily_pnl
+        self._state.weekly_pnl = db_weekly_pnl
+        self._state.daily_trades = db_daily_trades
+        self._state.weekly_trades = db_weekly_trades
+
+        # Re-check after sync
+        if self._state.daily_start_equity > 0:
+            can_trade, reason = self.check(self._state.peak_equity)
+            if not can_trade:
+                logger.warning(
+                    "[DrawdownProtection] BLOCKED after DB sync: %s "
+                    "(daily=%.2f, weekly=%.2f)",
+                    reason, db_daily_pnl, db_weekly_pnl,
+                )
+                return True
+
+        return False
 
     def record_pnl(self, pnl: float, equity: float) -> bool:
         """Record a trade result and update drawdown tracking.

@@ -450,6 +450,11 @@ class M5ScalpTrader:
                     )
                     if closed:
                         logger.info("[M5Scalp:%s] Reconciled %d closed positions", self.display_name, closed)
+                        # Sync drawdown protector with DB — reconciliation-closed
+                        # trades are invisible to in-memory PnL tracking
+                        self._drawdown_protector.sync_pnl_from_db(
+                            self.account_id, self.db_path,
+                        )
                 return False
 
             # MT5 has a position — check if it's an M5 scalp trade in DB
@@ -803,7 +808,8 @@ class M5ScalpTrader:
             self._record_rejection(signal, f"buy_low_confidence:{signal.confidence:.2f}<{self._buy_min_confidence}", session=session, d1_trend=d1_trend)
             return {"action": "hold", "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}"}
 
-        # 7c. Drawdown protection check
+        # 7c. Drawdown protection check (sync from DB first — reconciliation-closed trades)
+        self._drawdown_protector.sync_pnl_from_db(self.account_id, self.db_path)
         balance = self._get_balance()
         dd_can_trade, dd_reason = self._drawdown_protector.check(balance)
         if not dd_can_trade:

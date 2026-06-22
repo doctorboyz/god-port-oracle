@@ -653,6 +653,11 @@ class LiveTrader:
                     )
                     if closed:
                         logger.info("[%s] Reconciled %d closed positions", self.display_name, closed)
+                        # Sync drawdown protector with DB — reconciliation-closed
+                        # trades are invisible to in-memory PnL tracking
+                        self._drawdown_protector.sync_pnl_from_db(
+                            self.account_id, self.db_path,
+                        )
 
             return has_mt5_position
         except Exception as e:
@@ -1191,6 +1196,8 @@ class LiveTrader:
             }
 
         # 4a2. Drawdown protection check (before any risk-sensitive operations)
+        # Sync PnL from DB first — ensures reconciliation-closed trades are counted
+        self._drawdown_protector.sync_pnl_from_db(self.account_id, self.db_path)
         equity = self._get_equity()
         if equity is None:
             logger.warning("[%s] Equity unavailable — skipping cycle (MT5 may be disconnected)", self.display_name)

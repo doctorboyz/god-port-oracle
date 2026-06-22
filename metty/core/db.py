@@ -1898,6 +1898,76 @@ def insert_synthetic_trade_outcome(
         conn.close()
 
 
+def get_pnl_summary(
+    account_id: int,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """Get daily and weekly PnL summary from live_trades for an account.
+
+    Queries the DB (source of truth) for closed-trade PnL, which is more
+    reliable than in-memory tracking because it includes:
+      - Reconciliation-closed trades (SL/TP hit between oracle cycles)
+      - Trades closed by any code path, not just record_pnl()
+
+    Returns dict with:
+        daily_pnl: float      — sum of PnL for today's closed trades
+        daily_trades: int     — count of today's closed trades
+        weekly_pnl: float     — sum of PnL for this week's closed trades
+        weekly_trades: int    — count of this week's closed trades
+    """
+    from datetime import datetime, timezone, timedelta
+
+    conn = get_connection(db_path)
+    try:
+        now = datetime.now(timezone.utc)
+
+        # Daily: trades closed today (UTC midnight)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start_str = day_start.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Weekly: trades closed since Monday 00:00 UTC
+        days_since_monday = now.weekday()
+        week_start = day_start - timedelta(days=days_since_monday)
+        week_start_str = week_start.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Daily PnL
+        daily_row = conn.execute(
+            """SELECT COALESCE(SUM(pnl), 0) as total_pnl,
+                      COUNT(*) as trade_count
+               FROM live_trades
+               WHERE account_id = ?
+                 AND is_open = 0
+                 AND exit_time >= ?
+                 AND pnl IS NOT NULL""",
+            (account_id, day_start_str),
+        ).fetchone()
+        daily_pnl = float(daily_row[0]) if daily_row else 0.0
+        daily_trades = int(daily_row[1]) if daily_row else 0
+
+        # Weekly PnL
+        weekly_row = conn.execute(
+            """SELECT COALESCE(SUM(pnl), 0) as total_pnl,
+                      COUNT(*) as trade_count
+               FROM live_trades
+               WHERE account_id = ?
+                 AND is_open = 0
+                 AND exit_time >= ?
+                 AND pnl IS NOT NULL""",
+            (account_id, week_start_str),
+        ).fetchone()
+        weekly_pnl = float(weekly_row[0]) if weekly_row else 0.0
+        weekly_trades = int(weekly_row[1]) if weekly_row else 0
+
+        return {
+            "daily_pnl": round(daily_pnl, 2),
+            "daily_trades": daily_trades,
+            "weekly_pnl": round(weekly_pnl, 2),
+            "weekly_trades": weekly_trades,
+        }
+    finally:
+        conn.close()
+
+
 def query_trade_outcomes_for_training(
     min_confidence: float = 0.0,
     exclude_breakeven: bool = True,
