@@ -50,7 +50,11 @@ def _netref_to_dict(netref_dict, columns: list[str]) -> dict:
 
 
 async def get_deals_from_mt5(account: str, days_back: int = 90) -> list[dict]:
-    """Fetch deal history from MT5 for a given account."""
+    """Fetch deal history from MT5 for a given account.
+
+    Uses a single RPyC connection for initialize + history query.
+    Returns list of local dicts (not netref proxies).
+    """
     config = get_bridge_config(account)
 
     try:
@@ -61,18 +65,21 @@ async def get_deals_from_mt5(account: str, days_back: int = 90) -> list[dict]:
             config={"sync_request_timeout": 30},
         )
 
-        # Initialize MT5
-        await asyncio.to_thread(conn.root.initialize)
+        try:
+            # Initialize MT5 in this connection
+            await asyncio.to_thread(conn.root.initialize)
 
-        # Use Unix timestamps — bridge converts to datetime internally
-        from_ts = int(time.time()) - days_back * 86400
-        to_ts = int(time.time())
+            # Use Unix timestamps — bridge converts to datetime internally
+            from_ts = int(time.time()) - days_back * 86400
+            to_ts = int(time.time())
 
-        deals_raw = await asyncio.to_thread(
-            conn.root.exposed_history_deals_get, from_ts, to_ts
-        )
+            deals_raw = await asyncio.to_thread(
+                conn.root.exposed_history_deals_get, from_ts, to_ts
+            )
 
-        conn.close()
+        finally:
+            # Always close the connection
+            conn.close()
 
         if not deals_raw:
             logger.info("No deals found for account %s", account)
@@ -82,7 +89,7 @@ async def get_deals_from_mt5(account: str, days_back: int = 90) -> list[dict]:
         deals = []
         for d in deals_raw:
             deal = _netref_to_dict(d, DEAL_COLUMNS)
-            if deal and deal.get("symbol") in ("XAUUSD", "XAUUSDm", "XAUUSD.i"):
+            if deal and deal.get("symbol") in ("XAUUSD", "XAUUSDm", "XAUUSD.i", "XAUUSDb"):
                 deals.append(deal)
 
         logger.info("Found %d XAUUSD deals for account %s (total: %d)",
