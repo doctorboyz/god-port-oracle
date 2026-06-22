@@ -469,6 +469,62 @@ class MT5Bridge:
             logger.error("Error getting positions: %s", e)
             return []
 
+    async def get_deal_history(self, symbol: str = "XAUUSD", days_back: int = 7) -> list[dict]:
+        """Get deal history from MT5 for reconciliation.
+
+        Queries MT5 history_deals_get via the bridge server using Unix timestamps
+        (RPyC cannot serialize datetime objects). Returns closing deals filtered
+        by symbol.
+
+        Args:
+            symbol: Trading symbol (e.g. 'XAUUSD', 'XAUUSDm').
+            days_back: How many days of history to fetch.
+
+        Returns:
+            List of deal dicts with keys: ticket, order, time, type, volume,
+            price, profit, symbol, comment.
+        """
+        import time as _time
+
+        conn = self._ensure_connected()
+        try:
+            from_ts = int(_time.time()) - days_back * 86400
+            to_ts = int(_time.time())
+
+            deals_raw = await asyncio.to_thread(
+                conn.root.exposed_history_deals_get, from_ts, to_ts
+            )
+
+            if not deals_raw:
+                logger.debug("No deals returned from MT5 for %s", symbol)
+                return []
+
+            # Convert netref dicts to local dicts using known column names
+            DEAL_COLUMNS = [
+                "ticket", "order", "time", "time_msc", "type", "magic",
+                "identifier", "reason", "volume", "price", "commission",
+                "swap", "profit", "symbol", "comment", "external_id",
+            ]
+            deals = []
+            for d in deals_raw:
+                deal = {}
+                for col in DEAL_COLUMNS:
+                    try:
+                        deal[col] = d[col]
+                    except (KeyError, Exception):
+                        pass
+                # Filter: only XAUUSD deals with non-zero volume (real trades)
+                sym = deal.get("symbol", "")
+                if sym in ("XAUUSD", "XAUUSDm", "XAUUSD.i", "XAUUSDb") and deal.get("volume", 0) > 0:
+                    deals.append(deal)
+
+            logger.debug("Fetched %d %s deals (total raw: %d)", len(deals), symbol, len(deals_raw))
+            return deals
+
+        except Exception as e:
+            logger.warning("Error fetching deal history for %s: %s", symbol, e)
+            return []
+
     async def close_position(self, ticket: int) -> bool:
         """Close a position by ticket number."""
         conn = self._ensure_connected()
@@ -658,3 +714,23 @@ class MT5Bridge:
                 await self.disconnect()
             return None
         return asyncio.run(_do())
+
+    def fetch_deal_history_sync(
+        self, symbol: str = "XAUUSD", days_back: int = 7
+    ) -> list[dict]:
+        """Connect, fetch deal history, and disconnect in one call.
+
+        Synchronous wrapper for get_deal_history() — used by reconciliation
+        code that runs in synchronous context.
+        """
+        async def _do():
+            if not await self.connect():
+                return []
+            deals = await self.get_deal_history(symbol, days_back=days_back)
+            await self.disconnect()
+            return deals
+        try:
+            return asyncio.run(_do())
+        except Exception as e:
+            logger.warning("fetch_deal_history_sync failed: %s", e)
+            return []

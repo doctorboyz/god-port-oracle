@@ -1,6 +1,6 @@
 {
   "experiment": "trade_outcome_v11",
-  "timestamp": "2026-06-22T04:40:45.277189+00:00",
+  "timestamp": "2026-06-22T05:03:19.258563+00:00",
   "optuna_trials": 200,
   "v11_features": [
     "rolling_sharpe_20",

@@ -43,6 +43,7 @@ from metty.core.db import (
     init_db,
     insert_live_trade,
     insert_rejected_signal,
+    reconcile_closed_positions,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -412,8 +413,8 @@ class M5ScalpTrader:
         """Check if there's already an open M5 scalp position for this account.
 
         Uses MT5 as PRIMARY source of truth — same pattern as LiveTrader.
-        If MT5 has no position at all, closes DB ghost trades and returns False.
-        If MT5 has a position, checks DB for M5 scalp strategy trades.
+        If MT5 has no position at all, reconciles DB trades with deal history
+        and returns False. If MT5 has a position, checks DB for M5 scalp trades.
         """
         # Step 1: Check MT5 for any open position (source of truth)
         try:
@@ -422,21 +423,33 @@ class M5ScalpTrader:
 
             cfg = get_account_config(self.account)
             conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
-            positions = conn.root.positions_get(symbol=cfg.symbol)
+            positions_raw = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
 
-            if positions is None or len(positions) == 0:
-                # MT5 says no position — close any DB ghost trades
+            if positions_raw is None or len(positions_raw) == 0:
+                # MT5 says no position — reconcile DB trades with MT5 state
                 open_trades = get_open_trades(self.account_id, self.db_path)
                 if open_trades:
                     logger.warning(
-                        "[M5Scalp:%s] %d ghost trades in DB (is_open=1 but no MT5 position) — closing them",
+                        "[M5Scalp:%s] %d open DB trades but no MT5 position — reconciling",
                         self.display_name, len(open_trades),
                     )
-                    from metty.core.db import close_ghost_trades
-                    closed = close_ghost_trades(self.account_id, self.db_path)
+                    # Try to get deal history for accurate exit prices
+                    deals = self._get_deal_history(days_back=7)
+                    # Convert RPyC positions
+                    positions_list = []
+                    if positions_raw:
+                        positions_list = [
+                            p if isinstance(p, dict) else dict(p)
+                            for p in positions_raw
+                        ]
+                    closed = reconcile_closed_positions(
+                        self.account_id, open_trades,
+                        positions_list, deals,
+                        self.db_path,
+                    )
                     if closed:
-                        logger.info("[M5Scalp:%s] Closed %d ghost trades", self.display_name, closed)
+                        logger.info("[M5Scalp:%s] Reconciled %d closed positions", self.display_name, closed)
                 return False
 
             # MT5 has a position — check if it's an M5 scalp trade in DB
@@ -458,6 +471,17 @@ class M5ScalpTrader:
                 if strategy == self.strategy_id or mode == "m5_scalp":
                     return True
             return False
+
+    def _get_deal_history(self, days_back: int = 7) -> list[dict]:
+        """Fetch MT5 deal history for reconciliation."""
+        try:
+            from metty.core.account_registry import get_bridge_config
+            bridge = MT5Bridge(get_bridge_config(self.account))
+            deals = bridge.fetch_deal_history_sync(self.symbol, days_back=days_back)
+            return deals or []
+        except Exception as e:
+            logger.debug("[M5Scalp:%s] Could not fetch deal history: %s", self.display_name, e)
+            return []
 
     def _compute_tp_levels(self, entry_price: float, atr: float, direction: str) -> list[dict]:
         """Compute 4-level TP targets for position scaling.

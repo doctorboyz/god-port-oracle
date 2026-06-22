@@ -977,15 +977,38 @@ def close_ghost_trades(
     """Close ghost trades: DB has is_open=1 but no MT5 ticket.
 
     These are trades that were recorded in DB but never actually
-    sent to MT5 (ticket is NULL). Returns the number of trades closed.
+    sent to MT5 (ticket is NULL). Sets exit_price from SL/TP when
+    available so that PnL is never left NULL.
+
+    Returns the number of trades closed.
     """
     conn = get_connection(db_path)
     try:
         from datetime import datetime as _dt
         now = _dt.utcnow().isoformat()
+
+        # Use SQL COALESCE so exit_price is always set:
+        # 1. If stop_loss exists → use it (most likely scenario for ghost trades)
+        # 2. Else use entry_price (breakeven — we don't know the actual exit)
+        # Also compute pnl and pnl_pct from the inferred exit_price.
         cursor = conn.execute(
             """UPDATE live_trades
-               SET is_open = 0, exit_reason = 'ghost_no_mt5_ticket', exit_time = ?
+               SET is_open = 0,
+                   exit_time = ?,
+                   exit_reason = 'ghost_no_mt5_ticket',
+                   exit_price = COALESCE(stop_loss, entry_price),
+                   pnl = CASE
+                       WHEN direction = 'BUY' THEN
+                           (COALESCE(stop_loss, entry_price) - entry_price) * lot_size * 100
+                       ELSE
+                           (entry_price - COALESCE(stop_loss, entry_price)) * lot_size * 100
+                   END,
+                   pnl_pct = CASE
+                       WHEN direction = 'BUY' THEN
+                           ROUND((COALESCE(stop_loss, entry_price) - entry_price) / entry_price * 100, 4)
+                       ELSE
+                           ROUND((entry_price - COALESCE(stop_loss, entry_price)) / entry_price * 100, 4)
+                   END
                WHERE account_id = ? AND is_open = 1 AND ticket IS NULL""",
             (now, account_id),
         )
@@ -993,6 +1016,241 @@ def close_ghost_trades(
         return cursor.rowcount
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# MT5 Position Reconciliation
+# ---------------------------------------------------------------------------
+
+# XAUUSD contract size: 1 lot = 100 oz
+CONTRACT_SIZE = 100
+
+
+def _match_closing_deal(
+    trade: dict,
+    deals: list[dict],
+) -> dict | None:
+    """Match an MT5 closing deal to a DB trade.
+
+    MT5 deal types:
+      0 = BUY (entry or position close for SELL positions)
+      1 = SELL (entry or position close for BUY positions)
+
+    For closing deals:
+      - A BUY position is closed by a SELL deal (type=1)
+      - A SELL position is closed by a BUY deal (type=0)
+
+    Matching strategy (in order):
+      1. Price proximity + direction + time window
+      2. Exact SL/TP price match
+    """
+    entry_price = float(trade.get("entry_price", 0))
+    direction = trade.get("direction", "").upper()
+
+    if not entry_price or not direction:
+        return None
+
+    # Closing direction is opposite of entry
+    closing_type = 1 if direction == "BUY" else 0
+
+    # Strategy 1: price proximity + direction
+    best_match: dict | None = None
+    best_price_diff = float("inf")
+
+    for deal in deals:
+        deal_type = deal.get("type", -1)
+        if deal_type not in (0, 1):
+            continue
+        if deal_type != closing_type:
+            continue
+
+        deal_price = float(deal.get("price", 0))
+        if deal_price == 0:
+            continue
+
+        price_diff = abs(deal_price - entry_price)
+        # XAUUSD prices can be 1300-5000; allow 0.5% tolerance
+        max_diff = entry_price * 0.005
+
+        if price_diff < max_diff and price_diff < best_price_diff:
+            best_price_diff = price_diff
+            best_match = deal
+
+    if best_match:
+        return best_match
+
+    # Strategy 2: match by SL/TP price
+    sl = float(trade.get("stop_loss", 0)) if trade.get("stop_loss") else 0
+    tp = float(trade.get("take_profit", 0)) if trade.get("take_profit") else 0
+
+    for deal in deals:
+        deal_type = deal.get("type", -1)
+        if deal_type != closing_type:
+            continue
+
+        deal_price = float(deal.get("price", 0))
+        if deal_price == 0:
+            continue
+
+        if (sl > 0 and abs(deal_price - sl) < 0.1) or (tp > 0 and abs(deal_price - tp) < 0.1):
+            return deal
+
+    return None
+
+
+def _infer_exit_price(trade: dict) -> float | None:
+    """Infer exit price from SL/TP when deal history is unavailable.
+
+    For ghost/orphan trades, MT5 closed the position but we couldn't find the deal.
+    Most likely scenarios:
+      - SL hit → use stop_loss
+      - TP hit → use take_profit
+      - Unknown → use SL (pessimistic, most ghost trades are losses)
+    """
+    sl = trade.get("stop_loss")
+    tp = trade.get("take_profit")
+    direction = trade.get("direction", "").upper()
+    reason = str(trade.get("exit_reason", "")).lower()
+
+    # Check exit_reason for hints
+    if "sl" in reason or "stop" in reason:
+        return float(sl) if sl else None
+    if "tp" in reason or "take" in reason:
+        return float(tp) if tp else None
+
+    # Default: SL is most likely (pessimistic assumption)
+    if sl:
+        return float(sl)
+
+    # Last resort: entry price (breakeven)
+    entry = trade.get("entry_price")
+    return float(entry) if entry else None
+
+
+def reconcile_closed_positions(
+    account_id: int,
+    open_trades: list[dict],
+    mt5_positions: list[dict],
+    mt5_deals: list[dict],
+    db_path: Optional[Path] = None,
+) -> int:
+    """Reconcile DB open trades with MT5 state.
+
+    Finds trades where DB thinks is_open=1 but MT5 no longer has the position.
+    Uses deal history to get actual exit price, falls back to SL/TP inference.
+
+    This handles three scenarios:
+      1. Trade has a ticket but MT5 closed it (SL/TP hit between cycles)
+      2. Trade has no ticket (never sent to MT5)
+      3. MT5 is unreachable — skip reconciliation, rely on ghost cleanup
+
+    Returns the number of trades closed.
+    """
+    if not open_trades:
+        return 0
+
+    # Build set of MT5 position identifiers for quick lookup
+    mt5_tickets: set[int] = set()
+    for p in (mt5_positions or []):
+        identifier = p.get("identifier") or p.get("ticket")
+        if identifier:
+            mt5_tickets.add(int(identifier))
+
+    # Find trades with no matching MT5 position
+    orphaned: list[dict] = []
+    for trade in open_trades:
+        ticket = trade.get("ticket")
+        if ticket and int(ticket) in mt5_tickets:
+            continue  # Position still exists in MT5
+        # No matching position → MT5 closed it or never sent
+        orphaned.append(trade)
+
+    if not orphaned:
+        return 0
+
+    conn = get_connection(db_path)
+    closed = 0
+    try:
+        from datetime import datetime as _dt
+        now = _dt.utcnow().isoformat()
+
+        for trade in orphaned:
+            trade_id = trade["id"]
+            exit_price: float | None = None
+            pnl: float | None = None
+            exit_reason = trade.get("exit_reason") or "closed_by_mt5"
+
+            # Try to find matching deal in MT5 deal history
+            deal = _match_closing_deal(trade, mt5_deals) if mt5_deals else None
+            if deal and deal.get("price") is not None:
+                exit_price = float(deal["price"])
+                pnl = float(deal.get("profit", 0))
+                # Check comment for SL/TP info
+                comment = str(deal.get("comment", ""))
+                if "[sl" in comment:
+                    exit_reason = "stop_loss"
+                elif "[tp" in comment:
+                    exit_reason = "take_profit"
+                else:
+                    exit_reason = "closed_by_mt5"
+            else:
+                # Infer from SL/TP
+                exit_price = _infer_exit_price(trade)
+                if exit_price is None:
+                    logger.warning(
+                        "Trade #%d: cannot determine exit_price, skipping",
+                        trade_id,
+                    )
+                    continue
+
+                direction = trade.get("direction", "").upper()
+                entry = float(trade.get("entry_price", 0))
+                lot_size = float(trade.get("lot_size", 0.01))
+                if direction == "BUY":
+                    pnl = (exit_price - entry) * lot_size * CONTRACT_SIZE
+                else:
+                    pnl = (entry - exit_price) * lot_size * CONTRACT_SIZE
+                exit_reason = f"{exit_reason}_inferred"
+
+            # Calculate pnl_pct
+            entry_price = float(trade.get("entry_price", 0))
+            lot_size = float(trade.get("lot_size", 0.01))
+            if entry_price > 0 and pnl is not None:
+                pnl_pct = round(pnl / (entry_price * lot_size * CONTRACT_SIZE) * 100, 4)
+            else:
+                pnl_pct = 0.0
+
+            conn.execute(
+                """UPDATE live_trades
+                   SET exit_price = ?, pnl = ?, pnl_pct = ?,
+                       exit_reason = ?, is_open = 0, exit_time = ?
+                   WHERE id = ? AND is_open = 1""",
+                (
+                    round(exit_price, 2),
+                    round(pnl or 0, 2),
+                    pnl_pct,
+                    exit_reason,
+                    now,
+                    trade_id,
+                ),
+            )
+            closed += 1
+            logger.info(
+                "Reconciled trade #%d (%s %s @ %s) → exit=%.2f pnl=%.2f reason=%s",
+                trade_id,
+                trade.get("direction", "?"),
+                trade.get("symbol", "?"),
+                trade.get("entry_price", "?"),
+                exit_price,
+                pnl or 0,
+                exit_reason,
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return closed
 
 
 def close_live_trade(

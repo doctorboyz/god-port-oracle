@@ -42,6 +42,7 @@ from metty.core.db import (
     init_db,
     insert_live_trade,
     insert_rejected_signal,
+    reconcile_closed_positions,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -612,8 +613,9 @@ class LiveTrader:
         """Check if there's an open position for this account.
 
         Uses MT5 as the PRIMARY source of truth — only returns True
-        if MT5 actually has an open position. DB ghost trades
-        (is_open=1 but no MT5 ticket) are closed automatically.
+        if MT5 actually has an open position. DB trades that MT5 no
+        longer has are reconciled with actual exit prices from deal
+        history (or inferred from SL/TP as fallback).
         """
         # Check MT5 for open positions (source of truth)
         try:
@@ -622,22 +624,35 @@ class LiveTrader:
             cfg = get_account_config(self.account)
 
             conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
-            positions = conn.root.positions_get(symbol=cfg.symbol)
+            positions_raw = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
-            has_mt5_position = positions is not None and len(positions) > 0
+
+            has_mt5_position = positions_raw is not None and len(positions_raw) > 0
 
             if not has_mt5_position:
-                # MT5 says no position — close any DB ghost trades
+                # MT5 says no position — reconcile DB trades with MT5 state
                 open_trades = get_open_trades(self.account_id, self.db_path)
                 if open_trades:
                     logger.warning(
-                        "[%s] %d ghost trades in DB (is_open=1 but no MT5 position) — closing them",
+                        "[%s] %d open DB trades but no MT5 position — reconciling",
                         self.display_name, len(open_trades),
                     )
-                    from metty.core.db import close_ghost_trades
-                    closed = close_ghost_trades(self.account_id, self.db_path)
+                    # Try to get deal history for accurate exit prices
+                    deals = self._get_deal_history(days_back=7)
+                    # Convert RPyC positions (may be raw list of dicts already)
+                    positions_list = []
+                    if positions_raw:
+                        positions_list = [
+                            p if isinstance(p, dict) else dict(p)
+                            for p in positions_raw
+                        ]
+                    closed = reconcile_closed_positions(
+                        self.account_id, open_trades,
+                        positions_list, deals,
+                        self.db_path,
+                    )
                     if closed:
-                        logger.info("[%s] Closed %d ghost trades", self.display_name, closed)
+                        logger.info("[%s] Reconciled %d closed positions", self.display_name, closed)
 
             return has_mt5_position
         except Exception as e:
@@ -645,6 +660,17 @@ class LiveTrader:
             # Fallback to DB only if MT5 is unreachable
             open_trades = get_open_trades(self.account_id, self.db_path)
             return len(open_trades) > 0
+
+    def _get_deal_history(self, days_back: int = 7) -> list[dict]:
+        """Fetch MT5 deal history for reconciliation."""
+        try:
+            from metty.core.account_registry import get_bridge_config
+            bridge = MT5Bridge(get_bridge_config(self.account))
+            deals = bridge.fetch_deal_history_sync(self.symbol, days_back=days_back)
+            return deals or []
+        except Exception as e:
+            logger.debug("[%s] Could not fetch deal history: %s", self.display_name, e)
+            return []
 
     def _check_cooldown(self) -> bool:
         """Check if we're still in cooldown after last exit."""
