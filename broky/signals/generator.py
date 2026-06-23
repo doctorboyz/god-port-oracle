@@ -85,12 +85,12 @@ RANGING_ADX_THRESHOLD = 20
 # ── Regime confidence multipliers ──
 # Ranging market: reduce confidence heavily — ranging BUY WR=33% loses money
 # Volatile market: skip entirely — volatile regime lost -$94 in backtest
-REGIME_RANGING_CONFIDENCE_MULT = 0.3    # Reduce confidence by 70% in ranging
-REGIME_VOLATILE_SKIP = True              # Skip signals entirely in volatile regime
+REGIME_RANGING_CONFIDENCE_MULT = 1.0    # Disabled: good era had no regime penalty (was 0.3)
+REGIME_VOLATILE_SKIP = False            # Disabled: good era had no regime filter
 
 # Counter-trend confidence multiplier (trend_alignment == -1)
 # Counter-trend trades have WR ~5-8% lower than trend-aligned
-COUNTER_TREND_CONFIDENCE_MULT = 0.5     # Reduce confidence by 50% for counter-trend
+COUNTER_TREND_CONFIDENCE_MULT = 1.0     # Disabled: good era had no counter-trend penalty (was 0.5)
 
 # Reversal signal thresholds — used by compute_reversal_signal()
 # Lowered from RSI 70/30, Stoch 80/20, Boll 0.85/0.15, MFI 80/20

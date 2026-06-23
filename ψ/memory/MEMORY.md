@@ -57,6 +57,7 @@
 - [Ghost Trade Prevention](learnings/2026-06-22_ghost-trade-prevention.md) — close_ghost_trades now sets exit_price; reconcile_closed_positions matches MT5 deals; _check_existing_position uses reconciliation; logger scope bug + config.name.value bug
 - [Drawdown DB Sync](learnings/2026-06-22_drawdown-db-sync.md) — drawdown protection now syncs PnL from DB; reconciliation-closed trades bypassed in-memory tracking; daily limits truly enforced
 - [V4 Stable on Real A](learnings/2026-06-22_v4-stable-on-real-a.md) — V4 model pinned on Account A (real) via ML_MODEL_DIR_A; demo accounts use v6+ for data collection
+- [Win Config Analysis](learnings/2026-06-23_win-config-analysis.md) — Good era (before Jun 15): 938t WR=43% PnL=+$1,997; Broken era: 100t WR=33% PnL=-$179; root causes: LEARNING_MODE=1 + sync_pnl bug; trending_SELL is crown jewel (PF=3.0); BUY model PF=0.52 should be disabled or improved
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
