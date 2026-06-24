@@ -71,14 +71,28 @@ EXTENDED_FEATURES = CONSENSUS_FEATURES + [
 CATEGORICAL_COLS = sorted(CATEGORICAL_FEATURES)
 
 # Direction-specific feature sets from XGBoost importance analysis (2026-05-21)
-# BUY relies more on ichimoku cloud + volatility, SELL on DI + money flow
+# V12 update: Added session cyclical, candle patterns, multi-TF alignment, combos
+# BUY relies more on ichimoku cloud + volatility + session timing
 BUY_TOP_FEATURES = [
+    # Original V6 top features (15)
     "dema_21", "atr", "ema_200", "ichimoku_senkou_b", "boll_bw",
     "fear_greed_value", "atr_to_price", "ichimoku_senkou_a", "sma_10",
     "ema_9_21_diff", "macd_hist", "ema_21", "adx", "ad_line_slope", "sma_20",
+    # V12: Session cyclical features (CRITICAL for BUY — WR varies 19-86% by hour)
+    "hour_sin", "hour_cos", "day_of_week_sin", "day_of_week_cos",
+    # V12: Candle pattern features (close_position is #1 V11 feature importance)
+    "close_position", "body_ratio", "direction_streak",
+    # V12: Multi-TF alignment (captures trend consistency across timeframes)
+    "h1_h4_aligned", "h4_d1_aligned", "all_tf_aligned",
+    "price_vs_h4_ema50", "price_vs_d1_ema50",
+    # V12: Momentum combos (interaction terms between indicators)
+    "rsi_adx_combo", "ema_cross_volume",
+    # V12: Volatility features (risk-aware BUY decisions)
+    "rolling_sharpe_20", "vol_of_vol_20",
     # Encoded categorical features (regime one-hot + trend context)
     "regime_trending", "regime_ranging", "regime_volatile",
-    "h4_trend_encoded", "mfi_signal_encoded",
+    "price_vs_cloud_encoded", "d1_trend_encoded", "h4_trend_encoded",
+    "mfi_signal_encoded",
 ]
 SELL_TOP_FEATURES = [
     "dema_21", "session_strength", "price_vs_cloud_encoded", "sma_10",
@@ -110,6 +124,10 @@ class TradeOutcomeConfig:
     # Train separate models per regime/direction?
     regime_specific: bool = True
     direction_specific: bool = True
+
+    # Filter training to specific directions only (e.g., ["BUY"] for V12 BUY models)
+    # None or empty list = train all directions
+    train_directions: Optional[list[str]] = None
 
     # Model type: "rf" (Random Forest) or "gb" (Gradient Boosting)
     model_type: str = "gb"
@@ -146,6 +164,10 @@ class TradeOutcomeConfig:
 
     # Exclude low-confidence trades (noise)
     exclude_low_confidence: bool = True
+
+    # Optuna hyperparameter optimization
+    use_optuna: bool = False
+    optuna_trials: int = 200
 
     def get_feature_cols(self, direction: Optional[str] = None) -> list[str]:
         if self.feature_set == "consensus":
@@ -404,8 +426,10 @@ class TradeOutcomeTrainer:
                 feature_importance={},
             )
 
-        # Select model
-        if self.config.model_type == "rf":
+        # Select model (with Optuna tuning if enabled)
+        if self.config.use_optuna and self.config.model_type == "xgb":
+            model = self._optuna_tune_xgb(X_train, y_train, train_weights)
+        elif self.config.model_type == "rf":
             model = RandomForestClassifier(
                 n_estimators=self.config.rf_n_estimators,
                 max_depth=self.config.rf_max_depth,
@@ -485,6 +509,69 @@ class TradeOutcomeTrainer:
             feature_importance=top_importance,
         )
 
+    def _optuna_tune_xgb(self, X_train: pd.DataFrame, y_train: pd.Series,
+                          sample_weights: Optional[np.ndarray] = None) -> "XGBClassifier":
+        """Use Optuna to find best XGBoost hyperparameters via time-series CV."""
+        try:
+            import optuna
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+        except ImportError:
+            logger.warning("Optuna not installed, falling back to default XGBoost params")
+            from xgboost import XGBClassifier
+            return XGBClassifier(
+                n_estimators=self.config.xgb_n_estimators,
+                max_depth=self.config.xgb_max_depth,
+                min_child_weight=self.config.xgb_min_child_weight,
+                subsample=self.config.xgb_subsample,
+                colsample_bytree=self.config.xgb_colsample_bytree,
+                learning_rate=self.config.xgb_learning_rate,
+                random_state=42, n_jobs=-1, eval_metric="logloss",
+                reg_lambda=self.config.xgb_reg_lambda,
+            )
+
+        from xgboost import XGBClassifier
+        from sklearn.model_selection import cross_val_score
+
+        n_pos = int(y_train.sum())
+        n_neg = len(y_train) - n_pos
+        scale_pos = n_neg / max(n_pos, 1) if self.config.xgb_scale_pos_weight else 1.0
+
+        def objective(trial: optuna.Trial) -> float:
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+                "max_depth": trial.suggest_int("max_depth", 2, 7),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 5.0),
+                "scale_pos_weight": scale_pos,
+                "random_state": 42,
+                "n_jobs": -1,
+                "eval_metric": "logloss",
+            }
+            model = XGBClassifier(**params)
+            n_splits = min(self.config.cv_folds, 3)  # Fewer splits for speed
+            try:
+                tscv = TimeSeriesSplit(n_splits=n_splits)
+                scores = cross_val_score(model, X_train, y_train, cv=tscv, scoring="accuracy")
+                return float(scores.mean())
+            except ValueError:
+                cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
+                return float(scores.mean())
+
+        study = optuna.create_study(direction="maximize")
+        study.optimize(objective, n_trials=self.config.optuna_trials, show_progress_bar=False)
+        best_params = study.best_params
+        logger.info("Optuna best params for XGB: %s (accuracy=%.4f)", best_params, study.best_value)
+        best_params["scale_pos_weight"] = scale_pos
+        best_params["random_state"] = 42
+        best_params["n_jobs"] = -1
+        best_params["eval_metric"] = "logloss"
+        return XGBClassifier(**best_params)
+
     def train(self, db_path: Optional[Path] = None) -> list[ModelResult]:
         """Train models: overall + regime/direction-specific.
 
@@ -521,7 +608,11 @@ class TradeOutcomeTrainer:
 
         # 3. Direction-specific models (with direction-specific features)
         if self.config.direction_specific and "direction" in df.columns:
-            for direction in df["direction"].unique():
+            # Filter directions if train_directions is set (e.g., ["BUY"] for V12 BUY-only training)
+            directions_to_train = df["direction"].unique()
+            if self.config.train_directions:
+                directions_to_train = [d for d in directions_to_train if d.upper() in [t.upper() for t in self.config.train_directions]]
+            for direction in directions_to_train:
                 mask = df["direction"] == direction
                 if mask.sum() < self.config.min_samples:
                     logger.info("Skipping direction=%s: only %d samples", direction, mask.sum())
@@ -542,8 +633,12 @@ class TradeOutcomeTrainer:
         # 4. Regime x Direction models (with direction-specific features)
         if self.config.regime_specific and self.config.direction_specific:
             if "regime" in df.columns and "direction" in df.columns:
+                # Filter directions if train_directions is set
+                directions_to_train = df["direction"].unique()
+                if self.config.train_directions:
+                    directions_to_train = [d for d in directions_to_train if d.upper() in [t.upper() for t in self.config.train_directions]]
                 for regime in df["regime"].unique():
-                    for direction in df["direction"].unique():
+                    for direction in directions_to_train:
                         mask = (df["regime"] == regime) & (df["direction"] == direction)
                         if mask.sum() < self.config.min_samples:
                             continue

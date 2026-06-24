@@ -84,6 +84,8 @@ services:
       - mt5-config-d:/config
     restart: unless-stopped
 
+  # ═══ Oracle Engine for Real-A only — V4 model, production quality ═══
+  # B/C/D moved to oracle-engine-train (V12 mixed model)
   oracle-engine:
     build:
       context: .
@@ -92,7 +94,7 @@ services:
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
       - DRY_RUN=${DRY_RUN:-1}
-      - ACCOUNTS=${ACCOUNTS:-A,B,C}
+      - ACCOUNTS=A
       - DB_PATH=/app/data/oracle.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
@@ -106,81 +108,123 @@ services:
       - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
       - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_MODEL_DIR=${ML_MODEL_DIR:-/app/data/models/trade_outcome_mixed}
       - ML_MODEL_DIR_A=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
-      - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       - MAX_POSITIONS_A=${MAX_POSITIONS_A:-5}
-      - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
-      - MAX_POSITIONS_C=${MAX_POSITIONS_C:-5}
-      - LEARNING_MODE=${LEARNING_MODE:-0}
-      - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-2.0}
-      - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
-      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.0}
+      - LEARNING_MODE=0
+      - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-1.5}
       - RR_RATIO_A=${RR_RATIO_A:-2.5}
-      - RR_RATIO_B=${RR_RATIO_B:-2.5}
-      - RR_RATIO_C=${RR_RATIO_C:-2.5}
       - MIN_CONFIDENCE_A=${MIN_CONFIDENCE_A:-0.45}
-      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.45}
-      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.45}
-      # Per-account max spread (Account A = XAUUSDm Standard, needs wider spread)
+      - BUY_MIN_CONFIDENCE_A=${BUY_MIN_CONFIDENCE_A:-0.45}
       - M5_MAX_SPREAD_A=${M5_MAX_SPREAD_A:-45}
-      - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
-      - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
       - SCALP_MAX_SPREAD_A=${SCALP_MAX_SPREAD_A:-50}
-      - SCALP_MAX_SPREAD_B=${SCALP_MAX_SPREAD_B:-35}
-      - SCALP_MAX_SPREAD_C=${SCALP_MAX_SPREAD_C:-35}
-      # Partial TP (Option C): close at TP1, open scale-in position
       - PARTIAL_TP_ENABLED_A=${PARTIAL_TP_ENABLED_A:-0}
-      - PARTIAL_TP_ENABLED_B=${PARTIAL_TP_ENABLED_B:-0}
-      - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-1}
       - TP1_RATIO_A=${TP1_RATIO_A:-0.5}
-      - TP1_RATIO_B=${TP1_RATIO_B:-0.5}
-      - TP1_RATIO_C=${TP1_RATIO_C:-0.5}
       - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
-      - RR_SCALE_IN_B=${RR_SCALE_IN_B:-2.5}
-      - RR_SCALE_IN_C=${RR_SCALE_IN_C:-2.5}
-      # ═══ Account D config (V6-Demo2) ═══════════════════════════════════
-      - MAX_POSITIONS_D=${MAX_POSITIONS_D:-5}
-      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.5}
-      - RR_RATIO_D=${RR_RATIO_D:-2.5}
-      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
-      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
-      - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
-      - SCALP_MAX_SPREAD_D=${SCALP_MAX_SPREAD_D:-35}
-      - PARTIAL_TP_ENABLED_D=${PARTIAL_TP_ENABLED_D:-0}
-      - TP1_RATIO_D=${TP1_RATIO_D:-0.5}
-      - RR_SCALE_IN_D=${RR_SCALE_IN_D:-2.5}
-      - INITIAL_BALANCE_D=${INITIAL_BALANCE_D:-500}
-      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-500}
-      - LEVERAGE_D=${LEVERAGE_D:-500}
-      - DRAWDOWN_DAILY_LIMIT_D=${DRAWDOWN_DAILY_LIMIT_D:-0.10}
-      - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.20}
-      - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.50}
-      - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-2}
-      # ═══ Initial balances (per account) ═════════════════════════════════════
-      - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-100}
-      - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-100}
-      - INITIAL_BALANCE_B=${INITIAL_BALANCE_B:-100}
-      - INITIAL_EQUITY_B=${INITIAL_EQUITY_B:-100}
-      - INITIAL_BALANCE_C=${INITIAL_BALANCE_C:-1000}
-      - INITIAL_EQUITY_C=${INITIAL_EQUITY_C:-1000}
-      # ═══ Account types (real vs demo) ═══════════════════════════════════
+      - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-1000}
+      - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-1000}
       - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}
-      - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
-      - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
-      - ACCOUNT_TYPE_D=${ACCOUNT_TYPE_D:-demo}
-      # ═══ Per-account drawdown (V4 strict protection for real A) ══════
       - DRAWDOWN_DAILY_LIMIT_A=${DRAWDOWN_DAILY_LIMIT_A:-0.20}
       - DRAWDOWN_WEEKLY_LIMIT_A=${DRAWDOWN_WEEKLY_LIMIT_A:-0.30}
       - DRAWDOWN_ACCOUNT_LIMIT_A=${DRAWDOWN_ACCOUNT_LIMIT_A:-0.30}
       - DRAWDOWN_COOLDOWN_HOURS_A=${DRAWDOWN_COOLDOWN_HOURS_A:-4}
-      # ═══ MT5 Bridge credentials ══════════════════════════════════════════
+      # ═══ MT5 Bridge credentials (A only) ════════════════════════════════
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
       - MT5_SERVER_A=${MT5_SERVER_A:-Exness-MT5Trial17}
       - MT5_BRIDGE_A_HOST=mt5a
       - MT5_BRIDGE_A_PORT=8001
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - TG_CHAT_ID=${TG_CHAT_ID:-}
+    volumes:
+      - oracle-data:/app/data
+    depends_on:
+      mt5a:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ═══ Oracle Engine for B/C/D — V12 mixed model (separate from Real-A) ═══
+  # Real-A uses oracle-engine (V4), B/C/D use oracle-engine-train (V12 mixed)
+  # This separation ensures V12 code changes don't affect Real-A
+  oracle-engine-train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oracle-engine-train
+    environment:
+      - TRADING_PHASE=${TRADING_PHASE:-both}
+      - DRY_RUN=${DRY_RUN:-1}
+      - ACCOUNTS=B,C,D
+      - DB_PATH=/app/data/oracle_train.db
+      - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
+      - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
+      - SCALP_ENABLED=${SCALP_ENABLED:-0}
+      - SCALP_INTERVAL=${SCALP_INTERVAL:-60}
+      - SCALP_SPREAD_MAX=${SCALP_SPREAD_MAX:-30}
+      - SCALP_RISK_PER_TRADE=${SCALP_RISK_PER_TRADE:-0.01}
+      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
+      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
+      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
+      - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
+      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
+      - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
+      - ML_MODEL_DIR=/app/data/models/trade_outcome_mixed_v12
+      - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
+      - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
+      - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
+      - MAX_POSITIONS_C=${MAX_POSITIONS_C:-5}
+      - MAX_POSITIONS_D=${MAX_POSITIONS_D:-5}
+      - LEARNING_MODE=0
+      - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
+      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.0}
+      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.5}
+      - RR_RATIO_B=${RR_RATIO_B:-2.5}
+      - RR_RATIO_C=${RR_RATIO_C:-2.5}
+      - RR_RATIO_D=${RR_RATIO_D:-2.5}
+      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.45}
+      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.45}
+      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
+      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.45}
+      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.45}
+      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
+      - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
+      - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
+      - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
+      - SCALP_MAX_SPREAD_B=${SCALP_MAX_SPREAD_B:-35}
+      - SCALP_MAX_SPREAD_C=${SCALP_MAX_SPREAD_C:-35}
+      - SCALP_MAX_SPREAD_D=${SCALP_MAX_SPREAD_D:-35}
+      - PARTIAL_TP_ENABLED_B=${PARTIAL_TP_ENABLED_B:-0}
+      - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-1}
+      - PARTIAL_TP_ENABLED_D=${PARTIAL_TP_ENABLED_D:-0}
+      - TP1_RATIO_B=${TP1_RATIO_B:-0.5}
+      - TP1_RATIO_C=${TP1_RATIO_C:-0.5}
+      - TP1_RATIO_D=${TP1_RATIO_D:-0.5}
+      - RR_SCALE_IN_B=${RR_SCALE_IN_B:-2.5}
+      - RR_SCALE_IN_C=${RR_SCALE_IN_C:-2.5}
+      - RR_SCALE_IN_D=${RR_SCALE_IN_D:-2.5}
+      - INITIAL_BALANCE_B=${INITIAL_BALANCE_B:-100}
+      - INITIAL_EQUITY_B=${INITIAL_EQUITY_B:-100}
+      - INITIAL_BALANCE_C=${INITIAL_BALANCE_C:-1000}
+      - INITIAL_EQUITY_C=${INITIAL_EQUITY_C:-1000}
+      - INITIAL_BALANCE_D=${INITIAL_BALANCE_D:-100}
+      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-100}
+      - LEVERAGE_D=${LEVERAGE_D:-500}
+      - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
+      - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
+      - ACCOUNT_TYPE_D=${ACCOUNT_TYPE_D:-demo}
+      - DRAWDOWN_DAILY_LIMIT_B=${DRAWDOWN_DAILY_LIMIT_B:-0.10}
+      - DRAWDOWN_WEEKLY_LIMIT_B=${DRAWDOWN_WEEKLY_LIMIT_B:-0.20}
+      - DRAWDOWN_ACCOUNT_LIMIT_B=${DRAWDOWN_ACCOUNT_LIMIT_B:-0.50}
+      - DRAWDOWN_COOLDOWN_HOURS_B=${DRAWDOWN_COOLDOWN_HOURS_B:-2}
+      - DRAWDOWN_DAILY_LIMIT_C=${DRAWDOWN_DAILY_LIMIT_C:-0.10}
+      - DRAWDOWN_WEEKLY_LIMIT_C=${DRAWDOWN_WEEKLY_LIMIT_C:-0.20}
+      - DRAWDOWN_ACCOUNT_LIMIT_C=${DRAWDOWN_ACCOUNT_LIMIT_C:-0.50}
+      - DRAWDOWN_COOLDOWN_HOURS_C=${DRAWDOWN_COOLDOWN_HOURS_C:-2}
+      - DRAWDOWN_DAILY_LIMIT_D=${DRAWDOWN_DAILY_LIMIT_D:-0.10}
+      - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.20}
+      - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.50}
+      - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-2}
+      # ═══ MT5 Bridge credentials (B, C, D only — no A) ══════════════
       - MT5_LOGIN_B=${MT5_LOGIN_B:-}
       - MT5_PASSWORD_B=${MT5_PASSWORD_B:-}
       - MT5_SERVER_B=${MT5_SERVER_B:-Exness-MT5Trial17}
@@ -200,10 +244,8 @@ services:
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
     volumes:
-      - oracle-data:/app/data
+      - oracle-train-data:/app/data
     depends_on:
-      mt5a:
-        condition: service_healthy
       mt5b:
         condition: service_healthy
       mt5c:
@@ -222,4 +264,6 @@ volumes:
   mt5-config-d:
     driver: local
   oracle-data:
+    driver: local
+  oracle-train-data:
     driver: local
