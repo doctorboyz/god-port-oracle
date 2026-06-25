@@ -115,6 +115,17 @@ class M5ScalpTrader:
             "D": int(os.environ.get("MAX_POSITIONS_D", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
         }
         self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
+        # Dynamic position limit: max positions scale with equity
+        # equity_per_position = minimum equity buffer per position ($200 default for XAUUSD 0.01 lot)
+        # max_positions_cap = hard upper limit (default 5)
+        self._equity_per_position = float(os.environ.get(
+            f"EQUITY_PER_POSITION_{self.account}",
+            os.environ.get("EQUITY_PER_POSITION", "200"),
+        ))
+        self._max_positions_cap = int(os.environ.get(
+            f"MAX_POSITIONS_CAP_{self.account}",
+            os.environ.get("MAX_POSITIONS_CAP", "5"),
+        ))
         self.account_id = ACCOUNT_IDS.get(self.account, 1)
         self.risk = risk_config or M5ScalpRiskConfig()
         # Per-account strategy overrides via env vars (for testing different configs)
@@ -744,12 +755,15 @@ class M5ScalpTrader:
             return {"action": "hold", "reason": "existing M5 scalp position open"}
 
         # 2b. Position limit check (always enforced, even in learning mode)
+        # Dynamic max_positions based on current equity and risk (1% per position)
         open_trades = get_open_trades(self.account_id, self.db_path)
-        if len(open_trades) >= self.max_positions:
-            self._record_rejection(None, f"position limit ({len(open_trades)}/{self.max_positions})")
+        current_equity = self._get_balance()
+        dynamic_max = self._calculate_max_positions(current_equity)
+        if len(open_trades) >= dynamic_max:
+            self._record_rejection(None, f"position limit ({len(open_trades)}/{dynamic_max}, equity=${current_equity:.0f})")
             return {
                 "action": "hold",
-                "reason": f"position limit ({len(open_trades)}/{self.max_positions})",
+                "reason": f"position limit ({len(open_trades)}/{dynamic_max}, equity=${current_equity:.0f})",
             }
 
         # 3. Cooldown check (learning mode: skip cooldown)
@@ -1169,6 +1183,41 @@ class M5ScalpTrader:
             if conn:
                 conn.close()
         return 0.0
+
+    def _calculate_max_positions(self, equity: float) -> int:
+        """Calculate max simultaneous positions dynamically based on equity and risk.
+
+        Each position at 0.01 lot on XAUUSD requires ~$200 equity buffer
+        (margin + SL risk + spread + slippage). This ensures small accounts
+        don't over-leverage while larger accounts can scale up safely.
+
+        Formula: max(1, min(cap, floor(equity / equity_per_position)))
+
+        Examples (equity_per_position=200, cap=5):
+          $199 → 1 position  (small account, conservative)
+          $400 → 2 positions
+          $600 → 3 positions
+          $800 → 4 positions
+          $1000+ → 5 positions (capped)
+
+        Args:
+            equity: Current account equity in USD.
+
+        Returns:
+            Maximum number of simultaneous positions (minimum 1).
+        """
+        if equity <= 0:
+            return 1
+
+        calculated = int(equity // self._equity_per_position)
+        result = max(1, min(self._max_positions_cap, calculated))
+
+        logger.debug(
+            "[M5Scalp:%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d → %d",
+            self.display_name, equity, self._equity_per_position,
+            calculated, self._max_positions_cap, result,
+        )
+        return result
 
     def _get_sentiment(self) -> dict:
         """Get sentiment data with 15-minute cache."""

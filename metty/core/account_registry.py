@@ -58,6 +58,8 @@ class AccountConfigInfo:
     symbol: str                            # XAUUSD or XAUUSDm
     risk_per_trade: float
     max_positions: int
+    equity_per_position: float         # minimum equity buffer per position ($200 default)
+    max_positions_cap: int              # hard upper limit for dynamic max_positions
     atr_multiplier: float
     rr_ratio: float
     min_confidence: float
@@ -294,6 +296,14 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
         max_positions=int(os.environ.get(
             f"MAX_POSITIONS_{name}",
             os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"),
+        )),
+        equity_per_position=float(os.environ.get(
+            f"EQUITY_PER_POSITION_{name}",
+            os.environ.get("EQUITY_PER_POSITION", "200"),
+        )),
+        max_positions_cap=int(os.environ.get(
+            f"MAX_POSITIONS_CAP_{name}",
+            os.environ.get("MAX_POSITIONS_CAP", "5"),
         )),
         atr_multiplier=float(os.environ.get(
             f"ATR_MULTIPLIER_{name}",

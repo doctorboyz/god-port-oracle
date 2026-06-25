@@ -119,6 +119,15 @@ class LiveTrader:
             "D": int(os.environ.get("MAX_POSITIONS_D", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
         }
         self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
+        # Dynamic position limit: max positions scale with equity
+        self._equity_per_position = float(os.environ.get(
+            f"EQUITY_PER_POSITION_{self.account}",
+            os.environ.get("EQUITY_PER_POSITION", "200"),
+        ))
+        self._max_positions_cap = int(os.environ.get(
+            f"MAX_POSITIONS_CAP_{self.account}",
+            os.environ.get("MAX_POSITIONS_CAP", "5"),
+        ))
         self.account_id = ACCOUNT_IDS.get(self.account, 3)
         self.risk = risk_config or RiskConfig(
             risk_per_trade=ACCOUNT_RISK.get(self.account, 0.02),
@@ -613,6 +622,27 @@ class LiveTrader:
         except Exception as e:
             logger.debug("[%s] Equity fetch failed: %s", self.display_name, e)
             return None
+
+    def _calculate_max_positions(self, equity: float) -> int:
+        """Calculate max simultaneous positions dynamically based on equity and risk.
+
+        Formula: max(1, min(cap, floor(equity / equity_per_position)))
+
+        Examples (equity_per_position=200, cap=5):
+          $199 → 1 position  (small account, conservative)
+          $400 → 2 positions
+          $1000+ → 5 positions (capped)
+        """
+        if equity <= 0:
+            return 1
+        calculated = int(equity // self._equity_per_position)
+        result = max(1, min(self._max_positions_cap, calculated))
+        logger.debug(
+            "[%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d → %d",
+            self.display_name, equity, self._equity_per_position,
+            calculated, self._max_positions_cap, result,
+        )
+        return result
 
     def _check_existing_position(self) -> bool:
         """Check if there's an open position for this account.
@@ -1227,13 +1257,16 @@ class LiveTrader:
             }
 
         # 4b. Position limit check (always enforced, even in learning mode)
+        # Dynamic max_positions based on current equity and risk (1% per position)
         open_trades = get_open_trades(self.account_id, self.db_path)
-        if len(open_trades) >= self.max_positions:
-            log_position(logger, "LIMIT", account=self.account, count=len(open_trades), max=self.max_positions)
+        current_equity = equity if equity else self._get_equity() or self.initial_balance
+        dynamic_max = self._calculate_max_positions(current_equity)
+        if len(open_trades) >= dynamic_max:
+            log_position(logger, "LIMIT", account=self.account, count=len(open_trades), max=dynamic_max)
             self._record_rejection(signal, "position_limit", session, d1_trend, candles)
             return {
                 "action": "hold",
-                "reason": f"position limit ({len(open_trades)}/{self.max_positions})",
+                "reason": f"position limit ({len(open_trades)}/{dynamic_max}, equity=${current_equity:.0f})",
                 "signal": signal,
             }
 

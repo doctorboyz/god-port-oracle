@@ -247,6 +247,139 @@ def compute_missing_features(df: pd.DataFrame) -> pd.DataFrame:
     result["_direction"] = np.where(result["_price_diff"] > 0, "BUY",
                                      np.where(result["_price_diff"] < 0, "SELL", "FLAT"))
 
+    # ═══ V12 Features ══════════════════════════════════════════════════════
+    # Session cyclical features (critical for BUY — WR varies 19-86% by hour)
+    hour_vals = hours.values if hasattr(hours, 'values') else np.asarray(hours)
+    result["hour"] = hour_vals
+    day_of_week = result.index.dayofweek
+    result["day_of_week"] = day_of_week
+    result["hour_sin"] = np.sin(hour_vals * (2 * np.pi / 24))
+    result["hour_cos"] = np.cos(hour_vals * (2 * np.pi / 24))
+    result["day_of_week_sin"] = np.sin(day_of_week * (2 * np.pi / 7))
+    result["day_of_week_cos"] = np.cos(day_of_week * (2 * np.pi / 7))
+    result["session_london_ny_overlap"] = np.where(
+        (hour_vals >= 13) & (hour_vals <= 16), 1.0, 0.0
+    )
+
+    # Candle pattern features (close_position is #1 V11 feature by importance)
+    hl_range = (high - low).replace(0, np.nan)
+    result["close_position"] = ((close - low) / hl_range).fillna(0.5)
+    result["body_ratio"] = ((close - result["open"]).abs() / hl_range.fillna(1)).clip(0, 1)
+    oc_max = pd.concat([result["open"], close], axis=1).max(axis=1)
+    oc_min = pd.concat([result["open"], close], axis=1).min(axis=1)
+    result["upper_shadow_ratio"] = (high - oc_max) / hl_range.fillna(1)
+    result["lower_shadow_ratio"] = (oc_min - low) / hl_range.fillna(1)
+    result["doji"] = (result["body_ratio"] < 0.1).astype(int)
+    # Inside/outside bar — use shifted high/low
+    result["prev_high"] = high.shift(1)
+    result["prev_low"] = low.shift(1)
+    result["inside_bar"] = ((high <= result["prev_high"]) & (low >= result["prev_low"])).astype(int)
+    result["outside_bar"] = ((high >= result["prev_high"]) & (low <= result["prev_low"])).astype(int)
+
+    # Direction streak — consecutive bars in same direction
+    price_dir = np.sign(close.diff())
+    groups = (price_dir != price_dir.shift()).cumsum()
+    result["direction_streak"] = price_dir.groupby(groups).cumcount() * price_dir
+
+    # Momentum features (ROC at multiple timeframes)
+    for period, name in [(4, "roc_4"), (12, "roc_12"), (24, "roc_24")]:
+        result[name] = close.pct_change(period) * 100
+    if "ema_9" in result.columns and "ema_21" in result.columns:
+        result["ema_momentum_9_21"] = result["ema_9"] / result["ema_21"] - 1
+    if "ema_50" in result.columns and "ema_200" in result.columns:
+        result["ema_momentum_50_200"] = result["ema_50"] / result["ema_200"] - 1
+
+    # Volatility features
+    if "atr" in result.columns:
+        result["vol_of_vol_20"] = result["atr"].pct_change().rolling(20).std()
+        result["atr_pct_change_4"] = result["atr"].pct_change(4)
+    returns = close.pct_change()
+    result["rolling_sharpe_20"] = returns.rolling(20).mean() / (returns.rolling(20).std() + 1e-8)
+    downside = returns.where(returns < 0, 0)
+    result["rolling_sortino_20"] = returns.rolling(20).mean() / (downside.rolling(20).std() + 1e-8)
+    if "volume_roc" in result.columns:
+        result["volume_acceleration"] = result["volume_roc"].diff()
+
+    # Multi-TF alignment features
+    # EMA alignment: price above EMA = bullish (1), below = bearish (-1)
+    if "ema_50" in result.columns:
+        result["h4_ema_alignment"] = np.where(close > result["ema_50"], 1, -1)
+        result["d1_ema_alignment"] = np.where(close > result["ema_200"], 1, -1)
+    else:
+        result["h4_ema_alignment"] = 0
+        result["d1_ema_alignment"] = 0
+
+    # H4/D1 trend alignment
+    if "h4_trend" in result.columns and "d1_trend" in result.columns:
+        h4_bull = (result["h4_trend"] == "bullish").astype(int)
+        h4_bear = (result["h4_trend"] == "bearish").astype(int)
+        d1_bull = (result["d1_trend"] == "bullish").astype(int)
+        d1_bear = (result["d1_trend"] == "bearish").astype(int)
+        result["h1_h4_aligned"] = h4_bull
+        result["h4_d1_aligned"] = np.where(result["h4_trend"] == result["d1_trend"], 1, 0).astype(int)
+        result["all_tf_aligned"] = np.where(
+            (h4_bull & d1_bull) | (h4_bear & d1_bear), 1, 0
+        ).astype(int)
+    else:
+        result["h1_h4_aligned"] = 0
+        result["h4_d1_aligned"] = 0
+        result["all_tf_aligned"] = 0
+
+    # Price vs H4/D1 EMA50
+    if "ema_50" in result.columns:
+        result["price_vs_h4_ema50"] = (close - result["ema_50"]) / result["ema_50"] * 100
+        result["price_vs_d1_ema50"] = (close - result["ema_200"]) / result["ema_200"] * 100
+    else:
+        result["price_vs_h4_ema50"] = 0.0
+        result["price_vs_d1_ema50"] = 0.0
+
+    # Combo features (interactions between indicators)
+    if all(c in result.columns for c in ["rsi", "adx"]):
+        rsi_norm = result["rsi"] / 100.0
+        adx_norm = result["adx"] / 50.0
+        result["rsi_adx_combo"] = rsi_norm * adx_norm
+    else:
+        result["rsi_adx_combo"] = 0.0
+    if all(c in result.columns for c in ["ema_9", "ema_21", "tick_volume_ratio"]):
+        ema_cross = np.where(result["ema_9"] > result["ema_21"], 1, -1)
+        result["ema_cross_volume"] = ema_cross * result["tick_volume_ratio"]
+    else:
+        result["ema_cross_volume"] = 0.0
+    if all(c in result.columns for c in ["boll_pct_b", "rsi"]):
+        result["boll_rsi_combo"] = result["boll_pct_b"] * result["rsi"] / 100.0
+    else:
+        result["boll_rsi_combo"] = 0.0
+    if all(c in result.columns for c in ["adx", "tick_volume_ratio"]):
+        result["adx_volume_combo"] = result["adx"] / 50.0 * result["tick_volume_ratio"]
+    else:
+        result["adx_volume_combo"] = 0.0
+    if all(c in result.columns for c in ["macd_hist", "adx"]):
+        result["macd_adx_combo"] = result["macd_hist"] * result["adx"] / 50.0
+    else:
+        result["macd_adx_combo"] = 0.0
+
+    # Fear & greed extended
+    if "fear_greed_value" in result.columns:
+        fg = result["fear_greed_value"].astype(float)
+        result["fear_greed_change"] = fg.diff(5).fillna(0)
+        fg_mean = fg.rolling(20).mean()
+        fg_std = fg.rolling(20).std().replace(0, 1e-8)
+        result["fear_greed_zscore"] = ((fg - fg_mean) / fg_std).fillna(0)
+    else:
+        result["fear_greed_change"] = 0.0
+        result["fear_greed_zscore"] = 0.0
+
+    # Zone classification (price relative to key EMAs)
+    if all(c in result.columns for c in ["close", "ema_50", "ema_200"]):
+        above_50 = close > result["ema_50"]
+        above_200 = close > result["ema_200"]
+        result["zone_encoded"] = np.where(
+            above_200, np.where(above_50, 2, 1),
+            np.where(~above_50, -1, 0)
+        ).astype(float)
+    else:
+        result["zone_encoded"] = 0.0
+
     return result
 
 
@@ -532,6 +665,31 @@ def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy
         "regime_trending", "regime_ranging", "regime_volatile",
         # Balance/leverage
         "balance_at_entry", "leverage_at_entry",
+        # ═══ V12 Features ══════════════════════════════════════════════════
+        # Raw OHLC (needed for candle pattern computation at inference)
+        "open", "high", "low", "close",
+        # Session cyclical (critical for BUY — WR varies 19-86% by hour)
+        "hour", "day_of_week", "hour_sin", "hour_cos",
+        "day_of_week_sin", "day_of_week_cos", "session_london_ny_overlap",
+        # Candle pattern features (close_position is #1 V11 feature by importance)
+        "close_position", "body_ratio", "upper_shadow_ratio", "lower_shadow_ratio",
+        "doji", "inside_bar", "outside_bar", "direction_streak",
+        # Momentum features
+        "roc_4", "roc_12", "roc_24", "ema_momentum_9_21", "ema_momentum_50_200",
+        # Volatility features
+        "vol_of_vol_20", "rolling_sharpe_20", "rolling_sortino_20",
+        "atr_pct_change_4", "volume_acceleration",
+        # Multi-TF alignment features
+        "h4_ema_alignment", "d1_ema_alignment",
+        "h1_h4_aligned", "h4_d1_aligned", "all_tf_aligned",
+        "price_vs_h4_ema50", "price_vs_d1_ema50",
+        # Combo features (interactions between indicators)
+        "rsi_adx_combo", "ema_cross_volume", "boll_rsi_combo",
+        "adx_volume_combo", "macd_adx_combo",
+        # Fear & greed extended
+        "fear_greed_change", "fear_greed_zscore",
+        # Zone classification
+        "zone_encoded",
     ]
 
     saved = 0
@@ -567,7 +725,8 @@ def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy
         profit_pct = float(row["profit_pct"]) if pd.notna(row["profit_pct"]) else 0.0
 
         # Use negative trade_id for synthetic trades (avoids collision with live trades)
-        trade_id = -(saved + 1)
+        # Offset by 200000 to avoid collision with v6 backfill (-1 to -98389)
+        trade_id = -(200000 + saved + 1)
 
         # Compute entry/exit prices from the candle data
         entry_price = float(row["close"]) if pd.notna(row["close"]) else 0.0
