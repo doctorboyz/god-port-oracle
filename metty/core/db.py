@@ -987,28 +987,18 @@ def close_ghost_trades(
         from datetime import datetime as _dt
         now = _dt.utcnow().isoformat()
 
-        # Use SQL COALESCE so exit_price is always set:
-        # 1. If stop_loss exists → use it (most likely scenario for ghost trades)
-        # 2. Else use entry_price (breakeven — we don't know the actual exit)
-        # Also compute pnl and pnl_pct from the inferred exit_price.
+        # Use entry_price as exit for ghost trades (no MT5 ticket = never sent).
+        # Ghost trades never executed on MT5, so SL/TP prices are meaningless.
+        # Using entry_price records PnL as 0 (breakeven) — neutral, not inflated.
+        # COALESCE handles edge case where entry_price might be NULL (shouldn't happen).
         cursor = conn.execute(
             """UPDATE live_trades
                SET is_open = 0,
                    exit_time = ?,
                    exit_reason = 'ghost_no_mt5_ticket',
-                   exit_price = COALESCE(stop_loss, entry_price),
-                   pnl = CASE
-                       WHEN direction = 'BUY' THEN
-                           (COALESCE(stop_loss, entry_price) - entry_price) * lot_size * 100
-                       ELSE
-                           (entry_price - COALESCE(stop_loss, entry_price)) * lot_size * 100
-                   END,
-                   pnl_pct = CASE
-                       WHEN direction = 'BUY' THEN
-                           ROUND((COALESCE(stop_loss, entry_price) - entry_price) / entry_price * 100, 4)
-                       ELSE
-                           ROUND((entry_price - COALESCE(stop_loss, entry_price)) / entry_price * 100, 4)
-                   END
+                   exit_price = COALESCE(entry_price, stop_loss),
+                   pnl = 0,
+                   pnl_pct = 0
                WHERE account_id = ? AND is_open = 1 AND ticket IS NULL""",
             (now, account_id),
         )
@@ -1040,18 +1030,41 @@ def _match_closing_deal(
       - A BUY position is closed by a SELL deal (type=1)
       - A SELL position is closed by a BUY deal (type=0)
 
-    Matching strategy (in order):
-      1. Price proximity + direction + time window
+    Matching strategy (in order of reliability):
+      0. Ticket/order match (most reliable — MT5 links deals to positions)
+      1. Price proximity + direction
       2. Exact SL/TP price match
+      3. Time proximity (for force-closes where price is far from entry)
     """
     entry_price = float(trade.get("entry_price", 0))
     direction = trade.get("direction", "").upper()
+    ticket = trade.get("ticket")
 
     if not entry_price or not direction:
         return None
 
     # Closing direction is opposite of entry
     closing_type = 1 if direction == "BUY" else 0
+
+    # Strategy 0: Ticket/order match — MT5 links closing deals to positions
+    # via deal.order == position.ticket. This is the most reliable match.
+    if ticket is not None:
+        ticket_int = int(ticket)
+        for deal in deals:
+            deal_order = deal.get("order")
+            if deal_order is not None and int(deal_order) == ticket_int:
+                deal_type = deal.get("type", -1)
+                if deal_type not in (0, 1):
+                    continue
+                # Closing deal direction must be opposite of position direction
+                if deal_type == closing_type:
+                    deal_price = float(deal.get("price", 0))
+                    if deal_price > 0:
+                        logger.debug(
+                            "Matched trade #%d (ticket=%d) to deal order=%d price=%.2f via ticket",
+                            trade.get("id"), ticket_int, deal_order, deal_price,
+                        )
+                        return deal
 
     # Strategy 1: price proximity + direction
     best_match: dict | None = None
@@ -1095,17 +1108,79 @@ def _match_closing_deal(
         if (sl > 0 and abs(deal_price - sl) < 0.1) or (tp > 0 and abs(deal_price - tp) < 0.1):
             return deal
 
+    # Strategy 3: time proximity — match by deal timestamp close to trade close time.
+    # This handles force-closes where MT5 closes at market price (not SL/TP)
+    # and the deal price is far from the entry price.
+    trade_time = trade.get("timestamp") or trade.get("exit_time")
+    if trade_time and deals:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            # Parse trade timestamp
+            if isinstance(trade_time, str):
+                # Handle various ISO formats
+                trade_time = trade_time.replace("Z", "+00:00")
+                trade_dt = _dt.fromisoformat(trade_time)
+                if trade_dt.tzinfo is None:
+                    trade_dt = trade_dt.replace(tzinfo=_tz.utc)
+            else:
+                trade_dt = None
+
+            if trade_dt is not None:
+                best_time_match: dict | None = None
+                best_time_diff = float("inf")
+                # Look for deals within 60 seconds of trade time
+                max_time_diff = 60  # seconds
+
+                for deal in deals:
+                    deal_type = deal.get("type", -1)
+                    if deal_type not in (0, 1):
+                        continue
+                    if deal_type != closing_type:
+                        continue
+
+                    deal_price = float(deal.get("price", 0))
+                    if deal_price == 0:
+                        continue
+
+                    deal_time = deal.get("time")
+                    if deal_time is None:
+                        continue
+                    # deal time is Unix timestamp (seconds or milliseconds)
+                    deal_ts = float(deal_time)
+                    if deal_ts > 1e12:  # milliseconds
+                        deal_ts /= 1000
+
+                    time_diff = abs(trade_dt.timestamp() - deal_ts)
+                    if time_diff < max_time_diff and time_diff < best_time_diff:
+                        best_time_diff = time_diff
+                        best_time_match = deal
+
+                if best_time_match:
+                    logger.debug(
+                        "Matched trade #%d to deal via time proximity (diff=%.1fs)",
+                        trade.get("id"), best_time_diff,
+                    )
+                    return best_time_match
+        except (ValueError, OSError):
+            pass  # Time parsing failed, skip strategy 3
+
     return None
 
 
 def _infer_exit_price(trade: dict) -> float | None:
-    """Infer exit price from SL/TP when deal history is unavailable.
+    """Infer exit price when deal history is unavailable.
 
     For ghost/orphan trades, MT5 closed the position but we couldn't find the deal.
     Most likely scenarios:
       - SL hit → use stop_loss
       - TP hit → use take_profit
-      - Unknown → use SL (pessimistic, most ghost trades are losses)
+      - Force-close / unknown → use entry_price (breakeven, more neutral than SL)
+
+    IMPORTANT: We no longer default to SL for unknown cases. Using SL as default
+    made force-closed trades appear as worse losses than they actually were, because
+    MT5 closes at market price (not SL price) during margin calls / stop-outs.
+    Using entry_price as fallback is more neutral — it records PnL as ~0 instead
+    of a large fabricated loss.
     """
     sl = trade.get("stop_loss")
     tp = trade.get("take_profit")
@@ -1118,13 +1193,24 @@ def _infer_exit_price(trade: dict) -> float | None:
     if "tp" in reason or "take" in reason:
         return float(tp) if tp else None
 
-    # Default: SL is most likely (pessimistic assumption)
+    # For force-closes / margin calls / unknown exits:
+    # Do NOT default to SL — MT5 closes at market price, not SL.
+    # Use entry_price (breakeven) as a neutral fallback.
+    # This avoids inflating losses from force-closed positions.
+    entry = trade.get("entry_price")
+    if entry:
+        logger.warning(
+            "Trade #%d: cannot find deal, using entry_price=%.2f as exit (not SL=%.2f) "
+            "— force-close prices differ from SL",
+            trade.get("id"), float(entry), float(sl) if sl else 0,
+        )
+        return float(entry)
+
+    # Absolute last resort: SL if entry unavailable (shouldn't happen)
     if sl:
         return float(sl)
 
-    # Last resort: entry price (breakeven)
-    entry = trade.get("entry_price")
-    return float(entry) if entry else None
+    return None
 
 
 def reconcile_closed_positions(

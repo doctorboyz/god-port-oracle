@@ -153,25 +153,37 @@ def match_deal_to_trade(trade: dict, deals: list[dict]) -> dict | None:
       - A BUY position is closed by a SELL deal at the exit price
       - A SELL position is closed by a BUY deal at the exit price
 
-    Matching strategy:
-    1. Match by comment field (contains "close-ORDER_ID" pattern)
-    2. Match by entry price proximity + direction + time window
+    Matching strategy (in order of reliability):
+      0. Ticket/order match (MT5 links deals to positions via order field)
+      1. Price proximity + direction
+      2. Exact SL/TP price match
+      3. Time proximity (for force-closes where price is far from entry)
     """
     entry_price = float(trade.get("entry_price", 0))
     direction = trade.get("direction", "").upper()
+    ticket = trade.get("ticket")
 
     # MT5 closing direction: opposite of entry
     # BUY position closed by SELL deal (type=1)
     # SELL position closed by BUY deal (type=0)
     closing_type = 1 if direction == "BUY" else 0
 
-    # Strategy 1: match by comment field
-    # MT5 closing deals often have comment like "[sl 4171.30]" or "[tp 4157.66]"
-    # or "close-ORDER_ID"
-    trade_ticket = trade.get("ticket")
+    # Strategy 0: Ticket/order match — most reliable
+    # MT5 links closing deals to positions via deal.order == position.ticket
+    if ticket is not None:
+        ticket_int = int(ticket)
+        for deal in deals:
+            deal_order = deal.get("order")
+            if deal_order is not None and int(deal_order) == ticket_int:
+                deal_type = deal.get("type", -1)
+                if deal_type not in (0, 1):
+                    continue
+                if deal_type == closing_type:
+                    deal_price = float(deal.get("price", 0))
+                    if deal_price > 0:
+                        return deal
 
-    # Strategy 2: match by price + direction + time
-    # Look for deals that could be the closing deal
+    # Strategy 1: match by price + direction
     best_match = None
     best_price_diff = float("inf")
 
@@ -203,7 +215,7 @@ def match_deal_to_trade(trade: dict, deals: list[dict]) -> dict | None:
     if best_match:
         return best_match
 
-    # Strategy 3: if no closing deal found, try matching SL/TP price directly
+    # Strategy 2: if no closing deal found, try matching SL/TP price directly
     sl = float(trade.get("stop_loss", 0)) if trade.get("stop_loss") else 0
     tp = float(trade.get("take_profit", 0)) if trade.get("take_profit") else 0
 
@@ -220,17 +232,65 @@ def match_deal_to_trade(trade: dict, deals: list[dict]) -> dict | None:
         if (sl > 0 and abs(deal_price - sl) < 0.1) or (tp > 0 and abs(deal_price - tp) < 0.1):
             return deal
 
+    # Strategy 3: time proximity — for force-closes where price is far from entry
+    trade_time = trade.get("timestamp") or trade.get("exit_time")
+    if trade_time and deals:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            if isinstance(trade_time, str):
+                ts = trade_time.replace("Z", "+00:00")
+                trade_dt = _dt.fromisoformat(ts)
+                if trade_dt.tzinfo is None:
+                    trade_dt = trade_dt.replace(tzinfo=_tz.utc)
+
+                best_time_match = None
+                best_time_diff = float("inf")
+                max_time_diff = 60  # seconds
+
+                for deal in deals:
+                    deal_type = deal.get("type", -1)
+                    if deal_type not in (0, 1):
+                        continue
+                    if deal_type != closing_type:
+                        continue
+
+                    deal_price = float(deal.get("price", 0))
+                    if deal_price == 0:
+                        continue
+
+                    deal_time = deal.get("time")
+                    if deal_time is None:
+                        continue
+                    deal_ts = float(deal_time)
+                    if deal_ts > 1e12:  # milliseconds
+                        deal_ts /= 1000
+
+                    time_diff = abs(trade_dt.timestamp() - deal_ts)
+                    if time_diff < max_time_diff and time_diff < best_time_diff:
+                        best_time_diff = time_diff
+                        best_time_match = deal
+
+                if best_time_match:
+                    return best_time_match
+        except (ValueError, OSError):
+            pass
+
     return None
 
 
 def infer_exit_price(trade: dict) -> float | None:
-    """Infer exit price from SL/TP when deal history is unavailable.
+    """Infer exit price when deal history is unavailable.
 
     For ghost trades, MT5 closed the position but we couldn't find the deal.
     Most likely scenarios:
-    - SL hit → use stop_loss
-    - TP hit → use take_profit
-    - Unknown → use SL (pessimistic, most ghost trades are losses)
+      - SL hit → use stop_loss
+      - TP hit → use take_profit
+      - Force-close / unknown → use entry_price (breakeven, more neutral than SL)
+
+    IMPORTANT: We no longer default to SL for unknown cases. Using SL as default
+    made force-closed trades appear as worse losses than they actually were, because
+    MT5 closes at market price (not SL price) during margin calls / stop-outs.
+    Using entry_price as fallback records PnL as ~0 instead of a fabricated loss.
     """
     sl = trade.get("stop_loss")
     tp = trade.get("take_profit")
@@ -244,7 +304,18 @@ def infer_exit_price(trade: dict) -> float | None:
     if "tp" in reason.lower() or "take" in reason.lower():
         return float(tp) if tp else None
 
-    # For phantom/ghost/stale trades: default to SL (most likely scenario)
+    # For force-closes / unknown exits: use entry_price (breakeven), NOT SL.
+    # SL price ≠ actual close price during margin calls / stop-outs.
+    entry = trade.get("entry_price")
+    if entry:
+        logger.warning(
+            "Trade #%d: no deal match, using entry_price=%.2f as exit (not SL=%.2f) "
+            "— force-close prices differ from SL",
+            trade.get("id"), float(entry), float(sl) if sl else 0,
+        )
+        return float(entry)
+
+    # Absolute last resort
     if sl:
         return float(sl)
 
