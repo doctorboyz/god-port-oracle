@@ -199,6 +199,8 @@ class M5ScalpTrader:
         self._sentiment_cache: dict = {}
         self._sentiment_cache_time: float = 0
         self._mfe_mae_state: dict[int, dict] = {}  # trade_id → {mfe, mae}
+        self._equity_cache: float = 0.0  # cached MT5 equity
+        self._equity_cache_time: float = 0.0  # timestamp of last MT5 equity fetch
         self._last_d1_trend: Optional[str] = None
         self._last_h4_trend: Optional[str] = None
         self._notifier: Optional[object] = None  # Set by main loop if available
@@ -1109,7 +1111,46 @@ class M5ScalpTrader:
             return {"action": "error", "reason": str(e)}
 
     def _get_balance(self) -> float:
-        """Get account balance from DB or bridge."""
+        """Get account equity from MT5 (real-time), fall back to DB balance.
+
+        Drawdown protection and position sizing MUST use real equity from MT5,
+        not stale DB balance. This ensures risk calculations reflect reality.
+        When MT5 is reachable, we also update DB so other tools see the real value.
+
+        Uses a 60-second cache to avoid creating multiple MT5 connections per cycle.
+        """
+        # 0. Return cached equity if fresh (< 60s old)
+        now = time.time()
+        if self._equity_cache > 0 and (now - self._equity_cache_time) < 60:
+            return self._equity_cache
+
+        # 1. Try MT5 first — real-time equity is the source of truth
+        try:
+            config = self._get_account_config()
+            bridge = MT5Bridge(config)
+            info = bridge.fetch_account_info_sync()
+            if info and info.equity > 0:
+                equity = info.equity
+                self._equity_cache = equity
+                self._equity_cache_time = now
+                # Sync real equity back to DB so other tools see it too
+                try:
+                    from metty.core.db import get_connection
+                    conn = get_connection(self.db_path)
+                    conn.execute(
+                        "UPDATE accounts SET balance = ? WHERE name = ?",
+                        (equity, self.account),
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass  # DB update is best-effort, not critical
+                logger.debug("[M5Scalp:%s] MT5 equity: $%.2f", self.display_name, equity)
+                return equity
+        except Exception as e:
+            logger.warning("[M5Scalp:%s] MT5 equity fetch failed, falling back to DB: %s", self.display_name, e)
+
+        # 2. Fall back to DB balance (may be stale)
         conn = None
         try:
             from metty.core.db import get_connection
@@ -1119,9 +1160,11 @@ class M5ScalpTrader:
                 (self.account,),
             ).fetchone()
             if row:
-                return float(row[0])
+                balance = float(row[0])
+                logger.debug("[M5Scalp:%s] DB balance (fallback): $%.2f", self.display_name, balance)
+                return balance
         except Exception as e:
-            logger.warning("[M5Scalp:%s] Balance fetch failed: %s", self.display_name, e)
+            logger.warning("[M5Scalp:%s] DB balance fetch failed: %s", self.display_name, e)
         finally:
             if conn:
                 conn.close()
