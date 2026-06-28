@@ -71,21 +71,37 @@ Verified on VPS: 9 models loaded, engineer `broky.ml.features`, health OK.
 
 V4 BUY models are weak (PF=0.5) but V4 is strictly better than no filter at all.
 
-## Follow-up (NOT done — needs ISSUE-034)
+## Follow-up (2026-06-28 — DONE, mixed_v12 NOT worth deploying)
 
-To restore the original mixed_v12 intent (V11 SELL PF=3.0 + V12 BUY), retrain
-**without bxau**:
-1. Retrain V11 SELL models using `broky.ml.features.FeatureEngineer` (in this
-   repo, not bxau). Same hyperparams, same data, just different engineer class.
-2. Retrain V12 BUY models (already use broky.ml — but verify).
-3. Rebuild mixed_v12 directory with new V11 SELL + V12 BUY models + a fresh
-   `feature_engineer.joblib` from broky.ml.features.
-4. Backtest mixed_v12 vs V4 — only deploy if PF > V4's 1.71.
-5. Update `scripts/build_mixed_v12_metadata.py` to use new metadata.
+Tested whether fixing the bxau dependency would make mixed_v12 viable. Built
+`scripts/rebuild_engineer_no_bxau.py` which creates a fresh
+`broky.ml.features.FeatureEngineer` fit on 196,796 trade_outcomes from
+oracle.db, producing 137/139 features V11 expects (only d1_close, h4_close
+missing — filled with 0; h4_close has 0 importance, d1_close 0.76%).
 
-User directive: "ไม่ควรมี bxau เพราะแยกกันเด็ดขาดออกไปล้ว" — bxau must be
-fully removed from god-port-oracle's ML pipeline. It's a separate personal
-package and must never be a production dependency.
+Backtest `scripts/backtest_ml_filter.py --start 2025-10-01 --account all`:
+
+| Account | Model | Thresh | Trades | Kept | PnL | WR | PF |
+|---------|-------|--------|--------|------|-----|-----|-----|
+| A | V4 | 0.65 | 64 | 45 | $1,193 | 46.7% | **1.77** |
+| A | V4 | 0.75 | 64 | 52 | $1,442 | 46.2% | **1.84** |
+| A | mixed_v12 | 0.65 | 64 | 61 | $1,417 | 44.3% | 1.69 |
+| B | V4 | 0.65 | 75 | 50 | $150 | 36.0% | **1.06** |
+| B | mixed_v12 | 0.65 | 75 | 67 | -$46 | 35.8% | 0.98 |
+| C | V4 | 0.65 | 81 | 49 | $694 | 44.9% | **1.44** |
+| C | mixed_v12 | 0.65 | 81 | 72 | $635 | 40.3% | 1.28 |
+
+**V4 beats mixed_v12 on every account at threshold 0.65.** V11's training
+PF=3.0 (classification PF, wins/false_wins) does NOT translate to better real
+trading PF — V11 SELL models are overfit to training data.
+
+**Decision**: V4 stays as production model for A + B/C/D. mixed_v12 abandoned.
+No retrain needed — even a working mixed_v12 doesn't outperform V4.
+
+The mixed_v12 directory + `build_mixed_v12_metadata.py` +
+`rebuild_engineer_no_bxau.py` are kept as reference artifacts but NOT deployed.
+To revisit: train a V13 with proper separation of training PF vs trading PF,
+and only deploy if backtest PF > V4's 1.77 at threshold 0.65.
 
 ## Lesson
 
