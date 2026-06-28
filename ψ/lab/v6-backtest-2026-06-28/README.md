@@ -162,15 +162,17 @@ trade patterns but is evaluated on different configs. Fixing this requires
 backfilling B/C/D-specific training data (run backfill with B config, C
 config separately) — a substantial effort beyond this session's scope.
 
-### Final five-experiment summary
+### Final seven-experiment summary
 
-| Variant | Features | Hyperparams | Weighting | A PF | B PF | C PF |
-|---------|----------|-------------|-----------|------|------|------|
-| v6_consensus | 7 | default | standard | 1.59 | 0.87 | 1.30 |
-| **v6 (orig)** | **65** | **default** | **standard** | **2.05** | **1.05** | **1.69** |
-| v6_ext | 139 | default | standard | 1.65 | 1.06 | 1.33 |
-| v6_tuned | 65 | tuned | standard | 1.81 | 0.96 | 1.40 |
-| v6_pnlw | 65 | default | PnL-magnitude | 1.65 | 1.06 | 1.33 |
+| Variant | Features | Hyperparams | Weighting | Training data | A PF | B PF | C PF |
+|---------|----------|-------------|-----------|---------------|------|------|------|
+| v6_consensus | 7 | default | standard | account 0 | 1.59 | 0.87 | 1.30 |
+| **v6 (orig)** | **65** | **default** | **standard** | **account 0** | **2.05** | **1.05** | **1.69** |
+| v6_ext | 139 | default | standard | account 0 | 1.65 | 1.06 | 1.33 |
+| v6_tuned | 65 | tuned | standard | account 0 | 1.81 | 0.96 | 1.40 |
+| v6_pnlw | 65 | default | PnL-magnitude | account 0 | 1.65 | 1.06 | 1.33 |
+| v6_bspec | 65 | default | standard | B-specific (10) | — | 0.82 | — |
+| v6_cspec | 65 | default | standard | C-specific (11) | — | — | 1.24 |
 
 v6 (original) wins on every account. IRON LAW bar met per-account on C
 (PF 1.69) and A (PF 2.05). Combined B+C PF maxes at 1.23 — unreachable
@@ -200,3 +202,28 @@ standard weighting) is the best variant on every account.** The bottleneck is
 NOT the training objective, feature count, or hyperparameters — it's that
 B's trades are fundamentally weak (unfiltered PF=0.87) and no model can lift
 them above ~1.06 without blocking 60%+ of trades.
+
+### v6_bspec / v6_cspec — account-specific training data also hurts
+
+Hypothesis: training/backtest config mismatch is the real blocker. The original
+backfill labels use 2x ATR TP / 1x ATR SL — doesn't match any account's actual
+trade geometry (A: 9x/3x, B: 6.25x/2.5x, C: 4x/2x). Re-backfilled with
+account-specific TP/SL multipliers and trained v6 on each.
+
+| Account | v6 best PF | v6_xspec best PF | Winner |
+|---------|-----------|-------------------|--------|
+| B | 1.05 | 0.82 (v6_bspec @0.70) | **v6** |
+| C | 1.69 | 1.24 (v6_cspec @0.70) | **v6** |
+
+**Account-specific training data made things WORSE, not better.** The original
+2x/1x ATR labeling is a moderate threshold that produces balanced labels
+(50.7% WR) capturing a general "will price move favorably" signal. Account-
+specific labeling (6.25x/2.5x for B, 4x/2x for C) asks a harder, noisier
+question — larger thresholds mean rarer TP hits, so labels are noisier and
+the model can't learn the signal as well.
+
+**Key insight**: the original 2x/1x labeling is actually a GOOD general-purpose
+proxy that correlates with trade outcomes across configs. It doesn't exactly
+match any account's geometry, but it doesn't need to — it captures the
+underlying market-property signal that generalizes. Account-specific labeling
+makes the prediction question too hard and reduces signal-to-noise ratio.

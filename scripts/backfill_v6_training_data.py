@@ -384,7 +384,9 @@ def compute_missing_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_trade_outcomes(df: pd.DataFrame, min_forward_bars: int = 24,
-                             threshold_pct: float = PIP_THRESHOLD_PCT) -> pd.DataFrame:
+                             threshold_pct: float = PIP_THRESHOLD_PCT,
+                             tp_atr_mult: float = 2.0,
+                             sl_atr_mult: float = 1.0) -> pd.DataFrame:
     """Generate WIN/LOSS labels using ATR-based dynamic thresholds and signal quality filters.
 
     Key improvements:
@@ -392,7 +394,12 @@ def generate_trade_outcomes(df: pd.DataFrame, min_forward_bars: int = 24,
     2. Only label bars where ADX > 18 (real trend exists)
     3. Use DI + momentum + D1 trend for direction (not just price diff)
     4. 24-bar look-ahead (2 hours on M5) for reliable outcomes
-    5. Separate TP/SL thresholds (1.5x ATR TP, 1.0x ATR SL)
+    5. Separate TP/SL thresholds (tp_atr_mult x ATR TP, sl_atr_mult x ATR SL)
+
+    Account-specific configs (match backtest trade geometry):
+    - A: tp_atr_mult=9.0, sl_atr_mult=3.0 (RR=3.0, ATR_mult=3.0)
+    - B: tp_atr_mult=6.25, sl_atr_mult=2.5 (RR=2.5, ATR_mult=2.5)
+    - C: tp_atr_mult=4.0, sl_atr_mult=2.0 (RR=2.0, ATR_mult=2.0)
     """
     n = len(df)
     close = df["close"].values.astype(float)
@@ -427,11 +434,11 @@ def generate_trade_outcomes(df: pd.DataFrame, min_forward_bars: int = 24,
             continue
 
         # ── ATR-based dynamic threshold ──
-        # Use 2x ATR for TP and 1x ATR for SL — only label clear outcomes
+        # Use tp_atr_mult x ATR for TP and sl_atr_mult x ATR for SL
         if pd.isna(atr_arr[i]) or atr_arr[i] <= 0 or close[i] <= 0:
             continue
-        atr_thresh = max(0.20, min(0.60, (atr_arr[i] * 2.0 / close[i]) * 100))
-        sl_thresh = max(0.15, min(0.40, (atr_arr[i] * 1.0 / close[i]) * 100))
+        atr_thresh = max(0.20, min(1.50, (atr_arr[i] * tp_atr_mult / close[i]) * 100))
+        sl_thresh = max(0.15, min(0.80, (atr_arr[i] * sl_atr_mult / close[i]) * 100))
 
         # ── Determine direction from indicators (not just price diff) ──
         bullish = 0
@@ -598,7 +605,7 @@ def compute_reversal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy_id: str = "premium_backfill_v6") -> int:
+def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy_id: str = "premium_backfill_v6", account_id: int = 0) -> int:
     """Save backfilled trade outcomes to the database."""
     # Filter rows with valid labels
     valid = df[df["outcome_label"].notna()].copy()
@@ -725,8 +732,9 @@ def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy
         profit_pct = float(row["profit_pct"]) if pd.notna(row["profit_pct"]) else 0.0
 
         # Use negative trade_id for synthetic trades (avoids collision with live trades)
-        # Offset by 200000 to avoid collision with v6 backfill (-1 to -98389)
-        trade_id = -(200000 + saved + 1)
+        # Offset by 200000 + account_id*1000000 to avoid collision between account-specific backfills
+        # account_id=0 → -200001..-298389, account_id=10 → -10200001..-10298389, etc.
+        trade_id = -(200000 + account_id * 1000000 + saved + 1)
 
         # Compute entry/exit prices from the candle data
         entry_price = float(row["close"]) if pd.notna(row["close"]) else 0.0
@@ -752,7 +760,7 @@ def save_to_database(df: pd.DataFrame, db_path: str = "data/oracle.db", strategy
             profit,
             profit_pct,
             json.dumps(features),
-            0,  # account_id=0 for synthetic
+            0 if account_id is None else account_id,  # account_id for synthetic
         ))
         saved += 1
 
@@ -774,6 +782,12 @@ def main():
     parser.add_argument("--min-forward-bars", type=int, default=12, help="Bars to look ahead for labeling")
     parser.add_argument("--threshold-pct", type=float, default=0.15, help="Win/Loss threshold in %")
     parser.add_argument("--strategy-id", default="premium_backfill_v6", help="Strategy ID for backfilled data")
+    parser.add_argument("--tp-atr-mult", type=float, default=2.0,
+                        help="TP threshold as multiple of ATR (B=6.25, C=4.0, A=9.0)")
+    parser.add_argument("--sl-atr-mult", type=float, default=1.0,
+                        help="SL threshold as multiple of ATR (B=2.5, C=2.0, A=3.0)")
+    parser.add_argument("--account-id", type=int, default=0,
+                        help="account_id to tag synthetic trades (use 10/11/12 for B/C/D-specific backfill)")
     parser.add_argument("--skip-save", action="store_true", help="Skip saving to database (dry run)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -796,10 +810,12 @@ def main():
     df = compute_reversal_features(df)
 
     # 4. Generate trade outcome labels
-    logger.info("Generating trade outcome labels (threshold=%.2f%%, forward_bars=%d)...",
-                args.threshold_pct, args.min_forward_bars)
+    logger.info("Generating trade outcome labels (threshold=%.2f%%, forward_bars=%d, tp_atr=%.2fx, sl_atr=%.2fx)...",
+                args.threshold_pct, args.min_forward_bars, args.tp_atr_mult, args.sl_atr_mult)
     df = generate_trade_outcomes(df, min_forward_bars=args.min_forward_bars,
-                                  threshold_pct=args.threshold_pct)
+                                  threshold_pct=args.threshold_pct,
+                                  tp_atr_mult=args.tp_atr_mult,
+                                  sl_atr_mult=args.sl_atr_mult)
 
     # 5. Print stats
     valid = df[df["outcome_label"].notna()]
@@ -832,7 +848,7 @@ def main():
 
     # 6. Save to database
     if not args.skip_save:
-        saved = save_to_database(valid, db_path=args.db_path, strategy_id=args.strategy_id)
+        saved = save_to_database(valid, db_path=args.db_path, strategy_id=args.strategy_id, account_id=args.account_id)
         logger.info("✅ Backfill complete: %d outcomes saved", saved)
     else:
         logger.info("Dry run — skipped database save")

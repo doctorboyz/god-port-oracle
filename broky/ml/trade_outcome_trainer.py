@@ -163,6 +163,12 @@ class TradeOutcomeConfig:
     pnl_magnitude_weighting: bool = False
     pnl_weight_power: float = 0.5  # sqrt(|pnl_pct|) — dampen extreme outliers
 
+    # Account-specific training: filter trade_outcomes by account_id
+    # Use case: train on B-specific backfill (account_id=10) or C-specific (11)
+    # Addresses training/backtest config mismatch (model learns one config's
+    # trade geometry, evaluated on different config)
+    train_account_ids: Optional[list[int]] = None
+
     # Paths (relative to working dir; use "data/models" for Docker volume persistence)
     model_dir: str = "data/models"
 
@@ -267,6 +273,13 @@ class TradeOutcomeTrainer:
 
         if self.config.exclude_phantom:
             query += " AND (lt.exit_reason IS NULL OR lt.exit_reason != 'phantom')"
+
+        # Optional account_id filter (for account-specific backfill training)
+        # e.g. train only on B-specific synthetic data (account_id=10)
+        if self.config.train_account_ids:
+            placeholders = ",".join("?" * len(self.config.train_account_ids))
+            query += f" AND to_.account_id IN ({placeholders})"
+            params.extend(self.config.train_account_ids)
 
         query += " ORDER BY to_.created_at ASC"
 
@@ -780,6 +793,8 @@ def main():
     parser.add_argument("--live-weight", type=float, default=3.0)
     parser.add_argument("--pnl-magnitude-weighting", action="store_true",
                         help="Weight samples by sqrt(|profit_pct|) — focus on big-PnL trades")
+    parser.add_argument("--train-account-ids", type=str, default=None,
+                        help="Comma-separated account_ids to filter training data (e.g. '10,11')")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -808,6 +823,7 @@ def main():
         rf_min_samples_leaf=args.rf_min_samples_leaf,
         live_weight=args.live_weight,
         pnl_magnitude_weighting=args.pnl_magnitude_weighting,
+        train_account_ids=[int(x) for x in args.train_account_ids.split(",")] if args.train_account_ids else None,
     )
 
     trainer = TradeOutcomeTrainer(config)
