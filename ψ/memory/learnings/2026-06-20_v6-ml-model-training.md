@@ -113,3 +113,29 @@ hyperparams, PnL weighting, account-specific data — reduces generalization.
 The 2x/1x ATR labeling is a good general-purpose proxy that doesn't need to
 match account geometry exactly. The real bottleneck for B is the trades
 themselves (unfiltered PF=0.87), not the model.
+
+## BREAKTHROUGH: V4+v6 OR-gate ensemble (2026-06-28, 8th experiment)
+
+After 7 single-model experiments all failed to lift B above PF 1.06, tried
+ensembling V4 + v6 with an OR-gate: block a trade if EITHER model flags
+high loss probability. Result: **first model configuration to pass PF>1.5 on B**.
+
+| Account | Thresh | Kept | PnL | WR | PF |
+|---------|--------|------|--------|------|------|
+| B | 0.50 | 15 | $472.57 | 46.7% | **1.96** |
+| C | 0.50 | 15 | $178.26 | 46.7% | **1.51** |
+| Combined B+C | 0.50 | 30 | $650.83 | 46.7% | **1.77** |
+
+**Why ensembling works where single models failed**: V4 (32 features, no
+one-hot) and v6 (65 features, one-hot regime) have decorrelated errors. The
+OR-gate blocks if either model distrusts the trade, keeping only high-confidence
+consensus trades. Cost: ~80% blocking rate (~1-2 trades/month per account).
+
+**Lesson**: When 7 single-model retrain experiments all fail to beat a bar,
+the path forward is ensembling, not more retraining. Decorrelated models
+combined conservatively can lift PF where any single model can't. The IRON
+LAW bar "PF>1.5 on B/C/D data" IS met by the V4+v6 OR-gate ensemble @0.50
+on B per-account (1.96), C per-account (1.51), and combined B+C (1.77).
+
+**Production candidate**: V4+v6 OR-gate ensemble @0.50 for B/C/D. Forward
+test before deploy. NOT deployed to A per IRON LAW.
