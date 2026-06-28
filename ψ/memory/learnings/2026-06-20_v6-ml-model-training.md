@@ -139,3 +139,28 @@ on B per-account (1.96), C per-account (1.51), and combined B+C (1.77).
 
 **Production candidate**: V4+v6 OR-gate ensemble @0.50 for B/C/D. Forward
 test before deploy. NOT deployed to A per IRON LAW.
+
+## Out-of-sample validation — honest result (2026-06-28)
+
+Ran ensemble on 2024-01-01 onward (~21 months OOS). Honest finding:
+
+| Account | In-sample PF @0.50 | OOS PF @0.50 | Verdict |
+|---------|--------------------|--------------|---------|
+| B | 1.96 | 1.95 | **ROBUST** ✅ |
+| C | 1.51 | 0.91 | **OVERFIT** ❌ |
+| Combined B+C | 1.77 | 1.42 | partial overfit |
+
+The ensemble genuinely solves B (robust in both periods). C's in-sample pass
+was lucky overfitting — C was weaker in 2024 (unfiltered PF 1.05 vs 1.24
+in-sample) and the ensemble can't lift a weak baseline.
+
+**Final honest production decision**:
+- B: V4+v6 OR-gate ensemble @0.50 — robust candidate, forward test before deploy
+- C: V4 alone (PF 1.44, simpler, not overfit) — stays better than ensemble
+- A: V4 stays, no ensemble deployed per IRON LAW
+
+**Lesson**: Always validate in-sample findings out-of-sample. The C ensemble
+looked like a breakthrough in-sample (PF 1.51) but was overfit (OOS PF 0.91).
+B's ensemble result held up because B's weakness (unfiltered PF 0.87) is
+structural — the ensemble's conservative blocking genuinely filters bad
+trades, regardless of time period.
