@@ -58,6 +58,10 @@
 - [Drawdown DB Sync](learnings/2026-06-22_drawdown-db-sync.md) — drawdown protection now syncs PnL from DB; reconciliation-closed trades bypassed in-memory tracking; daily limits truly enforced
 - [V4 Stable on Real A](learnings/2026-06-22_v4-stable-on-real-a.md) — V4 model pinned on Account A (real) via ML_MODEL_DIR_A; demo accounts use v6+ for data collection
 - [Win Config Analysis](learnings/2026-06-23_win-config-analysis.md) — Good era (before Jun 15): 938t WR=43% PnL=+$1,997; Broken era: 100t WR=33% PnL=-$179; root causes: LEARNING_MODE=1 + sync_pnl bug; trending_SELL is crown jewel (PF=3.0); BUY model PF=0.52 should be disabled or improved
+- [Dynamic Max Positions from Equity](learnings/2026-06-26_dynamic-max-positions-from-equity.md) — max(1, min(cap, floor(equity/200))); $199→1 pos, $400→2, $1000→5; prevents margin call from static 5-pos limit
+- [Good Era Config Restore](learnings/2026-06-28_good-era-config-restore.md) — DRAWDOWN_DAILY_LIMIT_A=0.05, BUY_MIN_CONFIDENCE_A=0.50, equity topped to $200; top-up sequence: verify MT5 equity BEFORE updating INITIAL_EQUITY_A
+- [DB Schema Reference](learnings/2026-06-28_db-schema-reference.md) — live_trades 51 cols, trade_outcomes 30 cols; account_id numeric (1=A 2=B 3=C 4=D); gotchas: action→direction, entry_time→timestamp, net_pnl→pnl; PRAGMA before writing SQL
+- [mixed_v12 bxau Broken](learnings/2026-06-28_mixed-v12-bxau-broken.md) — mixed_v12 + V11 engineer reference bxau module not in prod → silent ML filter disable on B/C/D for weeks; reverted B/C/D to V4 (PF=1.71); need retrain without bxau (ISSUE-034)
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
@@ -72,3 +76,4 @@
 - [2026-06-19 Account Type + Ghost Positions + Deploy](retrospectives/2026-06/19/22.18_account-type-ghost-positions-deploy.md) — Real-A/Demo-B labels, ghost position fix (MT5 source of truth), 4 accounts on VPS
 - [2026-06-19 Ten Issues Fix + Deploy + One-hot](retrospectives/2026-06/19/23.12_ten-issues-fix-deploy-onehot-regime.md) — 10 issues fixed, PersistentMT5Bridge removed, one-hot regime encoding, deploy verified
 - [2026-06-20 V6 Deploy + Account D Activation](retrospectives/2026-06/20/00.01_deploy-v6-and-account-d.md) — V6 model deployed, Account D activated, MT5 credential fixes, initial balances corrected
+- [2026-06-26 Dynamic Max Positions Deploy](retrospectives/2026-06/26/06.05_dynamic-max-positions-deploy.md) — ghost trade fix, drawdown equity fix, dynamic max_positions from equity deployed

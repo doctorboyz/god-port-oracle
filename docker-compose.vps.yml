@@ -145,9 +145,13 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ═══ Oracle Engine for B/C/D — V12 mixed model (separate from Real-A) ═══
-  # Real-A uses oracle-engine (V4), B/C/D use oracle-engine-train (V12 mixed)
-  # This separation ensures V12 code changes don't affect Real-A
+  # ═══ Oracle Engine for B/C/D — V4 model (separate from Real-A) ═══
+  # Real-A uses oracle-engine (V4), B/C/D use oracle-engine-train (V4)
+  # mixed_v12 was broken (feature_engineer.joblib referenced bxau module not
+  # installed in production → silent ML filter disable). Reverted B/C/D to V4
+  # (proven PF=1.71 @ threshold 0.65) while V11 SELL + V12 BUY are retrained
+  # without bxau dependency. See learning 2026-06-28_mixed-v12-bxau-broken.md.
+  # This separation ensures V12 code changes don't affect Real-A.
   oracle-engine-train:
     build:
       context: .
@@ -170,7 +174,7 @@ services:
       - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
       - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_MODEL_DIR=/app/data/models/trade_outcome_mixed_v12
+      - ML_MODEL_DIR=/app/data/models/trade_outcome_v4
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
