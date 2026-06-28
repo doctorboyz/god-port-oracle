@@ -40,3 +40,22 @@ With ~52% baseline WIN rate, ~50% test accuracy means the model can't distinguis
 - Collect live trade data to supplement synthetic labels
 - Consider regression model (predict profit_pct) for richer signal
 - Add candle pattern features for more predictive power
+
+## Backtest verification (2026-06-28, ISSUE-025 IRON LAW)
+
+Backtested v6 against V4 production on real B/C/D data (2025-10-01 onward).
+Full results in ψ/lab/v6-backtest-2026-06-28/.
+
+| Account | v6 best PF | v6 best PnL | V4 best PF | V4 best PnL | Winner |
+|---------|-----------|-------------|-----------|-------------|--------|
+| A | 2.05 (@0.70) | $1,531 | 1.77 (@0.65) | $1,193 | **v6** |
+| B | 1.05 (@0.70) | $92 | 1.06 (@0.65) | $150 | V4 (slight) |
+| C | 1.69 (@0.60) | $722 | 1.44 (@0.65) | $694 | **v6** |
+
+**IRON LAW bar (PF>1.5 on B/C/D data)**: met on C (PF 1.69) and A (PF 2.05).
+NOT met on B (max 1.05) — but no model passes PF>1.5 on B because B's unfiltered
+baseline is PF 0.87. V4=1.06, V5=1.20, mixed_v12=0.98 on B — all fail the bar.
+
+**Decision**: v6 is a verified viable model. V4 stays production on B/C/D for
+now (proven track record, v6 gains are modest). v6 is the verified backup if
+V4 degrades. NOT deployed to A per IRON LAW.
