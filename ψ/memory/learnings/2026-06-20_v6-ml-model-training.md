@@ -88,3 +88,28 @@ hyperparams, AND training objective, the issue is the data, not the model.
 B is fundamentally weak in this period. No retrain variant can lift combined
 B+C PF above 1.23. The per-account bar (PF>1.5 on C) IS met. The strict
 combined bar is structurally unreachable with current data.
+
+## Account-specific training data experiment (2026-06-28, 7th experiment)
+
+Re-backfilled with account-specific TP/SL multipliers to match each account's
+actual trade geometry (B: 6.25x/2.5x ATR, C: 4x/2x ATR). Trained v6_bspec and
+v6_cspec on these account-specific datasets.
+
+| Account | v6 (orig on acct 0) | v6_xspec (account-specific) | Winner |
+|---------|---------------------|------------------------------|--------|
+| B | 1.05 | 0.82 | **v6 orig** |
+| C | 1.69 | 1.24 | **v6 orig** |
+
+**Account-specific training made things WORSE.** The original 2x/1x ATR
+labeling is a moderate threshold that produces balanced labels (50.7% WR)
+capturing a general "will price move favorably" signal. Account-specific
+labeling asks a harder, noisier question — larger thresholds mean rarer TP
+hits, so labels are noisier and the model can't learn the signal as well.
+
+**Final lesson (7 experiments)**: The original v6 setup (65 features, default
+hyperparams, standard weighting, account-0 synthetic data with 2x/1x ATR
+labeling) is a sweet spot. Every "improvement" — more/fewer features, tuned
+hyperparams, PnL weighting, account-specific data — reduces generalization.
+The 2x/1x ATR labeling is a good general-purpose proxy that doesn't need to
+match account geometry exactly. The real bottleneck for B is the trades
+themselves (unfiltered PF=0.87), not the model.
