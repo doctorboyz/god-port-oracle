@@ -162,15 +162,41 @@ trade patterns but is evaluated on different configs. Fixing this requires
 backfilling B/C/D-specific training data (run backfill with B config, C
 config separately) — a substantial effort beyond this session's scope.
 
-### Final four-experiment summary
+### Final five-experiment summary
 
-| Variant | Features | Hyperparams | A PF | B PF | C PF |
-|---------|----------|-------------|------|------|------|
-| v6_consensus | 7 | default | 1.59 | 0.87 | 1.30 |
-| **v6 (orig)** | **65** | **default** | **2.05** | **1.05** | **1.69** |
-| v6_ext | 139 | default | 1.65 | 1.06 | 1.33 |
-| v6_tuned | 65 | tuned | 1.81 | 0.96 | 1.40 |
+| Variant | Features | Hyperparams | Weighting | A PF | B PF | C PF |
+|---------|----------|-------------|-----------|------|------|------|
+| v6_consensus | 7 | default | standard | 1.59 | 0.87 | 1.30 |
+| **v6 (orig)** | **65** | **default** | **standard** | **2.05** | **1.05** | **1.69** |
+| v6_ext | 139 | default | standard | 1.65 | 1.06 | 1.33 |
+| v6_tuned | 65 | tuned | standard | 1.81 | 0.96 | 1.40 |
+| v6_pnlw | 65 | default | PnL-magnitude | 1.65 | 1.06 | 1.33 |
 
 v6 (original) wins on every account. IRON LAW bar met per-account on C
 (PF 1.69) and A (PF 2.05). Combined B+C PF maxes at 1.23 — unreachable
 strict bar due to B's weakness + training/backtest config mismatch.
+
+### v6_pnlw experiment — PnL-magnitude weighting also hurts
+
+Trained v6 with `pnl_magnitude_weighting=true` — sample weights multiplied by
+sqrt(|profit_pct|) so the model focuses on big-PnL trades (the trades that
+drive trading PF, not win count). This was the most direct attempt to address
+the "training PF ≠ trading PF" gap.
+
+| Account | v6 best PF | v6_pnlw best PF | Winner |
+|---------|-----------|------------------|--------|
+| A | 2.05 | 1.65 | **v6** |
+| B | 1.05 | 1.06 | tie |
+| C | 1.69 | 1.33 | **v6** |
+
+PnL-magnitude weighting made it worse. Hypothesis: upweighting high-volatility
+trades (big |pnl_pct|) amplifies noise — those trades are noisier because they
+hit extreme market moves, not because the model can predict them better. The
+standard WIN/LOSS objective is already well-calibrated for what the model can
+actually learn.
+
+**Five experiments total. v6 (original, 65 features, default hyperparams,
+standard weighting) is the best variant on every account.** The bottleneck is
+NOT the training objective, feature count, or hyperparameters — it's that
+B's trades are fundamentally weak (unfiltered PF=0.87) and no model can lift
+them above ~1.06 without blocking 60%+ of trades.

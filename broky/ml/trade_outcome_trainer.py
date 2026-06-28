@@ -156,6 +156,13 @@ class TradeOutcomeConfig:
     # Sample weight: live trades get this multiplier vs synthetic
     live_weight: float = 3.0
 
+    # PnL-magnitude weighting: multiply sample_weights by normalized |profit_pct|
+    # so the model focuses on big-PnL trades (which drive trading PF, not win count).
+    # Addresses the "training PF ≠ trading PF" gap: classification treats +$1 WIN
+    # and +$100 WIN equally, but trading PF weights by dollar magnitude.
+    pnl_magnitude_weighting: bool = False
+    pnl_weight_power: float = 0.5  # sqrt(|pnl_pct|) — dampen extreme outliers
+
     # Paths (relative to working dir; use "data/models" for Docker volume persistence)
     model_dir: str = "data/models"
 
@@ -331,6 +338,21 @@ class TradeOutcomeTrainer:
             sample_weights = np.where(is_syn == 1, 1.0, self.config.live_weight)
         else:
             sample_weights = np.ones(len(df))
+
+        # Optional PnL-magnitude weighting: focus on big-PnL trades.
+        # Uses profit_pct (available for all trades incl. synthetic).
+        # sqrt(|profit_pct|) damps extreme outliers while preserving relative magnitude.
+        if self.config.pnl_magnitude_weighting and "profit_pct" in df.columns:
+            pct = df["profit_pct"].fillna(0).values.astype(float)
+            mag = np.sqrt(np.abs(pct))
+            # Normalize to mean 1.0 so total weight is preserved
+            if mag.mean() > 0:
+                mag = mag / mag.mean()
+            sample_weights = sample_weights * mag
+            logger.info(
+                "PnL-magnitude weighting enabled: weight range [%.3f, %.3f], mean=%.3f",
+                float(sample_weights.min()), float(sample_weights.max()), float(sample_weights.mean()),
+            )
 
         engineer = FeatureEngineer(fillna=True)
         engineer.fit(df)
@@ -756,6 +778,8 @@ def main():
     parser.add_argument("--rf-max-depth", type=int, default=8)
     parser.add_argument("--rf-min-samples-leaf", type=int, default=5)
     parser.add_argument("--live-weight", type=float, default=3.0)
+    parser.add_argument("--pnl-magnitude-weighting", action="store_true",
+                        help="Weight samples by sqrt(|profit_pct|) — focus on big-PnL trades")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -783,6 +807,7 @@ def main():
         rf_max_depth=args.rf_max_depth,
         rf_min_samples_leaf=args.rf_min_samples_leaf,
         live_weight=args.live_weight,
+        pnl_magnitude_weighting=args.pnl_magnitude_weighting,
     )
 
     trainer = TradeOutcomeTrainer(config)
