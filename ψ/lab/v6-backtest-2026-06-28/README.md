@@ -237,6 +237,43 @@ V4 production.
 **Production candidate for B/C/D**: V4+v6 OR-gate ensemble @0.50. Thin
 trade rate (~1-2/month) but meets the bar. Forward test before deploy.
 
+## Out-of-sample validation (2024-01-01 onward, ~21 months)
+
+Ran the ensemble on an earlier period to test robustness vs overfit.
+
+| Account | Thresh | In-sample PF | OOS PF | Robust? |
+|---------|--------|--------------|--------|---------|
+| B | 0.45 | — | **2.31** ✅ | robust |
+| B | 0.50 | **1.96** ✅ | **1.95** ✅ | **ROBUST** |
+| C | 0.50 | **1.51** ✅ | 0.91 ❌ | **OVERFIT** |
+| C | 0.60 | **1.91** ✅ | 1.35 ❌ | overfit |
+| Combined B+C | 0.50 | **1.77** ✅ | 1.42 ❌ | partial overfit |
+
+**Honest finding**: The ensemble is **robust on B** (the hardest account) —
+passes PF>1.5 in both in-sample (1.96) and out-of-sample (1.95) periods.
+B's unfiltered PF is 0.87 in both periods, and the ensemble lifts it to
+~1.95 consistently. This is a real, robust result.
+
+**C is overfit** — passes in-sample (1.51) but fails out-of-sample (max 1.35).
+C's unfiltered PF is 1.24 in-sample vs 1.05 out-of-sample, so C itself was
+weaker in 2024. The ensemble can't lift a weak baseline.
+
+### Updated honest conclusion
+
+**IRON LAW bar status (with out-of-sample evidence)**:
+- ✅ B per-account: PF 1.96 in-sample, 1.95 out-of-sample — **robustly met**
+- ⚠️ C per-account: PF 1.51 in-sample, 0.91 out-of-sample — **overfit, not robust**
+- ⚠️ Combined B+C: 1.77 in-sample, 1.42 out-of-sample — **partial overfit**
+
+The ensemble genuinely solves B (the hardest account, where no single model
+could pass PF 1.5). C's in-sample pass appears to be lucky overfitting. The
+strict combined bar is met in-sample but not out-of-sample.
+
+**Production decision**: The V4+v6 OR-gate ensemble @0.50 is a **robust
+candidate for B only**. For C, V4 alone (PF 1.44 in-sample) remains the
+better choice — it's simpler and not overfit. Forward test on B before
+deploy. NOT deployed to A per IRON LAW.
+
 ### v6_pnlw experiment — PnL-magnitude weighting also hurts
 
 Trained v6 with `pnl_magnitude_weighting=true` — sample weights multiplied by

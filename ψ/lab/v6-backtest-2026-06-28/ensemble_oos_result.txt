@@ -1,0 +1,22 @@
+====================================================================================================
+
+A: unfiltered 289 trades, PnL $1333.55, WR 41.2%, PF 1.25
+  ensemble @0.45: kept 40, PnL $567.22, WR 55.0%, PF 1.87, blocked 249
+  ensemble @0.50: kept 56, PnL $550.17, WR 50.0%, PF 1.57, blocked 233
+  ensemble @0.55: kept 75, PnL $281.13, WR 48.0%, PF 1.20, blocked 214
+  ensemble @0.60: kept 89, PnL $1345.33, WR 50.6%, PF 1.89, blocked 200
+  ensemble @0.65: kept 110, PnL $1839.18, WR 50.9%, PF 2.06, blocked 179
+
+B: unfiltered 319 trades, PnL $-579.57, WR 36.7%, PF 0.91
+  ensemble @0.45: kept 37, PnL $786.03, WR 54.1%, PF 2.31, blocked 282
+  ensemble @0.50: kept 55, PnL $904.57, WR 49.1%, PF 1.95, blocked 264
+  ensemble @0.55: kept 77, PnL $673.45, WR 46.8%, PF 1.44, blocked 242
+  ensemble @0.60: kept 99, PnL $750.26, WR 47.5%, PF 1.42, blocked 220
+  ensemble @0.65: kept 120, PnL $516.40, WR 44.2%, PF 1.21, blocked 199
+
+C: unfiltered 352 trades, PnL $280.66, WR 36.1%, PF 1.05
+  ensemble @0.45: kept 37, PnL $-205.36, WR 32.4%, PF 0.67, blocked 315
+  ensemble @0.50: kept 57, PnL $-89.24, WR 33.3%, PF 0.91, blocked 295
+  ensemble @0.55: kept 83, PnL $35.92, WR 37.3%, PF 1.02, blocked 269
+  ensemble @0.60: kept 106, PnL $619.28, WR 39.6%, PF 1.35, blocked 246
+  ensemble @0.65: kept 131, PnL $596.68, WR 39.7%, PF 1.27, blocked 221
