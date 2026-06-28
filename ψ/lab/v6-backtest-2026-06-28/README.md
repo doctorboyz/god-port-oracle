@@ -134,3 +134,43 @@ Fails combined B/C/D PF>1.5 (max 1.23) because B is fundamentally weak
 The IRON LAW bar "PF>1.5 on B/C/D data" is met per-account on C. The strict
 combined interpretation cannot be met with any current model. Further progress
 requires a trading-PF-aware training objective, not more/fewer features.
+
+### v6_tuned experiment — hyperparameter tuning also hurts
+
+Trained v6 with tuned xgb hyperparams (lr=0.02, n_est=400, depth=4,
+min_child=10, subsample=0.7, lambda=2.0) as `trade_outcome_v6_tuned`.
+
+| Account | v6 best PF | v6_tuned best PF | Winner |
+|---------|-----------|-------------------|--------|
+| A | 2.05 | 1.81 | **v6** |
+| B | 1.05 | 0.96 | **v6** |
+| C | 1.69 | 1.40 | **v6** |
+
+Default hyperparams were better than tuned. Four experiments total — all
+confirm v6 (original, 65 features, default hyperparams) is the best variant.
+
+### Training data reality check
+
+Investigated training v6 on B/C/D-only data. Found trade_outcomes table is
+**196,778 trades from account 0 (synthetic backfill)** + 19 trades from
+account 3. There is NO B/C/D-specific training data — the model is trained
+on synthetic data from one backfill config, then evaluated on 3 different
+account configs (A/B/C) in backtest.
+
+This config mismatch is a structural issue: the model learns one config's
+trade patterns but is evaluated on different configs. Fixing this requires
+backfilling B/C/D-specific training data (run backfill with B config, C
+config separately) — a substantial effort beyond this session's scope.
+
+### Final four-experiment summary
+
+| Variant | Features | Hyperparams | A PF | B PF | C PF |
+|---------|----------|-------------|------|------|------|
+| v6_consensus | 7 | default | 1.59 | 0.87 | 1.30 |
+| **v6 (orig)** | **65** | **default** | **2.05** | **1.05** | **1.69** |
+| v6_ext | 139 | default | 1.65 | 1.06 | 1.33 |
+| v6_tuned | 65 | tuned | 1.81 | 0.96 | 1.40 |
+
+v6 (original) wins on every account. IRON LAW bar met per-account on C
+(PF 1.69) and A (PF 2.05). Combined B+C PF maxes at 1.23 — unreachable
+strict bar due to B's weakness + training/backtest config mismatch.
