@@ -81,3 +81,25 @@ met on B because no model can meet it on B with current data.
 - [[2026-06-20_v6-ml-model-training]] — v6 training details
 - [[mixed-v12-bxau-broken]] — V4 production baseline
 - [[v4-still-wins-threshold-tuning-modest]] — V4 vs V5/mixed_v12 comparison
+
+## v6_ext experiment — extended features HURT (2026-06-28)
+
+Retrained v6 with the full extended feature set (139 features: candle patterns,
+session cyclical, multi-TF alignment, combo features) as `trade_outcome_v6_ext`.
+Hypothesis: more features would push B/C/D PF above 1.5.
+
+Result: v6_ext is **worse** than v6 (65 features):
+
+| Account | v6 best PF | v6_ext best PF | Winner |
+|---------|-----------|-----------------|--------|
+| A | 2.05 | 1.65 | **v6** |
+| B | 1.05 | 1.06 | tie |
+| C | 1.69 | 1.33 | **v6** |
+
+Extended features add noise/overfit — confirms the lesson in
+[[v4-still-wins-threshold-tuning-modest]]: more features ≠ better trading PF.
+The "training PF ≠ trading PF" problem persists. v6_ext training PF was high
+(volatile_BUY=4.86, ranging_SELL=2.19) but trading PF dropped.
+
+**v6 (original, 65 features) remains the best v6 variant.** v6_ext kept as
+reference artifact in `data/models/trade_outcome_v6_ext/` but NOT deployed.
