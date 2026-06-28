@@ -62,6 +62,7 @@
 - [Good Era Config Restore](learnings/2026-06-28_good-era-config-restore.md) — DRAWDOWN_DAILY_LIMIT_A=0.05, BUY_MIN_CONFIDENCE_A=0.50, equity topped to $200; top-up sequence: verify MT5 equity BEFORE updating INITIAL_EQUITY_A
 - [DB Schema Reference](learnings/2026-06-28_db-schema-reference.md) — live_trades 51 cols, trade_outcomes 30 cols; account_id numeric (1=A 2=B 3=C 4=D); gotchas: action→direction, entry_time→timestamp, net_pnl→pnl; PRAGMA before writing SQL
 - [mixed_v12 bxau Broken](learnings/2026-06-28_mixed-v12-bxau-broken.md) — mixed_v12 + V11 engineer reference bxau module not in prod → silent ML filter disable on B/C/D for weeks; reverted B/C/D to V4 (PF=1.71); need retrain without bxau (ISSUE-034)
+- [V4 Still Wins, Threshold Tuning Modest](learnings/2026-06-28_v4-still-wins-threshold-tuning-modest.md) — V5/mixed_v12/V6 all fail to consistently beat V4; risk-scaling threshold tuning gives only ~10% gains; training PF ≠ trading PF is the real blocker
 
 ## Retrospectives
 - [2026-05-27 H4 Trend Filter + D1 Flip](retrospectives/2026-05/27/19.59_h4-trend-filter-d1-flip.md)
