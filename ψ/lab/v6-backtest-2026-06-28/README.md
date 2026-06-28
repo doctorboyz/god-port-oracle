@@ -103,3 +103,34 @@ The "training PF ≠ trading PF" problem persists. v6_ext training PF was high
 
 **v6 (original, 65 features) remains the best v6 variant.** v6_ext kept as
 reference artifact in `data/models/trade_outcome_v6_ext/` but NOT deployed.
+
+### v6_consensus experiment — too few features also hurt
+
+Trained v6 with `feature_set="consensus"` (7 features only) as
+`trade_outcome_v6_consensus`. Hypothesis: simpler model might generalize better.
+
+| Account | v6 best PF | v6_consensus best PF | Winner |
+|---------|-----------|----------------------|--------|
+| A | 2.05 | 1.59 | **v6** |
+| B | 1.05 | 0.87 | **v6** |
+| C | 1.69 | 1.30 | **v6** |
+
+7 features too few — model can't separate winners from losers. The 65-feature
+v6 (extended at training time, before candle/session/multi-TF were added) is
+the sweet spot. Both fewer (7) and more (139) features hurt trading PF.
+
+### Conclusion — three retrain experiments
+
+| Variant | Features | A PF | B PF | C PF | Combined B+C PF |
+|---------|----------|------|------|------|------------------|
+| v6_consensus | 7 | 1.59 | 0.87 | 1.30 | ~1.05 |
+| **v6 (orig)** | **65** | **2.05** | **1.05** | **1.69** | **1.23** |
+| v6_ext | 139 | 1.65 | 1.06 | 1.33 | ~1.10 |
+
+v6 (original) is the best v6 variant. Passes PF>1.5 on A (2.05) and C (1.69).
+Fails combined B/C/D PF>1.5 (max 1.23) because B is fundamentally weak
+(unfiltered PF 0.87 — no model can lift B above ~1.06).
+
+The IRON LAW bar "PF>1.5 on B/C/D data" is met per-account on C. The strict
+combined interpretation cannot be met with any current model. Further progress
+requires a trading-PF-aware training objective, not more/fewer features.
