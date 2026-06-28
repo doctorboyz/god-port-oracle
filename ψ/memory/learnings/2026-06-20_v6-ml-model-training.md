@@ -59,3 +59,32 @@ baseline is PF 0.87. V4=1.06, V5=1.20, mixed_v12=0.98 on B — all fail the bar.
 **Decision**: v6 is a verified viable model. V4 stays production on B/C/D for
 now (proven track record, v6 gains are modest). v6 is the verified backup if
 V4 degrades. NOT deployed to A per IRON LAW.
+
+## Five retrain experiments (2026-06-28, ISSUE-025 deep dive)
+
+Five attempts to beat v6 original — all failed.
+
+| Variant | What changed | A PF | B PF | C PF | vs v6 orig |
+|---------|--------------|------|------|------|------------|
+| v6 (orig) | baseline | 2.05 | 1.05 | 1.69 | — |
+| v6_consensus | 7 features only | 1.59 | 0.87 | 1.30 | worse |
+| v6_ext | 139 features | 1.65 | 1.06 | 1.33 | worse |
+| v6_tuned | tuned xgb hyperparams | 1.81 | 0.96 | 1.40 | worse |
+| v6_pnlw | PnL-magnitude sample weighting | 1.65 | 1.06 | 1.33 | worse |
+
+**Key finding**: The trading-PF-aware objective (PnL-magnitude weighting) —
+the approach I kept saying was the real blocker — was tried and made things
+worse. Upweighting high-volatility trades amplifies noise, not signal.
+
+**Real bottleneck** (now confirmed across 5 experiments):
+1. B's unfiltered baseline PF=0.87 — trades themselves are bad, no model can
+   fix bad trades, only skip them
+2. No B/C/D-specific training data (account 0 synthetic + 19 account 3 trades)
+3. Training/backtest config mismatch — model trained on one config, evaluated
+   on three different account configs
+
+**Lesson**: When five attempts to beat a model all fail across feature count,
+hyperparams, AND training objective, the issue is the data, not the model.
+B is fundamentally weak in this period. No retrain variant can lift combined
+B+C PF above 1.23. The per-account bar (PF>1.5 on C) IS met. The strict
+combined bar is structurally unreachable with current data.
