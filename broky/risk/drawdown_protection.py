@@ -89,6 +89,21 @@ class DrawdownProtector:
             peak_equity=initial_equity,
         )
         self._blocked_until: Optional[datetime] = None
+        self._current_time: Optional[datetime] = None
+
+    def set_time(self, timestamp: datetime) -> None:
+        """Set simulated time for backtest cooldown/rollover checks.
+
+        Without this, DP uses real wall-clock time, which never advances
+        in a backtest — daily_pnl accumulates across the entire run instead
+        of resetting each UTC midnight, so daily drawdown never triggers.
+        Mirror of CircuitBreaker.set_time.
+        """
+        self._current_time = timestamp
+
+    def _now(self) -> datetime:
+        """Current time — simulated if set_time was called, else real UTC."""
+        return self._current_time or datetime.now(timezone.utc)
 
     @property
     def state(self) -> DrawdownState:
@@ -99,7 +114,7 @@ class DrawdownProtector:
         """Check if trading is currently blocked."""
         if self._state.blocked:
             # Check if cooldown has expired
-            if self._blocked_until and datetime.now(timezone.utc) >= self._blocked_until:
+            if self._blocked_until and self._now() >= self._blocked_until:
                 self._unblock()
                 return False
             return True
@@ -114,7 +129,7 @@ class DrawdownProtector:
         Returns:
             Tuple of (can_trade, reason).
         """
-        now = datetime.now(timezone.utc)
+        now = self._now()
 
         # Initialize tracking on first call
         if self._state.daily_start is None:
@@ -335,7 +350,7 @@ class DrawdownProtector:
             logger.critical("[DrawdownProtection] PERMANENT BLOCK: %s", reason)
         else:
             # Daily/weekly = cooldown period then resume
-            self._blocked_until = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
+            self._blocked_until = self._now() + timedelta(hours=self._cooldown_hours)
             logger.warning(
                 "[DrawdownProtection] BLOCKED for %dh: %s (resumes after %s)",
                 self._cooldown_hours, reason, self._blocked_until,
@@ -347,7 +362,7 @@ class DrawdownProtector:
         self._state.block_reason = ""
         self._blocked_until = None
         # Reset daily tracking on unblock to avoid double-counting
-        now = datetime.now(timezone.utc)
+        now = self._now()
         self._state.daily_pnl = 0.0
         self._state.daily_trades = 0
         logger.info("[DrawdownProtection] Unblocked — trading resumed")
