@@ -217,20 +217,41 @@ class M5ScalpTrader:
         self._notifier: Optional[object] = None  # Set by main loop if available
         self.event_bus = event_bus
         # ML filter — only enabled if models have decent accuracy
+        # Ensemble mode (ML_ENSEMBLE_MODE) takes precedence over single-model.
+        # NEVER enabled on Account A (IRON LAW).
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
         self._ml_predictor = None
         self._ml_fail_count: int = 0  # consecutive ML prediction failures
         if self._ml_enabled:
             try:
-                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
-                # Per-account model dir: real accounts can pin to stable model
-                per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
-                ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
-                logger.info("[%s] ML model dir: %s (per_account=%s)", self.display_name, ml_dir, per_account_dir)
-                self._ml_predictor = TradeOutcomePredictor(
-                    model_dir=ml_dir,
-                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                # Per-account ensemble enable takes precedence over global.
+                # NEVER enabled on Account A (IRON LAW).
+                ensemble_mode = (
+                    os.environ.get(f"ML_ENSEMBLE_MODE_{self.account}", "").strip().lower()
+                    or os.environ.get("ML_ENSEMBLE_MODE", "").strip().lower()
                 )
+                if ensemble_mode:
+                    from broky.ml.ensemble_predictor import EnsemblePredictor
+                    per_account_thresh = (
+                        os.environ.get(f"ML_ENSEMBLE_THRESH_{self.account}", "").strip()
+                        or os.environ.get("ML_ENSEMBLE_THRESH", "0.50").strip()
+                    )
+                    self._ml_predictor = EnsemblePredictor(
+                        mode=ensemble_mode,
+                        loss_threshold=float(per_account_thresh),
+                    )
+                    logger.info("[%s] ML ensemble mode=%s thresh=%s",
+                                self.display_name, ensemble_mode, per_account_thresh)
+                else:
+                    from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                    # Per-account model dir: real accounts can pin to stable model
+                    per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
+                    ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
+                    logger.info("[%s] ML model dir: %s (per_account=%s)", self.display_name, ml_dir, per_account_dir)
+                    self._ml_predictor = TradeOutcomePredictor(
+                        model_dir=ml_dir,
+                        loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                    )
                 logger.info("[M5Scalp:%s] ML filter enabled: %s", self.display_name,
                            "models loaded" if self._ml_predictor.enabled else "no models")
                 # Health check: verify ML predictor can actually produce predictions
@@ -445,15 +466,35 @@ class M5ScalpTrader:
             conn.close()
 
             if positions_raw is None or len(positions_raw) == 0:
-                # MT5 says no position — reconcile DB trades with MT5 state
-                open_trades = get_open_trades(self.account_id, self.db_path)
+                # MT5 says no position — reconcile DB trades with MT5 state.
+                # M5SCALP-1: filter to scalp-only so we NEVER close swing trades
+                # belonging to the swing live_trader (they may still be open in
+                # MT5 under a different ticket we can't see from here).
+                all_open_trades = get_open_trades(self.account_id, self.db_path)
+                open_trades = [
+                    t for t in all_open_trades
+                    if t.get("trading_mode") == "m5_scalp"
+                    or t.get("strategy_id", "") == self.strategy_id
+                ]
                 if open_trades:
                     logger.warning(
-                        "[M5Scalp:%s] %d open DB trades but no MT5 position — reconciling",
+                        "[M5Scalp:%s] %d open DB scalp trades but no MT5 position — reconciling "
+                        "(%d non-scalp trades left untouched)",
                         self.display_name, len(open_trades),
+                        len(all_open_trades) - len(open_trades),
                     )
-                    # Try to get deal history for accurate exit prices
+                    # M5SCALP-2: if deal history unavailable, bridge is unhealthy —
+                    # skip reconcile and let next cycle retry (mirrors swing
+                    # live_trader lines 822-831). Otherwise reconcile falls back
+                    # to entry_price inference → PnL=0 false closes.
                     deals = self._get_deal_history(days_back=7)
+                    if deals is None:
+                        logger.warning(
+                            "[M5Scalp:%s] Deal history unavailable — skipping reconciliation "
+                            "(will retry next cycle)",
+                            self.display_name,
+                        )
+                        return len(open_trades) > 0
                     # Convert RPyC positions
                     positions_list = []
                     if positions_raw:
