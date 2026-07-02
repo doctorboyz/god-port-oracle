@@ -99,9 +99,6 @@ services:
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
       - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - SCALP_INTERVAL=${SCALP_INTERVAL:-60}
-      - SCALP_SPREAD_MAX=${SCALP_SPREAD_MAX:-30}
-      - SCALP_RISK_PER_TRADE=${SCALP_RISK_PER_TRADE:-0.01}
       - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
       - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
       - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
@@ -119,17 +116,24 @@ services:
       - MIN_CONFIDENCE_A=${MIN_CONFIDENCE_A:-0.45}
       - BUY_MIN_CONFIDENCE_A=${BUY_MIN_CONFIDENCE_A:-0.45}
       - M5_MAX_SPREAD_A=${M5_MAX_SPREAD_A:-45}
-      - SCALP_MAX_SPREAD_A=${SCALP_MAX_SPREAD_A:-50}
       - PARTIAL_TP_ENABLED_A=${PARTIAL_TP_ENABLED_A:-0}
       - TP1_RATIO_A=${TP1_RATIO_A:-0.5}
       - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
-      - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-1000}
-      - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-1000}
+      - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-500}
+      - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-500}
       - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}
-      - DRAWDOWN_DAILY_LIMIT_A=${DRAWDOWN_DAILY_LIMIT_A:-0.20}
-      - DRAWDOWN_WEEKLY_LIMIT_A=${DRAWDOWN_WEEKLY_LIMIT_A:-0.30}
-      - DRAWDOWN_ACCOUNT_LIMIT_A=${DRAWDOWN_ACCOUNT_LIMIT_A:-0.30}
+      # Kill switch (user-approved 2026-07-01): ขาดวัน > 5% / ขาดสัปดาห์ > 10% / MaxDD 20% from peak
+      - DRAWDOWN_DAILY_LIMIT_A=${DRAWDOWN_DAILY_LIMIT_A:-0.05}
+      - DRAWDOWN_WEEKLY_LIMIT_A=${DRAWDOWN_WEEKLY_LIMIT_A:-0.10}
+      - DRAWDOWN_ACCOUNT_LIMIT_A=${DRAWDOWN_ACCOUNT_LIMIT_A:-0.20}
       - DRAWDOWN_COOLDOWN_HOURS_A=${DRAWDOWN_COOLDOWN_HOURS_A:-4}
+      # ISSUE C3: never allow LEARNING_MODE on Real-A — guard in live_trader __init__
+      - LEARNING_MODE=0
+      # TradeBlocker config (gap-filler gate, ISSUE C1)
+      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-20}
+      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-80}
+      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.50}
+      - TRADE_BLOCKER_MARGIN_SAFETY=${TRADE_BLOCKER_MARGIN_SAFETY:-0.80}
       # ═══ MT5 Bridge credentials (A only) ════════════════════════════════
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
@@ -165,16 +169,27 @@ services:
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
       - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - SCALP_INTERVAL=${SCALP_INTERVAL:-60}
-      - SCALP_SPREAD_MAX=${SCALP_SPREAD_MAX:-30}
-      - SCALP_RISK_PER_TRADE=${SCALP_RISK_PER_TRADE:-0.01}
       - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
       - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
       - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
       - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
+      # AEGIS-only test (2026-07-02): ML filter disabled to test system mechanics alone.
+      # Local MC test (PF 4.13-5.40) used AEGIS only — this matches that baseline.
+      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-0}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
       - ML_MODEL_DIR=/app/data/models/trade_outcome_v4
+      # V4+v6 OR-gate ensemble — verified OOS PF>1.5 on B, C, D (2026-06-29).
+      # Geometry unified at RR=3.0; ATR varies per account (B=2.0, C/D=2.5).
+      # B @0.45: in 3.61 / OOS 1.96 (atr=2.0 rr=3.0 → OOS PF 2.60)
+      # C @0.50: in 3.28 / OOS 2.02 (atr=2.5 rr=3.0 — was OOS-overfit at old geometry 2.0:2.5)
+      # D @0.45: in 2.25 / OOS 2.31 (atr=2.5 rr=3.0 → OOS PF 2.55)
+      # NEVER enabled on A (IRON LAW). Full table: ψ/lab/compare-c-models-2026-06-29/
+      - ML_ENSEMBLE_MODE_B=${ML_ENSEMBLE_MODE_B:-or}
+      - ML_ENSEMBLE_MODE_C=${ML_ENSEMBLE_MODE_C:-or}
+      - ML_ENSEMBLE_MODE_D=${ML_ENSEMBLE_MODE_D:-or}
+      - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
+      - ML_ENSEMBLE_THRESH=${ML_ENSEMBLE_THRESH:-0.45}
+      - ML_ENSEMBLE_THRESH_C=${ML_ENSEMBLE_THRESH_C:-0.50}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
@@ -188,11 +203,11 @@ services:
       - MAX_POSITIONS_CAP_D=${MAX_POSITIONS_CAP_D:-5}
       - LEARNING_MODE=0
       - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
-      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.0}
+      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.5}
       - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.5}
-      - RR_RATIO_B=${RR_RATIO_B:-2.5}
-      - RR_RATIO_C=${RR_RATIO_C:-2.5}
-      - RR_RATIO_D=${RR_RATIO_D:-2.5}
+      - RR_RATIO_B=${RR_RATIO_B:-3.0}
+      - RR_RATIO_C=${RR_RATIO_C:-3.0}
+      - RR_RATIO_D=${RR_RATIO_D:-3.0}
       - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.45}
       - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.45}
       - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
@@ -202,9 +217,6 @@ services:
       - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
       - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
       - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
-      - SCALP_MAX_SPREAD_B=${SCALP_MAX_SPREAD_B:-35}
-      - SCALP_MAX_SPREAD_C=${SCALP_MAX_SPREAD_C:-35}
-      - SCALP_MAX_SPREAD_D=${SCALP_MAX_SPREAD_D:-35}
       - PARTIAL_TP_ENABLED_B=${PARTIAL_TP_ENABLED_B:-0}
       - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-1}
       - PARTIAL_TP_ENABLED_D=${PARTIAL_TP_ENABLED_D:-0}
@@ -255,6 +267,14 @@ services:
       - MT5_SYMBOL_D=${MT5_SYMBOL_D:-XAUUSD}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # ═══ Auto-retrain (train container only — IRON LAW: never on oracle-engine) ═══
+      # Triggers TradeOutcomeTrainer daily at 00:10 UTC when ≥50 new trade_outcomes
+      # accumulate and ≥24h since last run. State persists to data/auto_retrain_state.json.
+      # Real-A container (oracle-engine) does NOT set this — V4 model is never auto-overwritten.
+      - AUTO_RETRAIN_ENABLED=${AUTO_RETRAIN_ENABLED:-1}
+      - AUTO_RETRAIN_MIN_NEW_OUTCOMES=${AUTO_RETRAIN_MIN_NEW_OUTCOMES:-50}
+      - AUTO_RETRAIN_MIN_HOURS=${AUTO_RETRAIN_MIN_HOURS:-24}
+      - AUTO_RETRAIN_EXPERIMENT=${AUTO_RETRAIN_EXPERIMENT:-trade_outcome_v6}
     volumes:
       - oracle-train-data:/app/data
     depends_on:

@@ -109,15 +109,6 @@ class TestRegimeConsistency:
         # Should NOT have hardcoded thresholds
         assert "> 0.035" not in source, "synth_pipeline should not hardcode BW threshold"
 
-    def test_scalp_generator_uses_classify_regime(self):
-        """Scalp generator should import and use classify_regime."""
-        from broky.signals import scalp_generator
-        import inspect
-        source = inspect.getsource(scalp_generator)
-        assert "classify_regime" in source, "scalp_generator should use classify_regime()"
-        # Should NOT have hardcoded thresholds
-        assert "> 0.04" not in source, "scalp_generator should not hardcode BW threshold"
-
 
 class TestRegimeEncoding:
     """Test that regime encoding is consistent and meaningful."""

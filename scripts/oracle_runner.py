@@ -4,8 +4,11 @@
 Runs both processes concurrently:
 1. Data collector: fetches candles + sentiment → SQLite snapshots (every 5 min)
 2. Live trader: generates signals → executes trades on MT5 (every 5 min)
-3. Scalp trader: M1 scalping alongside swing (every 60s, if enabled)
+3. M5 Scalp trader: 6-EMA Ribbon Cloud scalping alongside swing (every 300s, if enabled)
 4. Telegram notifier: real-time trade alerts + daily summary + bridge status
+
+Note: M1 Scalp trader was retired 2026-07-02 — M1 signals too fast, M5 sufficient.
+SCALP_ENABLED env var is accepted but ignored (logs a warning).
 
 Environment variables:
     TRADING_PHASE: collect|trade|both (default: both)
@@ -14,8 +17,6 @@ Environment variables:
     TRADE_INTERVAL: seconds between trading cycles (default: 300)
     DRY_RUN: 1=dry run, 0=live trading (default: 1)
     DB_PATH: path to SQLite database (default: /app/data/oracle.db)
-    SCALP_ENABLED: 1=enable scalp mode (default: 0)
-    SCALP_INTERVAL: seconds between scalp cycles (default: 60)
     M5_SCALP_ENABLED: 1=enable M5 scalp mode (default: 0)
     M5_SCALP_INTERVAL: seconds between M5 scalp cycles (default: 300)
     TG_BOT_TOKEN: Telegram Bot API token (optional)
@@ -222,42 +223,6 @@ def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifie
         time.sleep(interval)
 
 
-def run_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool):
-    """Run scalp trader in a loop."""
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    from metty.execution.scalp_trader import ScalpTrader, ScalpRiskConfig
-
-    risk = ScalpRiskConfig(
-        risk_per_trade=float(os.environ.get("SCALP_RISK_PER_TRADE", "0.01")),
-        max_spread_points=float(os.environ.get("SCALP_SPREAD_MAX", "30")),
-    )
-    trader = ScalpTrader(
-        account=account,
-        db_path=Path(db_path),
-        dry_run=dry_run,
-        risk_config=risk,
-        event_bus=_event_bus,
-    )
-    mode = "DRY-RUN" if dry_run else "LIVE"
-    logger.info("[Scalp:%s] Starting %s scalp trader (interval=%ds)", account, mode, interval)
-
-    try:
-        while True:
-            try:
-                _mt5_health_check(account)
-                result = trader.run_once()
-                action = result.get("action", "unknown")
-                logger.info("[Scalp:%s] %s: %s", account, mode, result)
-            except Exception as e:
-                logger.error("[Scalp:%s] Scalp error: %s", account, e)
-
-            time.sleep(interval)
-    finally:
-        trader.shutdown()
-
-
 def run_m5_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool):
     """Run M5 scalp trader (6-EMA Ribbon Cloud) in a loop."""
     from dotenv import load_dotenv
@@ -349,6 +314,139 @@ def run_daily_learning(db_path: str, notifier=None):
                 logger.info("[DailyLearning] No adjustment data")
         except Exception as e:
             logger.error("[DailyLearning] Failed: %s", e)
+
+
+def run_auto_retrain(db_path: str, accounts: list, notifier=None):
+    """Auto-retrain ML trade-outcome models when enough new data accumulates.
+
+    Triggered daily at 00:10 UTC. Gates:
+      - Env AUTO_RETRAIN_ENABLED=1 must be set (off by default — Real-A container
+        must NEVER auto-retrain; only oracle-engine-train enables this).
+      - Accounts list must include at least one of B/C/D (Real-A-only container skips).
+      - At least MIN_NEW_OUTCOMES new trade_outcomes rows since last retrain.
+      - At least MIN_HOURS_BETWEEN_RETRAIN hours since last retrain.
+
+    State persists to `data/auto_retrain_state.json` so container restarts don't
+    double-train. The retrain uses TradeOutcomeTrainer with the env-configured
+    ML_MODEL_DIR (V12 path on the train container). On success, sends Telegram
+    summary if notifier is enabled.
+    """
+    import json
+    import os
+
+    MIN_NEW_OUTCOMES = int(os.environ.get("AUTO_RETRAIN_MIN_NEW_OUTCOMES", "50"))
+    MIN_HOURS_BETWEEN = int(os.environ.get("AUTO_RETRAIN_MIN_HOURS", "24"))
+
+    if os.environ.get("AUTO_RETRAIN_ENABLED", "0") != "1":
+        logger.info("[AutoRetrain] DISABLED (set AUTO_RETRAIN_ENABLED=1 to enable)")
+        return
+
+    bcd = [a.strip().upper() for a in accounts if a.strip().upper() in ("B", "C", "D")]
+    if not bcd:
+        logger.info("[AutoRetrain] SKIP — no B/C/D accounts in this container (Real-A only)")
+        return
+
+    state_file = Path(db_path).parent / "auto_retrain_state.json"
+
+    while True:
+        now = datetime.now(timezone.utc)
+        target_seconds = 10 * 60  # 00:10 UTC
+        current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        if current_seconds < target_seconds:
+            seconds_until = target_seconds - current_seconds
+        else:
+            seconds_until = 86400 - (current_seconds - target_seconds)
+        logger.info("[AutoRetrain] Sleeping %ds until next 00:10 UTC", seconds_until)
+        time.sleep(seconds_until)
+
+        try:
+            # Load persistent state
+            state = {"last_outcome_count": 0, "last_run_iso": None}
+            if state_file.exists():
+                try:
+                    state = json.loads(state_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Count current trade_outcomes
+            from metty.core.db import get_connection
+            conn = get_connection(Path(db_path))
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM trade_outcomes").fetchone()
+                current_count = int(row[0]) if row else 0
+            finally:
+                conn.close()
+
+            last_count = int(state.get("last_outcome_count", 0))
+            new_outcomes = current_count - last_count
+
+            # Time since last run
+            last_run_iso = state.get("last_run_iso")
+            hours_since = 9999.0
+            if last_run_iso:
+                try:
+                    hours_since = (datetime.now(timezone.utc) - datetime.fromisoformat(last_run_iso)).total_seconds() / 3600.0
+                except (ValueError, TypeError):
+                    pass
+
+            if new_outcomes < MIN_NEW_OUTCOMES:
+                logger.info(
+                    "[AutoRetrain] SKIP — only %d new outcomes (need %d) since last run",
+                    new_outcomes, MIN_NEW_OUTCOMES,
+                )
+                continue
+
+            if hours_since < MIN_HOURS_BETWEEN:
+                logger.info(
+                    "[AutoRetrain] SKIP — only %.1fh since last run (need %dh)",
+                    hours_since, MIN_HOURS_BETWEEN,
+                )
+                continue
+
+            logger.info(
+                "[AutoRetrain] TRIGGERED — %d new outcomes, %.1fh since last run. "
+                "Retraining %s models...",
+                new_outcomes, hours_since, bcd,
+            )
+
+            from broky.ml.trade_outcome_trainer import TradeOutcomeTrainer, TradeOutcomeConfig
+            model_dir = os.environ.get("ML_MODEL_DIR", "/app/data/models")
+            config = TradeOutcomeConfig(
+                experiment_name=os.environ.get("AUTO_RETRAIN_EXPERIMENT", "trade_outcome_mixed_v12"),
+                feature_set="extended",
+                min_confidence=0.45,
+                min_samples=100,
+                regime_specific=True,
+                direction_specific=True,
+                live_weight=3.0,
+                exclude_phantom=True,
+                exclude_low_confidence=True,
+            )
+            trainer = TradeOutcomeTrainer(config=config)
+            results = trainer.train(db_path=Path(db_path))
+
+            # Persist state
+            state["last_outcome_count"] = current_count
+            state["last_run_iso"] = datetime.now(timezone.utc).isoformat()
+            state_file.write_text(json.dumps(state, indent=2))
+
+            logger.info(
+                "[AutoRetrain] COMPLETE — %d models trained, state saved to %s",
+                len(results) if results else 0, state_file,
+            )
+
+            if notifier and getattr(notifier, "enabled", False):
+                try:
+                    notifier.send(
+                        f"<b>🔄 Auto-Retrain</b> Account(s) {','.join(bcd)}\n"
+                        f"New outcomes: {new_outcomes}\n"
+                        f"Models trained: {len(results) if results else 0}"
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error("[AutoRetrain] Failed: %s", e)
 
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
@@ -469,11 +567,8 @@ def main():
     logger.info("MT5 auto-login: %d/%d accounts logged in", logged_in, len(accounts))
 
     scalp_enabled = os.environ.get("SCALP_ENABLED", "0") == "1"
-    scalp_interval = int(os.environ.get("SCALP_INTERVAL", "60"))
     if scalp_enabled:
-        logger.info("Scalp mode ENABLED | Scalp interval: %ds", scalp_interval)
-    else:
-        logger.info("Scalp mode DISABLED (set SCALP_ENABLED=1 to enable)")
+        logger.warning("SCALP_ENABLED=1 ignored — M1 scalp trader retired 2026-07-02 (M5 sufficient). Set M5_SCALP_ENABLED=1 for M5 scalp.")
 
     m5_scalp_enabled = os.environ.get("M5_SCALP_ENABLED", "0") == "1"
     m5_scalp_interval = int(os.environ.get("M5_SCALP_INTERVAL", "300"))
@@ -520,16 +615,6 @@ def main():
                 )
                 threads.append(t)
 
-            # Scalp trader (parallel thread, M1)
-            if scalp_enabled:
-                t = threading.Thread(
-                    target=run_scalp_trader,
-                    args=(account, db_path, scalp_interval, dry_run),
-                    name=f"scalp-{account}",
-                    daemon=True,
-                )
-                threads.append(t)
-
             # M5 Scalp trader (parallel thread, 6-EMA Ribbon Cloud)
             if m5_scalp_enabled:
                 t = threading.Thread(
@@ -563,6 +648,16 @@ def main():
         target=run_daily_learning,
         args=(db_path, notifier if notifier.enabled else None),
         name="daily-learning",
+        daemon=True,
+    )
+    threads.append(t)
+
+    # Auto-retrain thread (only active when AUTO_RETRAIN_ENABLED=1 — train container only).
+    # Real-A container has it disabled so V4 model is never auto-overwritten.
+    t = threading.Thread(
+        target=run_auto_retrain,
+        args=(db_path, accounts, notifier if notifier.enabled else None),
+        name="auto-retrain",
         daemon=True,
     )
     threads.append(t)

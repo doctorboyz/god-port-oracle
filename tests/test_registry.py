@@ -117,13 +117,12 @@ class TestStrategyRegistry:
 class TestRealGenerators:
     """Test that actual generators register correctly."""
 
-    def test_all_three_generators_registered(self):
+    def test_both_generators_registered(self):
         # Re-register since autouse fixture clears the registry
         from broky.signals.generator import generate_signal
         from broky.signals.m5_scalp_generator import generate_m5_scalp_signal
-        from broky.signals.scalp_generator import generate_scalp_signal
 
-        for fn in [generate_signal, generate_m5_scalp_signal, generate_scalp_signal]:
+        for fn in [generate_signal, generate_m5_scalp_signal]:
             if hasattr(fn, "_strategy_config"):
                 cfg = fn._strategy_config
                 StrategyRegistry.register(fn, cfg)
@@ -131,7 +130,6 @@ class TestRealGenerators:
         names = StrategyRegistry.names()
         assert "swing" in names
         assert "m5_scalp" in names
-        assert "m1_scalp" in names
 
     def test_swing_config(self):
         from broky.signals.generator import generate_signal
@@ -157,15 +155,17 @@ class TestRealGenerators:
         assert config.requires_h4_trend is True
         assert config.min_bars == 200
 
-    def test_m1_scalp_config(self):
-        from broky.signals.scalp_generator import generate_scalp_signal
-        if hasattr(generate_scalp_signal, "_strategy_config"):
-            StrategyRegistry.register(generate_scalp_signal, generate_scalp_signal._strategy_config)
-
-        _, config = StrategyRegistry.get("m1_scalp")
-        assert config.timeframe == "M1"
-        assert config.trading_mode == TradingMode.SCALP
-        assert config.requires_spread is True
+    def test_m1_scalp_retired(self):
+        """M1 scalp generator was retired 2026-07-02 — confirm it's no longer
+        registered/importable. Guards against accidental re-introduction."""
+        from broky.signals import __all__ as signals_all
+        assert "generate_scalp_signal" not in signals_all, (
+            "generate_scalp_signal must not be exported — M1 scalp retired"
+        )
+        import importlib
+        assert not importlib.util.find_spec("broky.signals.scalp_generator"), (
+            "broky.signals.scalp_generator module must be removed — M1 scalp retired"
+        )
 
 
 class TestBacktestEngineStrategy:

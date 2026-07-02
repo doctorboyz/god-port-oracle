@@ -96,7 +96,6 @@ def check_scope():
 
     trader_files = [
         ROOT / "metty" / "execution" / "live_trader.py",
-        ROOT / "metty" / "execution" / "scalp_trader.py",
         ROOT / "metty" / "execution" / "m5_scalp_trader.py",
     ]
 

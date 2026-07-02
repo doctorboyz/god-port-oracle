@@ -66,7 +66,6 @@ class AccountConfigInfo:
     buy_min_confidence: float
     initial_equity: float
     m5_max_spread: float
-    scalp_max_spread: float
     partial_tp_enabled: bool
     tp1_ratio: float
     rr_scale_in: float
@@ -328,10 +327,6 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
         m5_max_spread=float(os.environ.get(
             f"M5_MAX_SPREAD_{name}",
             os.environ.get("M5_SCALP_SPREAD_MAX", "30"),
-        )),
-        scalp_max_spread=float(os.environ.get(
-            f"SCALP_MAX_SPREAD_{name}",
-            os.environ.get("SCALP_SPREAD_MAX", "30"),
         )),
         partial_tp_enabled=os.environ.get(
             f"PARTIAL_TP_ENABLED_{name}",

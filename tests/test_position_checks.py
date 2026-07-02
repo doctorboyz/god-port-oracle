@@ -1,7 +1,7 @@
 """Integration tests for _check_existing_position / _check_existing_*_position.
 
-Tests the MT5-first position check logic shared by LiveTrader, ScalpTrader,
-and M5ScalpTrader:
+Tests the MT5-first position check logic shared by LiveTrader and
+M5ScalpTrader:
 
 1. MT5 has position → returns True
 2. MT5 has no position + DB has ghost trades → closes ghosts, returns False
@@ -174,73 +174,6 @@ class TestLiveTraderCheckExistingPosition:
         mock_connect.side_effect = Exception("Connection refused")
 
         assert trader._check_existing_position() is False
-
-
-# ---------------------------------------------------------------------------
-# ScalpTrader._check_existing_scalp_position tests
-# ---------------------------------------------------------------------------
-
-class TestScalpTraderCheckExistingPosition:
-    """Tests for ScalpTrader._check_existing_scalp_position."""
-
-    def _make_trader(self, db_path: str, account: str = "B"):
-        from metty.execution.scalp_trader import ScalpTrader
-        return ScalpTrader(account=account, dry_run=True, db_path=db_path)
-
-    @patch("rpyc.connect")
-    def test_mt5_has_position_returns_true(self, mock_connect, tmp_path):
-        """When MT5 has position and DB has matching scalp trade, return True."""
-        db_path = str(tmp_path / "test.db")
-        _create_test_db(db_path, trades=[
-            {"account_id": 2, "direction": "BUY", "ticket": 12345,
-             "strategy_id": "scalp", "trading_mode": "scalp"},
-        ])
-        trader = self._make_trader(db_path, account="B")
-
-        mock_conn = MagicMock()
-        mock_conn.root.positions_get.return_value = [
-            {"ticket": 12345, "symbol": "XAUUSD", "type": 0}
-        ]
-        mock_connect.return_value = mock_conn
-
-        assert trader._check_existing_scalp_position() is True
-
-    @patch("rpyc.connect")
-    def test_mt5_no_position_closes_ghost_trades(self, mock_connect, tmp_path):
-        db_path = str(tmp_path / "test.db")
-        _create_test_db(db_path, trades=[
-            {"account_id": 2, "direction": "BUY", "ticket": None,
-             "strategy_id": "scalp", "trading_mode": "scalp"},
-        ])
-        trader = self._make_trader(db_path, account="B")
-
-        mock_conn = MagicMock()
-        mock_conn.root.positions_get.return_value = []
-        mock_connect.return_value = mock_conn
-
-        assert trader._check_existing_scalp_position() is False
-
-    @patch("rpyc.connect")
-    def test_mt5_unreachable_db_has_scalp_trades(self, mock_connect, tmp_path):
-        db_path = str(tmp_path / "test.db")
-        _create_test_db(db_path, trades=[
-            {"account_id": 2, "direction": "BUY", "strategy_id": "scalp"},
-        ])
-        trader = self._make_trader(db_path, account="B")
-
-        mock_connect.side_effect = Exception("Connection refused")
-
-        assert trader._check_existing_scalp_position() is True
-
-    @patch("rpyc.connect")
-    def test_mt5_unreachable_db_empty(self, mock_connect, tmp_path):
-        db_path = str(tmp_path / "test.db")
-        _create_test_db(db_path)
-        trader = self._make_trader(db_path)
-
-        mock_connect.side_effect = Exception("Connection refused")
-
-        assert trader._check_existing_scalp_position() is False
 
 
 # ---------------------------------------------------------------------------
