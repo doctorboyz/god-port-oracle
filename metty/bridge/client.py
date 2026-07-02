@@ -573,6 +573,62 @@ class MT5Bridge:
             logger.error("Error closing position %d: %s", ticket, e)
             return False
 
+    async def close_position_with_fill(self, ticket: int) -> tuple[bool, Optional[float]]:
+        """Close a position and return (success, fill_price).
+
+        ISSUE-063: close_position returns bool only, so callers that need the actual
+        close fill price (for PnL) had to fall back to the theoretical SL/TP/tp1 price.
+        This variant returns the broker's reported fill price from the order_send result.
+        """
+        conn = self._ensure_connected()
+        try:
+            positions_netref = await asyncio.to_thread(
+                conn.root.positions_get, ticket=ticket,
+            )
+            positions = _netref_to_list(positions_netref, columns=POSITION_COLUMNS)
+            if not positions:
+                logger.warning("Position %d not found", ticket)
+                return False, None
+
+            pos = positions[0]
+            if isinstance(pos, dict):
+                pos = dict(pos)
+
+            pos_type = pos.get("type", 0)
+            close_type = ORDER_TYPE_SELL if pos_type == 0 else ORDER_TYPE_BUY
+
+            tick_netref = await asyncio.to_thread(
+                conn.root.symbol_info_tick, pos["symbol"],
+            )
+            tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
+            close_price = float(tick["bid"]) if pos_type == 0 else float(tick["ask"])
+
+            result_netref = await asyncio.to_thread(
+                conn.root.order_send,
+                TRADE_ACTION_DEAL,    # action
+                pos["symbol"],        # symbol
+                pos["volume"],        # volume
+                close_type,           # order_type
+                close_price,          # price
+                0.0,                  # sl
+                0.0,                  # tp
+                20,                   # deviation
+                234000,               # magic
+                f"close-{ticket}",    # comment
+                ORDER_TIME_GTC,       # type_time
+                ORDER_FILLING_FOK,    # type_filling (Exness requires FOK)
+                ticket,               # position
+            )
+            result = _netref_to_dict(result_netref, columns=["retcode", "order", "price", "volume"])
+            if result is not None and result.get("retcode") == TRADE_RETCODE_DONE:
+                fill = result.get("price")
+                fill_f = float(fill) if fill is not None and float(fill) > 0 else None
+                return True, fill_f
+            return False, None
+        except Exception as e:
+            logger.error("Error closing position %d (with_fill): %s", ticket, e)
+            return False, None
+
     async def get_account_info(self) -> Optional[AccountInfo]:
         """Get current account information from MT5."""
         conn = self._ensure_connected()
@@ -717,15 +773,22 @@ class MT5Bridge:
 
     def fetch_deal_history_sync(
         self, symbol: str = "XAUUSD", days_back: int = 7
-    ) -> list[dict]:
+    ) -> Optional[list[dict]]:
         """Connect, fetch deal history, and disconnect in one call.
 
         Synchronous wrapper for get_deal_history() — used by reconciliation
         code that runs in synchronous context.
+
+        Returns:
+            list[dict] — on bridge success (may be empty if no deals in window)
+            None — on bridge failure (connect failed or fetch raised). Callers
+            MUST distinguish None from []: None means "bridge unhealthy, do NOT
+            reconcile" (would fall back to entry_price → PnL=0 false close);
+            [] means "bridge OK, no deals to match against" (reconcile safe).
         """
         async def _do():
             if not await self.connect():
-                return []
+                return None
             deals = await self.get_deal_history(symbol, days_back=days_back)
             await self.disconnect()
             return deals
@@ -733,4 +796,4 @@ class MT5Bridge:
             return asyncio.run(_do())
         except Exception as e:
             logger.warning("fetch_deal_history_sync failed: %s", e)
-            return []
+            return None

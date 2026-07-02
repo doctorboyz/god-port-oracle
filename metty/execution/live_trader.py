@@ -13,6 +13,7 @@ Each cycle:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -27,7 +28,8 @@ from broky.data.calendar import fetch_calendar, should_avoid_trading
 from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
 from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_config, get_buy_min_confidence
-from metty.core.account_registry import get_display_name
+from broky.risk.trade_blocker import TradeBlocker, BlockInput
+from metty.core.account_registry import get_display_name, get_account_config, get_bridge_config
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -80,6 +82,12 @@ class RiskConfig:
     partial_tp_enabled: bool = False  # Feature flag — must be explicitly enabled
     tp1_ratio: float = 0.5   # TP1 at 50% of TP distance from entry
     rr_scale_in: float = 2.5  # RR ratio for the scale-in position
+    # ISSUE-052: trailing TP D 0.20/0.10 + 24h time stop — ported from backtest
+    # (scripts/backtest_entry_trailing_block.py). Previously live had only SL/TP/3h max_holding.
+    trailing_tp_enabled: bool = True   # Feature flag — matches system report section 2
+    trailing_activation_pct: float = 0.20  # arm trailing after +0.20% from entry
+    trailing_trail_pct: float = 0.10       # trail 0.10% below peak (BUY) / above trough (SELL)
+    time_stop_bars: int = 288              # 24h on M5 (was max_holding_bars=36 = 3h)
 
 
 class LiveTrader:
@@ -107,11 +115,31 @@ class LiveTrader:
         notifier: Optional["TelegramNotifier"] = None,
     ):
         self.account = account.upper()
+        # ISSUE M3: fail loud on unknown account — silent fallback to account_id=3
+        # routed Real-A trades to demo "C" in DB → kill switch reacted to demo PnL.
+        if self.account not in ACCOUNT_IDS:
+            raise ValueError(
+                f"Unknown account '{self.account}' — must be one of {list(ACCOUNT_IDS)}. "
+                f"Check ACCOUNT_NAME env var."
+            )
         self.display_name = get_display_name(self.account)
         self.db_path = db_path
         self.data_dir = data_dir or Path("data/xau-data")
         self.dry_run = dry_run
         self.learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
+        # ISSUE C3: LEARNING_MODE on Real-A silently bypasses CB/cooldown/calendar/ML-veto.
+        # Hard-block — never allow learning mode on real money.
+        if self.account == "A" and self.learning_mode and not self.dry_run:
+            raise RuntimeError(
+                "LEARNING_MODE=1 is forbidden on account 'A' (Real-A real money) — "
+                "it bypasses CircuitBreaker/cooldown/calendar/ML-veto. "
+                "Unset LEARNING_MODE or use a demo account."
+            )
+        # ISSUE H1: self.symbol was never set → _get_deal_history raised AttributeError,
+        # caught silently → reconciliation skipped → exit prices fell back to entry (breakeven).
+        # Use get_symbol_map so MT5_SYMBOL_{account} env override is respected.
+        from metty.core.account_registry import get_symbol_map
+        self.symbol = get_symbol_map().get(self.account, "XAUUSD")
         per_account_limits = {
             "A": int(os.environ.get("MAX_POSITIONS_A", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "B": int(os.environ.get("MAX_POSITIONS_B", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
@@ -128,16 +156,32 @@ class LiveTrader:
             f"MAX_POSITIONS_CAP_{self.account}",
             os.environ.get("MAX_POSITIONS_CAP", "5"),
         ))
-        self.account_id = ACCOUNT_IDS.get(self.account, 3)
-        self.risk = risk_config or RiskConfig(
-            risk_per_trade=ACCOUNT_RISK.get(self.account, 0.02),
-        )
+        # ISSUE M3: previously `ACCOUNT_IDS.get(self.account, 3)` silently fell back to 3 (C)
+        # if account name was typo'd. Now __init__ raises loud for unknown accounts, so this
+        # is guaranteed to be a known account — but assert anyway to be defensive.
+        self.account_id = ACCOUNT_IDS[self.account]
+        # ISSUE-067: previously hardcoded ACCOUNT_RISK.get(self.account, 0.02) — env override
+        # RISK_PER_TRADE_{account} was silently ignored. Now env wins, then registry, then hardcoded.
+        _env_risk = os.environ.get(f"RISK_PER_TRADE_{self.account}")
+        if _env_risk is not None:
+            _risk_per_trade = float(_env_risk)
+        else:
+            try:
+                from metty.core.account_registry import get_account_config
+                _risk_per_trade = float(get_account_config(self.account).risk_per_trade)
+            except Exception:
+                _risk_per_trade = ACCOUNT_RISK.get(self.account, 0.02)
+        self.risk = risk_config or RiskConfig(risk_per_trade=_risk_per_trade)
         # Per-account strategy overrides via env vars (for testing different configs)
+        # ISSUE-069: env default was "2.0" but RiskConfig.atr_multiplier default is 2.5
+        # (account_registry default 2.5). When env unset, per_account_atr would override
+        # RiskConfig's 2.5 down to 2.0 — making SL 20% tighter than intended. Now match
+        # the registry default so env override is opt-IN, not silent shrink.
         per_account_atr = {
-            "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "2.0"))),
-            "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "2.0"))),
-            "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "2.0"))),
-            "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "2.0"))),
+            "A": float(os.environ.get("ATR_MULTIPLIER_A", os.environ.get("ATR_MULTIPLIER", "2.5"))),
+            "B": float(os.environ.get("ATR_MULTIPLIER_B", os.environ.get("ATR_MULTIPLIER", "2.5"))),
+            "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "2.5"))),
+            "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "2.5"))),
         }
         per_account_rr = {
             "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.5"))),
@@ -186,10 +230,31 @@ class LiveTrader:
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
         )
+        # ISSUE C1: TradeBlocker (gap-filler) — enforces hard_max_lots, risk_pct_sanity,
+        # sl_too_tight, sl_too_wide, margin_safety, daily/weekly trade count limits.
+        # Not wired before → live path had no protection against misconfigured SL/lots.
+        self._trade_blocker = TradeBlocker(
+            daily_trade_count_limit=int(os.environ.get("TRADE_BLOCKER_DAILY_LIMIT", "20")),
+            weekly_trade_count_limit=int(os.environ.get("TRADE_BLOCKER_WEEKLY_LIMIT", "80")),
+            hard_max_lots=float(os.environ.get("TRADE_BLOCKER_HARD_MAX_LOTS", "0.50")),
+            max_risk_pct=0.05,
+            margin_safety_factor=float(os.environ.get("TRADE_BLOCKER_MARGIN_SAFETY", "0.80")),
+        )
         # Drawdown protection (stricter for real accounts)
         dd_config = get_drawdown_config(self.account)
+        # ISSUE-070: initial_equity default "500" bricks small accounts (Real-A may start
+        # at $100 or be topped up to a different amount). Use registry initial_balance as
+        # the sane default; env override still wins for one-off testing.
+        _env_init_eq = os.environ.get(f"INITIAL_EQUITY_{self.account}")
+        if _env_init_eq is not None:
+            _initial_equity = float(_env_init_eq)
+        else:
+            try:
+                _initial_equity = float(get_account_config(self.account).initial_balance)
+            except Exception:
+                _initial_equity = 500.0
         self._drawdown_protector = DrawdownProtector(
-            initial_equity=float(os.environ.get(f"INITIAL_EQUITY_{self.account}", "500")),
+            initial_equity=_initial_equity,
             daily_limit_pct=dd_config["daily_limit_pct"],
             weekly_limit_pct=dd_config["weekly_limit_pct"],
             account_limit_pct=dd_config["account_limit_pct"],
@@ -220,20 +285,48 @@ class LiveTrader:
         }.get(self.account, self.account)
         self.event_bus = event_bus
         # ML filter — risk-scale position size based on P(LOSS) prediction
+        # Two modes:
+        #   - Single model: ML_MODEL_DIR_{account} / ML_MODEL_DIR → TradeOutcomePredictor
+        #   - Ensemble:     ML_ENSEMBLE_MODE={or|and|avg|max} → EnsemblePredictor
+        #     (uses ML_ENSEMBLE_MODEL_DIRS colon-separated list + ML_ENSEMBLE_THRESH)
+        # Ensemble is opt-in per container. NEVER enabled on Account A (IRON LAW).
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
         self._ml_predictor = None
         self._ml_fail_count: int = 0  # consecutive ML prediction failures
         if self._ml_enabled:
             try:
-                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
-                # Per-account model dir: real accounts can pin to stable model
-                per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
-                ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
-                logger.info("[%s] ML model dir: %s (per_account=%s)", self.display_name, ml_dir, per_account_dir)
-                self._ml_predictor = TradeOutcomePredictor(
-                    model_dir=ml_dir,
-                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                # Per-account ensemble enable takes precedence over global.
+                # This lets oracle-engine-train run ensemble on B/D while C
+                # stays on V4 single-model (C ensemble is OOS-overfit).
+                # NEVER enabled on Account A (IRON LAW — A lives in oracle-engine).
+                ensemble_mode = (
+                    os.environ.get(f"ML_ENSEMBLE_MODE_{self.account}", "").strip().lower()
+                    or os.environ.get("ML_ENSEMBLE_MODE", "").strip().lower()
                 )
+                if ensemble_mode:
+                    from broky.ml.ensemble_predictor import EnsemblePredictor
+                    per_account_thresh = (
+                        os.environ.get(f"ML_ENSEMBLE_THRESH_{self.account}", "").strip()
+                        or os.environ.get("ML_ENSEMBLE_THRESH", "0.50").strip()
+                    )
+                    self._ml_predictor = EnsemblePredictor(
+                        mode=ensemble_mode,
+                        loss_threshold=float(per_account_thresh),
+                    )
+                    logger.info("[%s] ML ensemble mode=%s dirs=%s thresh=%s",
+                                self.display_name, ensemble_mode,
+                                os.environ.get("ML_ENSEMBLE_MODEL_DIRS", ""),
+                                per_account_thresh)
+                else:
+                    from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                    # Per-account model dir: real accounts can pin to stable model
+                    per_account_dir = os.environ.get(f"ML_MODEL_DIR_{self.account}", "")
+                    ml_dir = per_account_dir or os.environ.get("ML_MODEL_DIR", "data/models/trade_outcome_v4")
+                    logger.info("[%s] ML model dir: %s (per_account=%s)", self.display_name, ml_dir, per_account_dir)
+                    self._ml_predictor = TradeOutcomePredictor(
+                        model_dir=ml_dir,
+                        loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                    )
                 logger.info("[Swing:%s] ML filter enabled: %s", self.display_name,
                            "models loaded" if self._ml_predictor.enabled else "no models")
                 # Health check: verify ML predictor can actually produce predictions
@@ -311,16 +404,28 @@ class LiveTrader:
         try:
             now_utc = datetime.now(timezone.utc)
             for event in calendar:
-                event_time = event.get("date")
+                # ISSUE-066: CalendarEvent is a dataclass with fields datetime/event/impact,
+                # NOT a dict with date/title/impact. Old code called event.get("date"/"title")
+                # → AttributeError swallowed by bare except → always returned None.
+                # Support both dataclass and dict shapes (defensive).
+                if isinstance(event, dict):
+                    event_time = event.get("date") or event.get("datetime")
+                    event_name = event.get("title") or event.get("event", "")
+                    event_impact = event.get("impact", "")
+                else:
+                    event_time = getattr(event, "datetime", None)
+                    event_name = getattr(event, "event", "") or ""
+                    event_impact = getattr(event, "impact", "") or ""
                 if not event_time:
                     continue
                 if isinstance(event_time, str):
                     event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
                 minutes_left = int((event_time - now_utc).total_seconds() / 60)
                 if minutes_left > 0:
-                    return minutes_left, event.get("title", ""), event.get("impact", "")
+                    return minutes_left, event_name, event_impact
             return None, None, None
-        except Exception:
+        except Exception as e:
+            logger.debug("[%s] _get_calendar_context failed: %s", self.display_name, e)
             return None, None, None
 
     def _record_rejection(self, signal: Signal, reason: str, session: str = "",
@@ -487,21 +592,26 @@ class LiveTrader:
         now = datetime.now(timezone.utc).strftime("%H:%M")
         alerts = []
 
-        if self._last_d1_trend is not None and d1_trend != "unknown":
-            if d1_trend != self._last_d1_trend:
-                direction = "🟢 BULLISH" if d1_trend == "bullish" else "🔴 BEARISH"
-                alerts.append(
-                    f"<b>D1 Trend Flip</b> {now}\n"
-                    f"Account {self.account}: {self._last_d1_trend} → {direction}"
-                )
+        # ISSUE-065: capture OLD values BEFORE updating. Previously _last_d1_trend was
+        # updated at L577-578 BEFORE the EventBus publish at L590 which compared
+        # `d1_trend != self._last_d1_trend` (always False) → TREND_FLIP events never fired
+        # and old_direction in the payload was already new.
+        old_d1 = self._last_d1_trend
+        old_h4 = self._last_h4_trend
 
-        if self._last_h4_trend is not None and h4_trend and h4_trend != "unknown":
-            if h4_trend != self._last_h4_trend:
-                direction = "🟢 BULLISH" if h4_trend == "bullish" else "🔴 BEARISH"
-                alerts.append(
-                    f"<b>H4 Trend Flip</b> {now}\n"
-                    f"Account {self.account}: {self._last_h4_trend} → {direction}"
-                )
+        if old_d1 is not None and d1_trend != "unknown" and d1_trend != old_d1:
+            direction = "🟢 BULLISH" if d1_trend == "bullish" else "🔴 BEARISH"
+            alerts.append(
+                f"<b>D1 Trend Flip</b> {now}\n"
+                f"Account {self.account}: {old_d1} → {direction}"
+            )
+
+        if old_h4 is not None and h4_trend and h4_trend != "unknown" and h4_trend != old_h4:
+            direction = "🟢 BULLISH" if h4_trend == "bullish" else "🔴 BEARISH"
+            alerts.append(
+                f"<b>H4 Trend Flip</b> {now}\n"
+                f"Account {self.account}: {old_h4} → {direction}"
+            )
 
         # Update tracking
         if d1_trend != "unknown":
@@ -516,26 +626,27 @@ class LiveTrader:
             except Exception:
                 pass
 
-        # Also emit TREND_FLIP events via EventBus for programmatic consumers
+        # Also emit TREND_FLIP events via EventBus for programmatic consumers.
+        # ISSUE-065: compare against captured OLD value (not the just-updated one).
         if self.event_bus:
-            if self._last_d1_trend is not None and d1_trend != "unknown" and d1_trend != self._last_d1_trend:
+            if old_d1 is not None and d1_trend != "unknown" and d1_trend != old_d1:
                 self.event_bus.publish(Event(
                     type=EventType.TREND_FLIP,
                     data={
                         "timeframe": "D1",
                         "direction": d1_trend,
-                        "old_direction": self._last_d1_trend,
+                        "old_direction": old_d1,
                         "symbol": "XAUUSD",
                         "account": self.account,
                     },
                 ))
-            if self._last_h4_trend is not None and h4_trend and h4_trend != "unknown" and h4_trend != self._last_h4_trend:
+            if old_h4 is not None and h4_trend and h4_trend != "unknown" and h4_trend != old_h4:
                 self.event_bus.publish(Event(
                     type=EventType.TREND_FLIP,
                     data={
                         "timeframe": "H4",
                         "direction": h4_trend,
-                        "old_direction": self._last_h4_trend,
+                        "old_direction": old_h4,
                         "symbol": "XAUUSD",
                         "account": self.account,
                     },
@@ -623,6 +734,37 @@ class LiveTrader:
             logger.debug("[%s] Equity fetch failed: %s", self.display_name, e)
             return None
 
+    def _get_free_margin(self) -> float | None:
+        """Get current account free margin from MT5 (accounts for used margin of open
+        positions). Returns None if unavailable.
+
+        ISSUE-060: the locally-computed `free_margin = max(equity - new_trade_margin, 0)`
+        ignored used margin of already-open positions. With dynamic_max up to 5 positions,
+        4 open positions' used margin was uncounted → TradeBlocker could approve a 5th
+        trade that exceeds real free margin → broker reject or margin call.
+        """
+        try:
+            from metty.bridge.client import MT5Bridge
+            from metty.core.account_registry import get_account_config
+            from metty.core.models import AccountConfig
+
+            cfg = get_account_config(self.account)
+            config = AccountConfig(
+                name=cfg.name,
+                broker_login=cfg.broker_login,
+                broker_server=cfg.broker_server,
+                balance=cfg.initial_balance,
+                leverage=cfg.leverage,
+                bridge_host=cfg.bridge_host,
+                bridge_port=cfg.bridge_internal_port,
+                signal_group=cfg.signal_group,
+            )
+            info = MT5Bridge(config).fetch_account_info_sync()
+            return info.free_margin if info else None
+        except Exception as e:
+            logger.debug("[%s] Free margin fetch failed: %s", self.display_name, e)
+            return None
+
     def _calculate_max_positions(self, equity: float) -> int:
         """Calculate max simultaneous positions dynamically based on equity and risk.
 
@@ -662,7 +804,24 @@ class LiveTrader:
             positions_raw = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
 
-            has_mt5_position = positions_raw is not None and len(positions_raw) > 0
+            # SWING-RECONCILE-1: distinguish bridge-down from bridge-OK-no-positions.
+            # positions_get returns None when MT5/bridge is disconnected (cannot reach
+            # broker) vs [] when broker is reachable and has no open positions.
+            # Treating None as "no position" triggers reconcile on bridge-down →
+            # _get_deal_history also returns [] (swallowed) → reconcile falls back
+            # to entry_price → PnL=0 false close → DB thinks 0 open → opens new
+            # position while old still in MT5 → runaway loop. Skip reconcile when
+            # bridge is down; hold off new trades until bridge recovers.
+            if positions_raw is None:
+                open_trades = get_open_trades(self.account_id, self.db_path)
+                logger.warning(
+                    "[%s] MT5 bridge returned None (disconnected) — skipping reconcile, "
+                    "holding off new trades (%d open in DB)",
+                    self.display_name, len(open_trades),
+                )
+                return len(open_trades) > 0
+
+            has_mt5_position = len(positions_raw) > 0
 
             if not has_mt5_position:
                 # MT5 says no position — reconcile DB trades with MT5 state
@@ -672,8 +831,21 @@ class LiveTrader:
                         "[%s] %d open DB trades but no MT5 position — reconciling",
                         self.display_name, len(open_trades),
                     )
-                    # Try to get deal history for accurate exit prices
+                    # Try to get deal history for accurate exit prices.
+                    # ISSUE-061: if deal history fetch fails (bridge timeout/RPyC flip),
+                    # skip reconciliation entirely rather than falling back to breakeven
+                    # inference — which would mark real-loss trades as PnL=0 and pollute
+                    # DP/CB counters. Retry next cycle when bridge is healthy.
                     deals = self._get_deal_history(days_back=7)
+                    if deals is None:
+                        logger.warning(
+                            "[%s] Deal history unavailable — skipping reconciliation (will retry next cycle)",
+                            self.display_name,
+                        )
+                        # MT5 says no position, but we can't reconcile safely.
+                        # Return True so run_once treats it as "existing position open"
+                        # and holds off opening new trades until we can reconcile.
+                        return len(open_trades) > 0
                     # Convert RPyC positions (may be raw list of dicts already)
                     positions_list = []
                     if positions_raw:
@@ -701,16 +873,29 @@ class LiveTrader:
             open_trades = get_open_trades(self.account_id, self.db_path)
             return len(open_trades) > 0
 
-    def _get_deal_history(self, days_back: int = 7) -> list[dict]:
-        """Fetch MT5 deal history for reconciliation."""
+    def _get_deal_history(self, days_back: int = 7) -> Optional[list[dict]]:
+        """Fetch MT5 deal history for reconciliation.
+
+        Returns:
+            list[dict] — on success (may be empty if no deals in window)
+            None — on bridge failure (timeout, RPyC flip, container restart)
+
+        ISSUE-061: previously swallowed all errors → returned [] → caller couldn't
+        distinguish "bridge worked, no deals" from "bridge failed". On bridge failure,
+        reconcile_closed_positions with empty deals fell back to breakeven (PnL=0)
+        for trades that MT5 actually closed at a loss → DP/CB counters polluted.
+        Now returns None on failure so caller skips reconciliation entirely.
+        """
         try:
-            from metty.core.account_registry import get_bridge_config
-            bridge = MT5Bridge(get_bridge_config(self.account))
-            deals = bridge.fetch_deal_history_sync(self.symbol, days_back=days_back)
-            return deals or []
+            from metty.bridge.client import MT5Bridge
+            deals = MT5Bridge(get_bridge_config(self.account)).fetch_deal_history_sync(self.symbol, days_back=days_back)
+            # Propagate None (bridge failure) — caller's `if deals is None` guard
+            # relies on this to skip reconcile. `deals or []` would swallow None
+            # and cause the runaway-loop bug (false close → open new → repeat).
+            return deals
         except Exception as e:
-            logger.debug("[%s] Could not fetch deal history: %s", self.display_name, e)
-            return []
+            logger.warning("[%s] Deal history fetch failed — skipping reconciliation: %s", self.display_name, e)
+            return None
 
     def _check_cooldown(self) -> bool:
         """Check if we're still in cooldown after last exit."""
@@ -752,6 +937,45 @@ class LiveTrader:
             return risk_per_trade_size(
                 equity, self.risk.risk_per_trade, price, sl, CONTRACT_SIZE,
             )
+
+    def _close_mt5_position(self, ticket: int) -> bool:
+        """Close a position in MT5 by ticket. Returns True on success, False on failure.
+
+        ISSUE-048: extracted helper so callers can close in MT5 FIRST and only update DB
+        after success. Previously _monitor_positions and _execute_tp1_close wrote
+        close_live_trade + CB.record + DP.record BEFORE bridge.close_position, so an
+        MT5 close failure left an orphan position whose real PnL was never reconciled.
+        """
+        ok, _ = self._close_mt5_position_with_fill(ticket)
+        return ok
+
+    def _close_mt5_position_with_fill(self, ticket: int) -> tuple[bool, Optional[float]]:
+        """Close a position in MT5 and return (success, fill_price).
+
+        ISSUE-063: close_position returns bool only; callers that need the actual close
+        fill price (for PnL) fell back to the theoretical SL/TP/tp1 price. This variant
+        uses close_position_with_fill so DB exit_price reflects actual broker fill.
+        """
+        if not ticket or self.dry_run:
+            return True, None  # nothing to close — treat as success so DB path proceeds
+        try:
+            import asyncio
+            from metty.bridge.client import MT5Bridge
+            # ISSUE-064: use account_registry as single source of truth for bridge config
+            # (was hardcoded port_map + fallback host bypassing registry).
+            bridge = MT5Bridge(get_bridge_config(self.account))
+
+            async def _close():
+                if not await bridge.connect():
+                    return False, None
+                ok, fill = await bridge.close_position_with_fill(ticket)
+                await bridge.disconnect()
+                return ok, fill
+
+            return asyncio.run(_close())
+        except Exception as e:
+            logger.warning("Failed to close position %s in MT5: %s", ticket, e)
+            return False, None
 
     def _monitor_positions(self, candles: dict[str, pd.DataFrame]) -> list[dict]:
         """Check open trades for exit conditions (SL/TP hit, max holding)."""
@@ -809,11 +1033,35 @@ class LiveTrader:
             exit_reason = None
             exit_price = current_price
 
-            # Check SL/TP
+            # ISSUE-052: Trailing TP D 0.20/0.10 — ported from backtest.
+            # peak (BUY) = entry + mfe ; trough (SELL) = entry - mfe.
+            # arm once gain_pct >= activation_pct; trail_level = peak * (1 - trail_pct/100).
+            trailing_enabled = (
+                self.risk.trailing_tp_enabled
+                and entry_price > 0
+                and mfe_mae.get("mfe", 0) > 0
+            )
+            trailing_armed = False
+            trailing_level = None
+            if trailing_enabled:
+                gain_pct = mfe_mae["mfe"] / entry_price * 100.0
+                if gain_pct >= self.risk.trailing_activation_pct:
+                    trailing_armed = True
+                    if direction == "BUY":
+                        peak = entry_price + mfe_mae["mfe"]
+                        trailing_level = peak * (1 - self.risk.trailing_trail_pct / 100.0)
+                    else:  # SELL
+                        trough = entry_price - mfe_mae["mfe"]
+                        trailing_level = trough * (1 + self.risk.trailing_trail_pct / 100.0)
+
+            # Check SL/TP + trailing TP (order: SL floor → trailing → Far TP)
             if direction == "BUY":
                 if sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
                     exit_price = sl
+                elif trailing_armed and trailing_level is not None and current_price <= trailing_level:
+                    exit_reason = "trailing_tp"
+                    exit_price = round(trailing_level, 2)
                 elif tp > 0 and current_price >= tp:
                     exit_reason = "take_profit"
                     exit_price = tp
@@ -821,6 +1069,9 @@ class LiveTrader:
                 if sl > 0 and current_price >= sl:
                     exit_reason = "stop_loss"
                     exit_price = sl
+                elif trailing_armed and trailing_level is not None and current_price >= trailing_level:
+                    exit_reason = "trailing_tp"
+                    exit_price = round(trailing_level, 2)
                 elif tp > 0 and current_price <= tp:
                     exit_reason = "take_profit"
                     exit_price = tp
@@ -837,7 +1088,10 @@ class LiveTrader:
                 except Exception:
                     pass
 
-                if self.risk.max_holding_bars > 0 and bars_held >= self.risk.max_holding_bars:
+                # ISSUE-052: 24h time stop (288 M5 bars) per system report section 2.
+                # Was max_holding_bars=36 (3h) — now uses time_stop_bars (default 288).
+                time_stop = self.risk.time_stop_bars if self.risk.time_stop_bars > 0 else self.risk.max_holding_bars
+                if time_stop > 0 and bars_held >= time_stop:
                     exit_reason = "max_holding"
 
             if exit_reason:
@@ -860,6 +1114,31 @@ class LiveTrader:
                 exit_d1_trend = self._last_d1_trend
                 exit_h4_trend = self._last_h4_trend
                 exit_regime = exit_d1_trend if exit_d1_trend and exit_d1_trend not in ("neutral", "unknown") else None
+
+                # ISSUE-048: close in MT5 FIRST, only update DB/CB/DP after success.
+                # Old order wrote close_live_trade + CB.record + DP.record BEFORE bridge.close_position;
+                # if MT5 close failed (caught + logged), DB said is_open=0 but MT5 still held the position.
+                # The orphan's real PnL was never reconciled back → kill switch flew blind.
+                # ISSUE-063: capture actual close fill price; recompute PnL from it so DB
+                # exit_price + pnl reflect reality (not theoretical SL/TP/tp1 level).
+                actual_fill = None
+                if trade.get("ticket") and not self.dry_run:
+                    mt5_ok, actual_fill = self._close_mt5_position_with_fill(trade["ticket"])
+                    if not mt5_ok:
+                        logger.warning(
+                            "[%s] MT5 close failed for ticket %s — leaving DB open, will retry next cycle",
+                            self.display_name, trade["ticket"],
+                        )
+                        continue  # skip DB close + CB/DP update; retry next cycle
+                    if actual_fill is not None and actual_fill > 0:
+                        exit_price = round(actual_fill, 2)
+                        # Recompute PnL with actual fill
+                        if direction == "BUY":
+                            pnl = (exit_price - entry_price) * lot_size * CONTRACT_SIZE
+                            pnl_pct = (exit_price - entry_price) / entry_price * 100
+                        else:
+                            pnl = (entry_price - exit_price) * lot_size * CONTRACT_SIZE
+                            pnl_pct = (entry_price - exit_price) / entry_price * 100
 
                 close_live_trade(
                     trade_id=trade["id"],
@@ -893,34 +1172,6 @@ class LiveTrader:
                     logger.warning("[%s] Equity unavailable after close — skipping drawdown update", self.display_name)
 
                 self._last_exit_time = datetime.now(timezone.utc)
-
-                # Close in MT5 if ticket exists
-                if trade.get("ticket") and not self.dry_run:
-                    try:
-                        from metty.bridge.client import MT5Bridge
-                        from metty.core.models import AccountConfig, AccountName
-
-                        port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
-                        host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
-                        port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
-
-                        config = AccountConfig(
-                            name=AccountName[self.account],
-                            bridge_host=host,
-                            bridge_port=port,
-                            broker_login="", broker_server="",
-                        )
-                        bridge = MT5Bridge(config)
-
-                        async def _close():
-                            if await bridge.connect():
-                                await bridge.close_position(trade["ticket"])
-                                await bridge.disconnect()
-
-                        import asyncio
-                        asyncio.run(_close())
-                    except Exception as e:
-                        logger.warning("Failed to close position %s in MT5: %s", trade["ticket"], e)
 
                 closed.append({
                     "trade_id": trade["id"],
@@ -989,6 +1240,28 @@ class LiveTrader:
         exit_h4_trend = self._last_h4_trend
         exit_regime = exit_d1_trend if exit_d1_trend and exit_d1_trend not in ("neutral", "unknown") else None
 
+        # ISSUE-048: close in MT5 FIRST, only update DB/CB/DP after success.
+        # ISSUE-063: capture actual close fill price; use it as exit_price so DB PnL
+        # reflects reality (not theoretical tp1_price which can slip on market close).
+        actual_fill = None
+        if trade.get("ticket") and not self.dry_run:
+            mt5_ok, actual_fill = self._close_mt5_position_with_fill(trade["ticket"])
+            if not mt5_ok:
+                logger.warning(
+                    "[Swing:%s] MT5 TP1 close failed for ticket %s — leaving DB open, will retry next cycle",
+                    self.display_name, trade["ticket"],
+                )
+                return closed  # do NOT close in DB; retry next cycle
+            if actual_fill is not None and actual_fill > 0:
+                exit_price = round(actual_fill, 2)
+                # Recompute PnL with actual fill
+                if direction == "BUY":
+                    pnl = (exit_price - entry_price) * lot_size * CONTRACT_SIZE
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100
+                else:
+                    pnl = (entry_price - exit_price) * lot_size * CONTRACT_SIZE
+                    pnl_pct = (entry_price - exit_price) / entry_price * 100
+
         close_live_trade(
             trade_id=trade["id"],
             exit_price=exit_price,
@@ -1026,34 +1299,6 @@ class LiveTrader:
 
         # Clean up MFE/MAE state for position 1
         self._mfe_mae_state.pop(trade_id, None)
-
-        # Close in MT5 if ticket exists
-        if trade.get("ticket") and not self.dry_run:
-            try:
-                from metty.bridge.client import MT5Bridge
-                from metty.core.models import AccountConfig, AccountName
-
-                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
-                host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
-                port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
-
-                config = AccountConfig(
-                    name=AccountName[self.account],
-                    bridge_host=host,
-                    bridge_port=port,
-                    broker_login="", broker_server="",
-                )
-                bridge = MT5Bridge(config)
-
-                async def _close():
-                    if await bridge.connect():
-                        await bridge.close_position(trade["ticket"])
-                        await bridge.disconnect()
-
-                import asyncio
-                asyncio.run(_close())
-            except Exception as e:
-                logger.warning("[Swing:%s] Failed to close position %s at TP1 in MT5: %s", self.display_name, trade["ticket"], e)
 
         closed.append({
             "trade_id": trade["id"],
@@ -1093,25 +1338,79 @@ class LiveTrader:
         new_lots = lot_size
         current_price = tp1_price  # Approximate entry for scale-in
 
+        # ISSUE H5: previously scale-in bypassed ALL risk gates (DP/CB/TradeBlocker/ML).
+        # Position 1 already closed at TP1 (taking profit is safe), but the scale-in is a
+        # BRAND-NEW order with a brand-new SL → must pass the same gate stack as run_once.
+        # If any gate blocks, skip the scale-in (keep TP1 profit) and log.
+        can_scale_in = True
+        scale_in_block_reason = ""
+        if not self.dry_run:
+            # Sync PnL + DP check
+            self._drawdown_protector.sync_pnl_from_db(self.account_id, self.db_path)
+            scale_equity = self._get_equity()
+            if scale_equity is None:
+                can_scale_in = False
+                scale_in_block_reason = "equity unavailable"
+            else:
+                dp_ok, dp_r = self._drawdown_protector.check(scale_equity)
+                if not dp_ok:
+                    can_scale_in = False
+                    scale_in_block_reason = f"drawdown:{dp_r}"
+                elif not self.learning_mode:
+                    cb_ok, cb_r = self.circuit_breaker.can_open_trade()
+                    if not cb_ok:
+                        can_scale_in = False
+                        scale_in_block_reason = f"circuit_breaker:{cb_r}"
+                    else:
+                        # TradeBlocker gate for scale-in
+                        new_sl_dist_pct = abs(current_price - new_sl) / current_price * 100.0
+                        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+                        margin_req = new_lots * 100 * current_price / max(leverage, 1)
+                        # ISSUE-060: use real MT5 free_margin for scale-in too.
+                        mt5_fm = self._get_free_margin()
+                        free_margin = mt5_fm if mt5_fm is not None else max(scale_equity - margin_req, 0.0)
+                        open_trades_now = get_open_trades(self.account_id, self.db_path)
+                        tb_v = self._trade_blocker.check(BlockInput(
+                            open_positions=len(open_trades_now),
+                            max_positions=self._calculate_max_positions(scale_equity),
+                            daily_trades_today=self._drawdown_protector.state.daily_trades,
+                            weekly_trades_this_week=self._drawdown_protector.state.weekly_trades,
+                            lots=new_lots,
+                            risk_pct=self.risk.risk_per_trade,
+                            sl_distance_pct=new_sl_dist_pct,
+                            equity=scale_equity,
+                            margin_required=margin_req,
+                            free_margin=free_margin,
+                            learning_mode=self.learning_mode,
+                        ))
+                        if tb_v.blocked:
+                            can_scale_in = False
+                            scale_in_block_reason = f"trade_blocker:{tb_v.block_name}"
+        if not can_scale_in:
+            logger.info(
+                "[Swing:%s] Scale-in at TP1 BLOCKED by risk gate — keeping TP1 profit. reason=%s",
+                self.display_name, scale_in_block_reason,
+            )
+            if self._notifier and self._notifier.enabled:
+                try:
+                    self._notifier.send(
+                        f"ℹ️ [{self.display_name}] Scale-in skipped at TP1\n"
+                        f"Reason: {scale_in_block_reason}\n"
+                        f"Position 1 closed at TP1 — profit kept."
+                    )
+                except Exception:
+                    pass
+            return closed  # TP1 closed; no scale-in
+
         # Open scale-in in MT5 first (if not dry run)
         ticket = None
+        scale_in_fill_price = current_price  # default to tp1_price estimate
+        scale_in_fill_lots = new_lots
         if not self.dry_run:
             try:
                 from metty.bridge.client import MT5Bridge
-                from metty.core.models import AccountConfig, AccountName
-
-                port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
-                host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
-                port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
-
-                config = AccountConfig(
-                    name=AccountName[self.account],
-                    bridge_host=host,
-                    bridge_port=port,
-                    broker_login=os.environ.get(f"MT5_LOGIN_{self.account}", ""),
-                    broker_server=os.environ.get(f"MT5_SERVER_{self.account}", "Exness-MT5Trial17"),
-                )
-                bridge = MT5Bridge(config)
+                # ISSUE-064: use account_registry for bridge config (was hardcoded port_map).
+                bridge = MT5Bridge(get_bridge_config(self.account))
 
                 async def _open():
                     if not await bridge.connect():
@@ -1122,10 +1421,20 @@ class LiveTrader:
 
                 import asyncio
                 order_result = asyncio.run(_open())
-                ticket = order_result.ticket if order_result and order_result.success else None
-                if order_result and not order_result.success:
-                    logger.error("[Swing:%s] Scale-in order FAILED at TP1: %s", self.display_name, order_result.error)
+                # ISSUE-049 + ISSUE-055: must treat order_result=None / success=False /
+                # ticket<=0 all as failure, otherwise a ghost row with ticket=None/0 is
+                # inserted and reconciled as breakeven later.
+                if not order_result or not order_result.success or not order_result.ticket or int(order_result.ticket) <= 0:
+                    err = order_result.error if order_result else "bridge connect failed"
+                    logger.error("[Swing:%s] Scale-in order FAILED at TP1: %s", self.display_name, err)
                     return closed  # Don't insert scale-in if MT5 order failed
+                ticket = order_result.ticket
+                # ISSUE-062: use actual fill price as scale-in entry, not tp1_price estimate.
+                if order_result.price is not None and float(order_result.price) > 0:
+                    scale_in_fill_price = round(float(order_result.price), 2)
+                # ISSUE-057: use actual fill volume if reported.
+                if order_result.volume is not None and float(order_result.volume) > 0:
+                    scale_in_fill_lots = float(order_result.volume)
             except Exception as e:
                 logger.error("[Swing:%s] Scale-in MT5 error at TP1: %s", self.display_name, e)
                 return closed  # Don't insert scale-in if MT5 errored
@@ -1135,10 +1444,10 @@ class LiveTrader:
             account_id=self.account_id,
             timestamp=now_str,
             direction=direction,
-            entry_price=current_price,
+            entry_price=scale_in_fill_price,
             stop_loss=round(new_sl, 2),
             take_profit=tp,
-            lot_size=new_lots,
+            lot_size=scale_in_fill_lots,
             confidence=trade.get("confidence", 0),
             regime=trade.get("regime", "unknown") or "unknown",
             session=trade.get("session", "unknown") or "unknown",
@@ -1159,20 +1468,22 @@ class LiveTrader:
 
         # Initialize MFE/MAE tracking for scale-in position
         self._mfe_mae_state[scale_in_id] = {
-            "mfe": 0, "mae": 0, "entry_price": current_price,
+            "mfe": 0, "mae": 0, "entry_price": scale_in_fill_price,
         }
 
         log_trade(logger, "SCALE_IN", account=self.account, direction=direction,
-                  price=current_price, lots=new_lots, sl=new_sl, tp=tp,
+                  price=scale_in_fill_price, lots=scale_in_fill_lots, sl=new_sl, tp=tp,
                   reason=f"scale-in from #{trade_id}")
+        # ISSUE-059: scale-in is a NEW trade open → count it for anti-churn.
+        self._drawdown_protector.record_trade_open()
 
         if self.event_bus:
             self.event_bus.publish(Event(
                 type=EventType.TRADE_OPENED,
                 data={
                     "direction": direction, "symbol": "XAUUSD",
-                    "price": current_price, "sl": new_sl, "tp": tp,
-                    "lots": new_lots, "confidence": 0,
+                    "price": scale_in_fill_price, "sl": new_sl, "tp": tp,
+                    "lots": scale_in_fill_lots, "confidence": 0,
                     "regime": exit_regime or "unknown", "reason": "scale-in",
                     "account": self.account, "trading_mode": "swing",
                     "parent_trade_id": trade_id, "tp_level": 2,
@@ -1230,13 +1541,54 @@ class LiveTrader:
                 "signal": signal,
             }
 
-        # 4a2. Drawdown protection check (before any risk-sensitive operations)
-        # Sync PnL from DB first — ensures reconciliation-closed trades are counted
+        # 4a1. Counter-trend rejection gate (CLAUDE.md "ไม่แทงสวนเทรนด์" iron rule).
+        # trend_alignment == -1 means the signal is counter-trend WITHOUT reversal
+        # evidence (no OB/OS + divergence + HH/LL price-structure confirmation).
+        # Reject hard; learning_mode bypasses so we still collect outcomes for ML.
+        _trend_alignment = signal.indicators.get("trend_alignment") if signal.indicators else None
+        _has_reversal = signal.indicators.get("has_reversal") if signal.indicators else None
+        if (
+            _trend_alignment == -1
+            and not self.learning_mode
+            and signal.signal_type != SignalType.HOLD
+        ):
+            self._record_rejection(
+                signal,
+                f"counter_trend_no_reversal:{signal.signal_type.value}_vs_{d1_trend}_d1",
+                session, d1_trend, candles,
+            )
+            return {
+                "action": "hold",
+                "reason": (
+                    f"counter-trend {signal.signal_type.value} vs {d1_trend} D1 "
+                    f"without reversal evidence (no HH/LL + OB/OS + divergence) — blocked"
+                ),
+                "signal": signal,
+            }
+
+        # 4a2. Existing position check + reconciliation — must run BEFORE DP check.
+        # ISSUE C6: previously DP.check ran BEFORE reconciliation. A losing trade that MT5
+        # closed between cycles would reconcile AFTER the gate approved → next trade went
+        # through while over the daily limit. Now reconcile first, then DP sees the real loss.
+        if self._check_existing_position():
+            self._record_rejection(signal, "existing_position", session, d1_trend, candles)
+            return {
+                "action": "hold",
+                "reason": "position already open",
+                "signal": signal,
+            }
+
+        # 4a3. Drawdown protection check (after reconciliation, before any risk-sensitive ops)
+        # sync_pnl_from_db picks up any reconciled losses so DP sees real PnL.
         self._drawdown_protector.sync_pnl_from_db(self.account_id, self.db_path)
         equity = self._get_equity()
         if equity is None:
             logger.warning("[%s] Equity unavailable — skipping cycle (MT5 may be disconnected)", self.display_name)
             return {"action": "skip", "reason": "equity unavailable (MT5 disconnected?)"}
+        # ISSUE H2: previously `equity if equity else self._get_equity() or self.initial_balance`
+        # referenced self.initial_balance (never set) → AttributeError on equity=0.
+        # Now equity is guaranteed non-None here, use it directly.
+        current_equity = equity
         dd_can_trade, dd_reason = self._drawdown_protector.check(equity)
         if not dd_can_trade:
             log_circuit_break(logger, "DRAWDOWN_BLOCK", account=self.account, reason=dd_reason)
@@ -1259,7 +1611,6 @@ class LiveTrader:
         # 4b. Position limit check (always enforced, even in learning mode)
         # Dynamic max_positions based on current equity and risk (1% per position)
         open_trades = get_open_trades(self.account_id, self.db_path)
-        current_equity = equity if equity else self._get_equity() or self.initial_balance
         dynamic_max = self._calculate_max_positions(current_equity)
         if len(open_trades) >= dynamic_max:
             log_position(logger, "LIMIT", account=self.account, count=len(open_trades), max=dynamic_max)
@@ -1270,16 +1621,8 @@ class LiveTrader:
                 "signal": signal,
             }
 
-        # 4c. Existing position check (always enforced — prevents churn)
-        if self._check_existing_position():
-            self._record_rejection(signal, "existing_position", session, d1_trend, candles)
-            return {
-                "action": "hold",
-                "reason": "position already open",
-                "signal": signal,
-            }
-
-        # 4d. Learning mode: bypass remaining risk checks for data collection
+        # 4c. Learning mode: bypass remaining risk checks for data collection
+        # (DP + position_limit always enforced above even in learning mode — survival gates)
         if not self.learning_mode:
             can_trade, cb_reason = self.circuit_breaker.can_open_trade()
             if not can_trade:
@@ -1340,9 +1683,15 @@ class LiveTrader:
                 from broky.ml.trade_outcome_predictor import compute_features_from_candles
 
                 sentiment_data = self._get_sentiment()
+                # ISSUE-068: _get_current_spread returns spread in POINTS (e.g., 20 for
+                # $0.20 on XAUUSD with point=0.01), but compute_features_from_candles
+                # expects PRICE units (e.g., 0.20). Training data was recorded in price
+                # units → live passing 20.0 was 100x out of distribution. Convert by
+                # multiplying by point (0.01 for XAUUSD).
+                _ml_spread_price = _live_spread * 0.01 if _live_spread else 0.0
                 ml_features = compute_features_from_candles(
                     candles, str(signal.signal_type.value),
-                    spread=_live_spread,
+                    spread=_ml_spread_price,
                     d1_trend=d1_trend or "neutral",
                     h4_trend=h4_trend or "unknown",
                     session=session,
@@ -1383,6 +1732,11 @@ class LiveTrader:
         try:
             atr_series = calculate_atr(m5["high"], m5["low"], m5["close"], period=14)
             atr_val = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 5.0
+            # ISSUE-058: ATR can be 0.0 (flat session, all bars equal) which passes the
+            # not-pd.isna check. SL becomes only spread_buffer wide → inside spread on
+            # tight accounts → instant stop-out. Fallback to sane 5.0 when 0.
+            if atr_val <= 0:
+                atr_val = 5.0
         except Exception:
             atr_val = 5.0
 
@@ -1405,6 +1759,13 @@ class LiveTrader:
         # Use equity already fetched for drawdown check (avoid extra bridge call)
         lots = self._calculate_lots(equity, price, sl, atr_val)
         lots *= ml_risk_multiplier  # ML risk-scaling
+        # ISSUE-051: re-round to 0.01 multiple + re-clamp UPPER bound to hard_max_lots.
+        # _calculate_lots already rounded + clamped to [0.01, 10.0], but `*= multiplier` can
+        # produce non-0.01-multiples (0.05*0.3=0.015 → MT5 rejects) or exceed hard cap when
+        # multiplier > 1.0 (10.0*1.5=15.0). Do NOT clamp lower bound here — the `< 0.01` check
+        # below preserves the "ML scales down below min lot → skip trade" behavior.
+        hard_max_lots = float(os.environ.get("TRADE_BLOCKER_HARD_MAX_LOTS", "0.50"))
+        lots = min(hard_max_lots, math.floor(lots * 100) / 100.0)
         if lots < 0.01:
             if self.learning_mode:
                 # Force minimum lot to ensure trade executes for data collection
@@ -1414,6 +1775,56 @@ class LiveTrader:
                 logger.info("[Swing:%s] ML risk-scaling: lot_size=%.4f < 0.01, skipping", self.account, lots)
                 self._record_rejection(signal, f"ml_lot_too_small:{lots:.4f}", session, d1_trend, candles)
                 return {"action": "hold", "reason": f"ML risk: lot too small ({lots:.4f})", "signal": signal}
+
+        # 6b. TradeBlocker — final hard safety gate (gap-filler).
+        # ISSUE C1: previously not wired into live path → misconfigured SL/lots/risk_pct
+        # could pass DP+CB. Now enforce: hard_max_lots, risk_pct_sanity, sl_too_tight,
+        # sl_too_wide, margin_safety, daily/weekly trade count.
+        sl_distance_pct = abs(price - sl) / price * 100.0
+        # Rough margin estimate — Exness 1:100 default; env override for 1:500 etc.
+        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+        contract_size = 100  # XAUUSD: 1 lot = 100 oz
+        margin_required = lots * contract_size * price / max(leverage, 1)
+        # ISSUE-060: use real MT5 free_margin (accounts for used margin of open positions).
+        # Falls back to local estimate only if MT5 unavailable.
+        mt5_free_margin = self._get_free_margin()
+        if mt5_free_margin is not None:
+            free_margin = mt5_free_margin
+        else:
+            free_margin = max(current_equity - margin_required, 0.0)
+        daily_trades_now = self._drawdown_protector.state.daily_trades
+        weekly_trades_now = self._drawdown_protector.state.weekly_trades
+        tb_verdict = self._trade_blocker.check(BlockInput(
+            open_positions=len(open_trades),
+            max_positions=dynamic_max,
+            daily_trades_today=daily_trades_now,
+            weekly_trades_this_week=weekly_trades_now,
+            lots=lots,
+            risk_pct=self.risk.risk_per_trade,
+            sl_distance_pct=sl_distance_pct,
+            equity=current_equity,
+            margin_required=margin_required,
+            free_margin=free_margin,
+            learning_mode=self.learning_mode,
+        ))
+        if tb_verdict.blocked:
+            log_circuit_break(logger, "TRADE_BLOCKER", account=self.account, reason=tb_verdict.reason)
+            self._record_rejection(signal, f"trade_blocker:{tb_verdict.block_name}", session, d1_trend, candles)
+            if self._notifier and self._notifier.enabled:
+                try:
+                    self._notifier.send(
+                        f"<b>⛔ TRADE BLOCKER</b> Account {self.account}\n"
+                        f"Check: {tb_verdict.block_name}\n"
+                        f"Reason: {tb_verdict.reason}\n"
+                        f"lots={lots} sl_dist={sl_distance_pct:.2f}% risk={self.risk.risk_per_trade:.2%}"
+                    )
+                except Exception:
+                    pass
+            return {
+                "action": "hold",
+                "reason": f"trade_blocker:{tb_verdict.block_name}:{tb_verdict.reason}",
+                "signal": signal,
+            }
 
         # 7. Execute or dry-run
         ts_str = (
@@ -1475,6 +1886,8 @@ class LiveTrader:
             log_trade(logger, "OPENED", account=self.account, direction=direction,
                      price=price, lots=lots, sl=sl, tp=tp, tp1=tp1_price,
                      confidence=signal.confidence, reason=signal.reason)
+            # ISSUE-059: count trade OPEN for anti-churn (was counted on close only).
+            self._drawdown_protector.record_trade_open()
             if self.event_bus:
                 self.event_bus.publish(Event(
                     type=EventType.TRADE_OPENED,
@@ -1501,41 +1914,155 @@ class LiveTrader:
         # Live execution
         try:
             from metty.bridge.client import MT5Bridge
-            from metty.core.models import AccountConfig, AccountName
+            # ISSUE-064: use account_registry for bridge config (was hardcoded port_map).
+            bridge = MT5Bridge(get_bridge_config(self.account))
 
-            port_map = {"A": 5005, "B": 5006, "C": 5007, "D": 5008}
-            host = os.environ.get(f"MT5_BRIDGE_{self.account}_HOST", "100.68.106.101")
-            port = int(os.environ.get(f"MT5_BRIDGE_{self.account}_PORT", str(port_map[self.account])))
-
-            config = AccountConfig(
-                name=AccountName[self.account],
-                bridge_host=host,
-                bridge_port=port,
-                broker_login=os.environ.get(f"MT5_LOGIN_{self.account}", ""),
-                broker_server=os.environ.get(f"MT5_SERVER_{self.account}", "Exness-MT5Trial17"),
+            # ISSUE-053: SL/TP were computed from signal.price (M5 close) but MT5 fills at
+            # ask (BUY) / bid (SELL). Absolute SL/TP sent with the order are then ~spread
+            # closer to fill than intended. Recompute SL/TP from an estimated fill price
+            # using current spread (points → price via *0.01 for XAUUSD) so the risk
+            # distance from actual fill is correct.
+            spread_price = (_live_spread or 0) * 0.01  # points → price units
+            if direction == "BUY":
+                est_fill_price = price + spread_price / 2.0  # ask ≈ mid + half-spread
+            else:
+                est_fill_price = price - spread_price / 2.0  # bid ≈ mid - half-spread
+            sl_for_order = calculate_stop_loss(
+                est_fill_price, atr_val, direction,
+                self.risk.atr_multiplier, self.risk.spread_buffer,
             )
-            bridge = MT5Bridge(config)
+            tp_for_order = calculate_take_profit(
+                est_fill_price, sl_for_order, direction, self.risk.risk_reward_ratio,
+            )
+            # TP1 also recomputed from est_fill_price so DB tp1 matches entry basis
+            tp_distance_est = abs(tp_for_order - est_fill_price)
+            if direction == "BUY":
+                tp1_price_for_order = round(est_fill_price + tp_distance_est * self.risk.tp1_ratio, 2)
+            else:
+                tp1_price_for_order = round(est_fill_price - tp_distance_est * self.risk.tp1_ratio, 2)
 
             async def _execute():
                 if not await bridge.connect():
                     return None
-                result = await bridge.send_order("XAUUSD", direction, lots, sl, tp)
+                result = await bridge.send_order("XAUUSD", direction, lots, sl_for_order, tp_for_order)
                 await bridge.disconnect()
                 return result
 
             import asyncio
             order_result = asyncio.run(_execute())
 
-            ticket = order_result.ticket if order_result and order_result.success else None
+            # ISSUE C2: previously a failed/None order_result still inserted a DB row
+            # with ticket=None → ghost position. _check_existing_position then reconciled
+            # it as breakeven (PnL=0) → polluted DP/CB counters and analytics.
+            # Now: skip DB insert entirely on failure, log + notify, return early.
+            if not order_result or not order_result.success:
+                err = order_result.error if order_result else "bridge connect failed"
+                logger.error(
+                    "[Swing:%s] Order FAILED — no DB row inserted. err=%s dir=%s lots=%s sl=%s tp=%s",
+                    self.display_name, err, direction, lots, sl, tp,
+                )
+                if self._notifier:
+                    try:
+                        self._notifier.send(
+                            f"⚠️ [{self.display_name}] Order rejected: {err}\n"
+                            f"dir={direction} lots={lots} — no DB row written."
+                        )
+                    except Exception:
+                        pass
+                # Record rejected signal for analytics (no ticket, no ghost)
+                try:
+                    insert_rejected_signal(
+                        account_id=self.account_id,
+                        timestamp=ts_str,
+                        direction=direction,
+                        confidence=signal.confidence,
+                        price=price,
+                        rejection_reason=f"order_send: {err}",
+                        trading_mode=TradingMode.SWING.value,
+                        strategy_id=self.strategy_id,
+                        regime=signal.regime or "unknown",
+                        session=session,
+                        d1_trend=d1_trend,
+                        db_path=self.db_path,
+                    )
+                except Exception:
+                    pass
+                return {"action": "order_failed", "reason": err}
+
+            # Order succeeded — use ACTUAL fill price (C4: previously used signal.price
+            # which is M5 close, biased by spread+slippage → PnL wrong → kill switch late).
+            # ISSUE-055: ticket must be > 0. Bridge returns success=True on retcode==DONE
+            # with ticket=result.get("order"). If order=0 or None on a DONE retcode (broker
+            # quirk), DB would insert a ghost row with ticket=0/None. Treat as failure.
+            ticket = order_result.ticket
+            if not ticket or int(ticket) <= 0:
+                err = f"order succeeded retcode=DONE but ticket invalid ({ticket})"
+                logger.error("[%s] %s — no DB row inserted.", self.display_name, err)
+                if self._notifier:
+                    try:
+                        self._notifier.send(
+                            f"⚠️ [{self.display_name}] Order ghost ticket: {ticket}\n"
+                            f"dir={direction} lots={lots} — no DB row written."
+                        )
+                    except Exception:
+                        pass
+                return {"action": "order_failed", "reason": err}
+
+            # ISSUE-056: use `is not None` instead of truthiness. order_result.price==0.0
+            # (broker failed to populate on DONE) would fall back to signal.price via
+            # `if order_result.price else price`. Treat 0.0/None both as fallback.
+            if order_result.price is not None and float(order_result.price) > 0:
+                fill_price = float(order_result.price)
+            else:
+                fill_price = est_fill_price  # better estimate than signal.price
+                logger.warning(
+                    "[%s] order_result.price missing/zero — using est_fill_price %s (signal.price=%s)",
+                    self.display_name, fill_price, price,
+                )
+            if abs(fill_price - price) > 0.01:
+                logger.info(
+                    "[%s] Fill price %s differs from signal.price %s (spread+slip)",
+                    self.display_name, fill_price, price,
+                )
+            # ISSUE-054: recompute SL/TP from ACTUAL fill price so DB tuple is consistent
+            # (entry, SL, TP all on the same basis). _monitor_positions uses stored SL/TP
+            # for exit detection + exit_price=sl → wrong SL = wrong PnL = wrong kill switch.
+            entry_for_db = fill_price
+            sl_for_db = calculate_stop_loss(
+                fill_price, atr_val, direction,
+                self.risk.atr_multiplier, self.risk.spread_buffer,
+            )
+            tp_for_db = calculate_take_profit(
+                fill_price, sl_for_db, direction, self.risk.risk_reward_ratio,
+            )
+            tp_distance_fill = abs(tp_for_db - fill_price)
+            if direction == "BUY":
+                tp1_price_for_db = round(fill_price + tp_distance_fill * self.risk.tp1_ratio, 2)
+            else:
+                tp1_price_for_db = round(fill_price - tp_distance_fill * self.risk.tp1_ratio, 2)
+
+            # ISSUE-057: use actual fill volume from broker if reported. On partial fills
+            # (FOK rejection → broker partial, thin liquidity), DB lot_size > actual filled
+            # → PnL overstated → kill switch late. Fall back to requested lots only if
+            # broker didn't report a positive volume.
+            if order_result.volume is not None and float(order_result.volume) > 0:
+                fill_lots = float(order_result.volume)
+                if abs(fill_lots - lots) > 0.001:
+                    logger.info(
+                        "[%s] Fill volume %s differs from requested %s (partial fill)",
+                        self.display_name, fill_lots, lots,
+                    )
+            else:
+                fill_lots = lots
 
             trade_id = insert_live_trade(
                 account_id=self.account_id,
                 timestamp=ts_str,
                 direction=direction,
-                entry_price=price,
-                stop_loss=sl,
-                take_profit=tp,
-                lot_size=lots,
+                entry_price=entry_for_db,
+                stop_loss=sl_for_db,
+                take_profit=tp_for_db,
+                lot_size=fill_lots,
                 confidence=signal.confidence,
                 regime=signal.regime or "unknown",
                 session=session,
@@ -1555,37 +2082,37 @@ class LiveTrader:
                 next_event_type=next_event_type,
                 next_event_impact=next_event_impact,
                 indicator_scores_json=indicator_scores_json,
-                tp1_price=tp1_price,
+                tp1_price=tp1_price_for_db,
                 atr_multiplier=self.risk.atr_multiplier,
                 rr_ratio=self.risk.risk_reward_ratio,
                 min_confidence_threshold=self.risk.min_confidence,
                 db_path=self.db_path,
             )
 
-            if order_result and order_result.success:
-                log_trade(logger, "FILLED", account=self.account, direction=direction,
-                         price=price, lots=lots, sl=sl, tp=tp, ticket=ticket)
-                if self.event_bus:
-                    self.event_bus.publish(Event(
-                        type=EventType.TRADE_OPENED,
-                        data={
-                            "direction": direction, "symbol": signal.symbol, "price": price,
-                            "sl": sl, "tp": tp, "lots": lots, "confidence": signal.confidence,
-                            "regime": signal.regime or "unknown", "reason": signal.reason,
-                            "account": self.account, "trading_mode": "swing", "ticket": ticket,
-                        },
-                    ))
-            else:
-                error = order_result.error if order_result else "connection failed"
-                logger.error("ORDER FAILED: %s — %s", direction, error)
+            # Order succeeded (failure path returns early above) — log + emit event.
+            log_trade(logger, "FILLED", account=self.account, direction=direction,
+                     price=entry_for_db, lots=fill_lots, sl=sl_for_db, tp=tp_for_db, ticket=ticket)
+            # ISSUE-059: count trade OPEN for anti-churn (was counted on close only).
+            self._drawdown_protector.record_trade_open()
+            if self.event_bus:
+                self.event_bus.publish(Event(
+                    type=EventType.TRADE_OPENED,
+                    data={
+                        "direction": direction, "symbol": signal.symbol, "price": entry_for_db,
+                        "sl": sl_for_db, "tp": tp_for_db, "lots": fill_lots, "confidence": signal.confidence,
+                        "regime": signal.regime or "unknown", "reason": signal.reason,
+                        "account": self.account, "trading_mode": "swing", "ticket": ticket,
+                    },
+                ))
 
             return {
-                "action": "executed" if (order_result and order_result.success) else "order_failed",
+                "action": "executed",
                 "direction": direction,
-                "price": price,
-                "sl": sl,
-                "tp": tp,
-                "lots": lots,
+                "price": entry_for_db,
+                "sl": sl_for_db,
+                "tp": tp_for_db,
+                "tp1": tp1_price_for_db,
+                "lots": fill_lots,
                 "confidence": signal.confidence,
                 "regime": signal.regime,
                 "ticket": ticket,

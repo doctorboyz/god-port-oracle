@@ -465,7 +465,23 @@ class M5ScalpTrader:
             positions_raw = conn.root.positions_get(symbol=cfg.symbol)
             conn.close()
 
-            if positions_raw is None or len(positions_raw) == 0:
+            # M5SCALP-RECONCILE-1: distinguish bridge-down from bridge-OK-no-positions.
+            # positions_get returns None when MT5/bridge is disconnected vs [] when
+            # broker is reachable and has no open positions. Treating None as "no
+            # position" triggers reconcile on bridge-down → _get_deal_history also
+            # swallows None → reconcile falls back to entry_price → PnL=0 false
+            # close → DB thinks 0 open → opens new position while old still in MT5.
+            # Skip reconcile when bridge is down; hold off new trades until recover.
+            if positions_raw is None:
+                all_open_trades = get_open_trades(self.account_id, self.db_path)
+                logger.warning(
+                    "[M5Scalp:%s] MT5 bridge returned None (disconnected) — skipping reconcile, "
+                    "holding off new trades (%d open in DB)",
+                    self.display_name, len(all_open_trades),
+                )
+                return len(all_open_trades) > 0
+
+            if len(positions_raw) == 0:
                 # MT5 says no position — reconcile DB trades with MT5 state.
                 # M5SCALP-1: filter to scalp-only so we NEVER close swing trades
                 # belonging to the swing live_trader (they may still be open in
@@ -536,16 +552,20 @@ class M5ScalpTrader:
                     return True
             return False
 
-    def _get_deal_history(self, days_back: int = 7) -> list[dict]:
-        """Fetch MT5 deal history for reconciliation."""
+    def _get_deal_history(self, days_back: int = 7) -> Optional[list[dict]]:
+        """Fetch MT5 deal history for reconciliation.
+
+        Returns None on bridge failure (so caller's `if deals is None` guard
+        skips reconcile). Returns list (possibly empty) on bridge success.
+        """
         try:
             from metty.core.account_registry import get_bridge_config
             bridge = MT5Bridge(get_bridge_config(self.account))
             deals = bridge.fetch_deal_history_sync(self.symbol, days_back=days_back)
-            return deals or []
+            return deals
         except Exception as e:
-            logger.debug("[M5Scalp:%s] Could not fetch deal history: %s", self.display_name, e)
-            return []
+            logger.warning("[M5Scalp:%s] Deal history fetch failed — skipping reconciliation: %s", self.display_name, e)
+            return None
 
     def _compute_tp_levels(self, entry_price: float, atr: float, direction: str) -> list[dict]:
         """Compute 4-level TP targets for position scaling.

@@ -273,7 +273,7 @@ class TestM5ScalpTraderCheckExistingPosition:
         assert trader._check_existing_m5_scalp_position() is True
 
     @patch("rpyc.connect")
-    def test_mt5_no_position_closes_ghost_trades(self, mock_connect, tmp_path):
+    def test_mt5_no_position_closes_ghost_trades(self, mock_connect, tmp_path, monkeypatch):
         db_path = str(tmp_path / "test.db")
         _create_test_db(db_path, trades=[
             {"account_id": 3, "direction": "BUY", "ticket": None,
@@ -284,6 +284,10 @@ class TestM5ScalpTraderCheckExistingPosition:
         mock_conn = MagicMock()
         mock_conn.root.positions_get.return_value = []
         mock_connect.return_value = mock_conn
+        # Bridge OK with no deals — ghost reconcile path runs (post-fix
+        # 2026-07-02: deals=None means bridge down → skip; mock bridge OK
+        # so the ghost-close path is exercised).
+        monkeypatch.setattr(trader, "_get_deal_history", lambda days_back=7: [])
 
         assert trader._check_existing_m5_scalp_position() is False
 
