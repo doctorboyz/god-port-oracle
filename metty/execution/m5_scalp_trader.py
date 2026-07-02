@@ -352,12 +352,18 @@ class M5ScalpTrader:
             except Exception:
                 pass
 
-    def _compute_d1_trend(self, candles: dict) -> Optional[str]:
-        """Compute D1 trend from H1 data (50 EMA as proxy for D1 direction)."""
+    def _compute_d1_trend(self, candles: dict) -> str:
+        """Compute D1 trend from H1 data (50 EMA as proxy for D1 direction).
+
+        Always returns a string ("bullish"/"bearish"/"unknown") — never None.
+        Returning None caused insert_live_trade to store NULL d1_trend in DB
+        for 66 m5_scalp trades on demo B/C/D, breaking reversal gate and
+        trend-grouped stats. Matches live_trader._determine_d1_trend contract.
+        """
         from broky.indicators.ema import calculate_ema
         h1 = candles.get("H1")
-        if h1 is not None and len(h1) >= 50:
-            try:
+        try:
+            if h1 is not None and len(h1) >= 50:
                 ema50 = calculate_ema(h1["close"], 50)
                 latest = ema50.iloc[-1]
                 latest_price = h1["close"].iloc[-1]
@@ -366,9 +372,9 @@ class M5ScalpTrader:
                         return "bullish"
                     elif latest_price < latest:
                         return "bearish"
-            except Exception:
-                pass
-        return None
+        except Exception:
+            pass
+        return "unknown"
 
     def _compute_h4_trend(self, candles: dict) -> Optional[str]:
         """Compute H4 trend using EMA 10/50 crossover."""
