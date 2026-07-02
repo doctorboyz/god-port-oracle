@@ -160,15 +160,36 @@ class ScalpTrader:
         self._bridge = None  # MT5Bridge, initialized lazily
         self.event_bus = event_bus
         # ML filter — only enabled if models have decent accuracy
+        # Ensemble mode (ML_ENSEMBLE_MODE) takes precedence over single-model.
+        # NEVER enabled on Account A (IRON LAW).
         self._ml_enabled = os.environ.get("ML_FILTER_ENABLED", "0") == "1"
         self._ml_predictor = None
         self._ml_fail_count: int = 0  # consecutive ML prediction failures
         if self._ml_enabled:
             try:
-                from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
-                self._ml_predictor = TradeOutcomePredictor(
-                    loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                # Per-account ensemble enable takes precedence over global.
+                # NEVER enabled on Account A (IRON LAW).
+                ensemble_mode = (
+                    os.environ.get(f"ML_ENSEMBLE_MODE_{self.account}", "").strip().lower()
+                    or os.environ.get("ML_ENSEMBLE_MODE", "").strip().lower()
                 )
+                if ensemble_mode:
+                    from broky.ml.ensemble_predictor import EnsemblePredictor
+                    per_account_thresh = (
+                        os.environ.get(f"ML_ENSEMBLE_THRESH_{self.account}", "").strip()
+                        or os.environ.get("ML_ENSEMBLE_THRESH", "0.50").strip()
+                    )
+                    self._ml_predictor = EnsemblePredictor(
+                        mode=ensemble_mode,
+                        loss_threshold=float(per_account_thresh),
+                    )
+                    logger.info("[%s] ML ensemble mode=%s thresh=%s",
+                                self.display_name, ensemble_mode, per_account_thresh)
+                else:
+                    from broky.ml.trade_outcome_predictor import TradeOutcomePredictor
+                    self._ml_predictor = TradeOutcomePredictor(
+                        loss_threshold=float(os.environ.get("ML_LOSS_THRESHOLD", "0.65")),
+                    )
                 logger.info("[Scalp:%s] ML filter enabled: %s", self.display_name,
                            "models loaded" if self._ml_predictor.enabled else "no models")
                 # Health check: verify ML predictor can actually produce predictions
@@ -601,6 +622,91 @@ class ScalpTrader:
             return "bullish"
         return "bearish"
 
+    def _compute_trend_alignment(self, signal, candles: dict) -> int:
+        """Compute trend_alignment for a scalp signal from H1 EMA50 proxy.
+
+        scalp_trader doesn't fetch D1 candles (M1-only strategy). Derive a
+        d1_proxy from H1 EMA50 — same approach used in the ML feature block.
+        Returns the trend_alignment code via compute_trend_alignment_value:
+          1  = trend-aligned (BUY in bullish / SELL in bearish)
+          0  = neutral (no H1 data or d1_proxy unknown)
+         -1  = counter-trend WITHOUT reversal (gated by _apply_counter_trend_gate)
+          2  = counter-trend WITH reversal (never returned here — has_reversal
+                is always False for scalp; M1 is too fast for reliable swing-
+                structure confirmation, so reversal trades are not allowed)
+
+        Side effect: stashes d1_proxy on self._last_d1_trend so the gate can
+        reference it in its reason string. Matches existing scalp_trader
+        pattern (line 1123 also sets _last_d1_trend from ML block).
+
+        M1 scalp seeks momentum bursts, not reversals — has_reversal=False is
+        intentionally more conservative than swing/m5_scalp (which allow
+        reversal trades with HH/LL + OB/OS + divergence evidence).
+        """
+        if signal is None:
+            return 0
+        try:
+            direction = signal.signal_type.value
+        except AttributeError:
+            return 0
+        if direction == "HOLD":
+            return 0
+        h1 = candles.get("H1") if candles else None
+        d1_proxy = "unknown"
+        if h1 is not None and len(h1) >= 50:
+            try:
+                ema50 = h1["close"].ewm(span=50, adjust=False).mean()
+                if pd.notna(ema50.iloc[-1]):
+                    d1_proxy = "bullish" if h1["close"].iloc[-1] > ema50.iloc[-1] else "bearish"
+            except Exception:
+                pass
+        # Stash for gate reason + downstream consumers
+        self._last_d1_trend = d1_proxy
+        from broky.signals.generator import compute_trend_alignment_value
+        return compute_trend_alignment_value(
+            direction=direction,
+            d1_trend=d1_proxy,
+            h4_trend=None,
+            has_reversal=False,
+        )
+
+    def _apply_counter_trend_gate(self, signal, d1_trend: str) -> tuple[bool, str]:
+        """Counter-trend rejection gate — CLAUDE.md "ไม่แทงสวนเทรนด์" iron rule.
+
+        Mirrors live_trader.py:1544-1567 (swing) and m5_scalp_trader step 7b1.
+        Rejects when trend_alignment == -1 (counter-trend WITHOUT reversal)
+        and signal != HOLD.
+
+        scalp_trader has NO learning_mode attribute — gate never bypasses.
+        Scalp is live-only; there is no ML data collection path that would
+        justify letting counter-trend trades through for outcome tracking.
+
+        Returns (blocked, reason). reason is "" when not blocked.
+        """
+        if signal is None:
+            return False, ""
+        try:
+            sig_type = signal.signal_type
+        except AttributeError:
+            return False, ""
+        if sig_type == SignalType.HOLD:
+            return False, ""
+        # scalp_trader has no learning_mode — never bypass. Defensive getattr
+        # in case someone sets the attribute; the iron rule still holds.
+        if getattr(self, "learning_mode", False):
+            # Still block — scalp has no ML data collection path. Log nothing;
+            # the iron rule is enforced unconditionally on scalp.
+            pass
+        indicators = getattr(signal, "indicators", None) or {}
+        trend_alignment = indicators.get("trend_alignment")
+        if trend_alignment is None or trend_alignment != -1:
+            return False, ""
+        # trend_alignment == -1: counter-trend without reversal evidence.
+        # scalp has no reversal exception (M1 too fast for reliable structure).
+        direction = sig_type.value if hasattr(sig_type, "value") else str(sig_type)
+        reason = f"counter_trend_no_reversal:{direction}_vs_{d1_trend}_d1"
+        return True, reason
+
     def _get_equity(self) -> float:
         """Get current account equity from MT5."""
         bridge = self._get_bridge()
@@ -946,6 +1052,31 @@ class ScalpTrader:
             return {
                 "action": "hold",
                 "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}",
+                "signal": signal,
+            }
+
+        # 5b1. Counter-trend rejection gate (CLAUDE.md "ไม่แทงสวนเทรนด์" iron rule).
+        # scalp_generator does NOT produce trend_alignment/has_reversal — compute
+        # from H1 EMA50 proxy and inject into signal.indicators so the gate can
+        # read it. scalp has no learning_mode → gate never bypasses. M1 scalp
+        # seeks momentum bursts, not reversals — has_reversal always False.
+        # Mirrors live_trader.py:1544-1567 (swing) + m5_scalp_trader step 7b1.
+        _trend_alignment = self._compute_trend_alignment(signal, candles)
+        if signal.indicators is not None:
+            signal.indicators["trend_alignment"] = float(_trend_alignment)
+            signal.indicators["has_reversal"] = 0.0
+            signal.indicators["reversal_strength"] = 0.0
+        _d1_trend_for_gate = self._last_d1_trend or "unknown"
+        ct_blocked, ct_reason = self._apply_counter_trend_gate(signal, _d1_trend_for_gate)
+        if ct_blocked:
+            self._record_rejection(signal, ct_reason, session=session)
+            return {
+                "action": "hold",
+                "reason": (
+                    f"counter-trend {signal.signal_type.value} vs {_d1_trend_for_gate} D1 "
+                    f"without reversal evidence — blocked (scalp: no reversal exception, "
+                    f"M1 too fast for reliable swing-structure confirmation)"
+                ),
                 "signal": signal,
             }
 
