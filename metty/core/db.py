@@ -952,6 +952,32 @@ def get_latest_signal_id(
         conn.close()
 
 
+def get_snapshot_id_for_signal(
+    signal_id: int | None,
+    db_path: Optional[Path] = None,
+) -> int | None:
+    """Resolve the feature_snapshots.id row linked to a signals.id.
+
+    Used by close_live_trade to populate trade_outcomes.snapshot_id at close
+    time so ML training rows have full feature context without requiring the
+    async backfill_trade_outcomes pass. Returns None when signal_id is None
+    or no snapshot row exists yet (collector lag) — callers must tolerate None.
+    """
+    if signal_id is None:
+        return None
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT id FROM feature_snapshots
+               WHERE signal_id = ?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (signal_id,),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_open_trades(
     account_id: int,
     db_path: Optional[Path] = None,
@@ -1046,25 +1072,38 @@ def _match_closing_deal(
     # Closing direction is opposite of entry
     closing_type = 1 if direction == "BUY" else 0
 
-    # Strategy 0: Ticket/order match — MT5 links closing deals to positions
-    # via deal.order == position.ticket. This is the most reliable match.
+    # Strategy 0: position_id match — MT5 links CLOSING deals to the original
+    # position via deal.position_id == position.ticket. The entry deal has
+    # order == position.ticket, but the closing deal has order == closing_order_ticket
+    # (a different number). So matching by `order` only matches the entry deal
+    # (which then fails the closing_type check). Matching by `position_id` finds
+    # the actual closing deal. We also require entry=1 to avoid matching the
+    # entry deal of the same position (entry=0).
+    # This matters when multiple positions close at the SAME price in a batch
+    # (e.g. trailing-TP batch close) — Strategy 1 (price proximity) cannot
+    # distinguish them and picks the wrong one, recording wrong PnL.
     if ticket is not None:
         ticket_int = int(ticket)
         for deal in deals:
-            deal_order = deal.get("order")
-            if deal_order is not None and int(deal_order) == ticket_int:
-                deal_type = deal.get("type", -1)
-                if deal_type not in (0, 1):
-                    continue
-                # Closing deal direction must be opposite of position direction
-                if deal_type == closing_type:
-                    deal_price = float(deal.get("price", 0))
-                    if deal_price > 0:
-                        logger.debug(
-                            "Matched trade #%d (ticket=%d) to deal order=%d price=%.2f via ticket",
-                            trade.get("id"), ticket_int, deal_order, deal_price,
-                        )
-                        return deal
+            deal_pos = deal.get("position_id")
+            if deal_pos is None or int(deal_pos) != ticket_int:
+                continue
+            # Must be a closing deal, not the entry deal of this position
+            if int(deal.get("entry", 0)) != 1:
+                continue
+            deal_type = deal.get("type", -1)
+            if deal_type not in (0, 1):
+                continue
+            # Closing deal direction must be opposite of position direction
+            if deal_type == closing_type:
+                deal_price = float(deal.get("price", 0))
+                if deal_price > 0:
+                    logger.debug(
+                        "Matched trade #%d (ticket=%d) to deal=%d position_id=%d price=%.2f via position_id",
+                        trade.get("id"), ticket_int, deal.get("ticket"),
+                        deal_pos, deal_price,
+                    )
+                    return deal
 
     # Strategy 1: price proximity + direction
     best_match: dict | None = None
@@ -1401,6 +1440,11 @@ def close_live_trade(
                 ).description]
                 t = dict(zip(trade_cols, trade_row))
 
+                # Populate snapshot_id from feature_snapshots via signal_id
+                # so ML training rows have full feature context at close time
+                # (previously hardcoded NULL and relied on async backfill).
+                _snapshot_id = get_snapshot_id_for_signal(t.get("signal_id"), db_path)
+
                 # Determine outcome label
                 outcome = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
 
@@ -1467,7 +1511,7 @@ def close_live_trade(
                                    ?, ?, ?, ?, ?, ?, ?,
                                    ?, ?,
                                    ?, ?, ?)""",
-                        (trade_id, t.get("signal_id"), None, t.get("account_id"),
+                        (trade_id, t.get("signal_id"), _snapshot_id, t.get("account_id"),
                          t.get("symbol", "XAUUSD"), t.get("direction"),
                          t.get("trading_mode", "swing"), t.get("strategy_id"),
                          t.get("entry_price"), exit_price, pnl, pnl_pct,
@@ -1489,7 +1533,7 @@ def close_live_trade(
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                    ?, ?, ?, ?, ?, ?, ?,
                                    ?, ?)""",
-                        (trade_id, t.get("signal_id"), None, t.get("account_id"),
+                        (trade_id, t.get("signal_id"), _snapshot_id, t.get("account_id"),
                          t.get("symbol", "XAUUSD"), t.get("direction"),
                          t.get("trading_mode", "swing"), t.get("strategy_id"),
                          t.get("entry_price"), exit_price, pnl, pnl_pct,
@@ -1997,9 +2041,9 @@ def get_pnl_summary(
 
     Returns dict with:
         daily_pnl: float      — sum of PnL for today's closed trades
-        daily_trades: int     — count of today's closed trades
+        daily_trades: int     — count of today's OPENED trades (anti-churn semantic)
         weekly_pnl: float     — sum of PnL for this week's closed trades
-        weekly_trades: int    — count of this week's closed trades
+        weekly_trades: int    — count of this week's OPENED trades
     """
     from datetime import datetime, timezone, timedelta
 
@@ -2016,7 +2060,7 @@ def get_pnl_summary(
         week_start = day_start - timedelta(days=days_since_monday)
         week_start_str = week_start.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Daily PnL
+        # Daily PnL (closed today)
         daily_row = conn.execute(
             """SELECT COALESCE(SUM(pnl), 0) as total_pnl,
                       COUNT(*) as trade_count
@@ -2028,9 +2072,21 @@ def get_pnl_summary(
             (account_id, day_start_str),
         ).fetchone()
         daily_pnl = float(daily_row[0]) if daily_row else 0.0
-        daily_trades = int(daily_row[1]) if daily_row else 0
 
-        # Weekly PnL
+        # ISSUE-059: daily_trades counts OPENS today (timestamp >= day_start), not CLOSES.
+        # Anti-churn check (TradeBlocker.daily_trade_count_limit) needs to limit how many
+        # trades are OPENED per day. Counting closes let a strategy open 30 trades rapidly
+        # then close them slowly without ever hitting the limit.
+        daily_open_row = conn.execute(
+            """SELECT COUNT(*) as open_count
+               FROM live_trades
+               WHERE account_id = ?
+                 AND timestamp >= ?""",
+            (account_id, day_start_str),
+        ).fetchone()
+        daily_trades = int(daily_open_row[0]) if daily_open_row else 0
+
+        # Weekly PnL (closed this week)
         weekly_row = conn.execute(
             """SELECT COALESCE(SUM(pnl), 0) as total_pnl,
                       COUNT(*) as trade_count
@@ -2042,7 +2098,15 @@ def get_pnl_summary(
             (account_id, week_start_str),
         ).fetchone()
         weekly_pnl = float(weekly_row[0]) if weekly_row else 0.0
-        weekly_trades = int(weekly_row[1]) if weekly_row else 0
+
+        weekly_open_row = conn.execute(
+            """SELECT COUNT(*) as open_count
+               FROM live_trades
+               WHERE account_id = ?
+                 AND timestamp >= ?""",
+            (account_id, week_start_str),
+        ).fetchone()
+        weekly_trades = int(weekly_open_row[0]) if weekly_open_row else 0
 
         return {
             "daily_pnl": round(daily_pnl, 2),
