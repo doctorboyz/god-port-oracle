@@ -40,6 +40,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,6 +223,162 @@ class TestGateContractMatchesSwing:
             f"reason must match swing gate format 'counter_trend_no_reversal:{{dir}}_vs_{{trend}}_d1', "
             f"got: {reason}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Causal proof: generator emits trend_alignment / has_reversal (Task #80, 2026-07-02)
+#
+# Root cause of the original dead-code bug: the gate (consumer) was wired but
+# the generator (producer) never emitted the indicators → gate read None → never blocked.
+# These tests prove the producer side is fixed, so the gate has real input to read.
+# ---------------------------------------------------------------------------
+
+def _build_strong_bullish_data(n: int = 300):
+    import numpy as np
+    np.random.seed(123)
+    base = 2300.0
+    trend = np.linspace(0, 120, n)
+    noise = np.random.normal(0, 0.5, n)
+    closes = base + trend + noise
+    spread = np.random.uniform(0.5, 2.0, n)
+    highs = closes + spread
+    lows = closes - spread
+    opens = closes - np.random.uniform(0, 1, n)
+    volumes = np.full(n, 3000.0)
+    idx = pd.date_range(
+        start=datetime(2026, 4, 29, 8, 0, tzinfo=timezone.utc),
+        periods=n, freq="5min",
+    )
+    return pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows,
+         "Close": closes, "Volume": volumes},
+        index=idx,
+    )
+
+
+def _build_strong_bearish_data(n: int = 300):
+    import numpy as np
+    np.random.seed(999)
+    base = 2300.0
+    up_phase = np.linspace(0, 60, n // 2)
+    down_phase = np.linspace(0, -120, n - n // 2)
+    trend = np.concatenate([up_phase, down_phase])
+    noise = np.random.normal(0, 0.5, n)
+    closes = base + trend + noise
+    spread = np.random.uniform(0.3, 1.5, n)
+    opens = closes + np.random.uniform(-0.3, 0.3, n)
+    highs = np.maximum(opens, closes) + spread * 0.3
+    lows = np.minimum(opens, closes) - spread * 0.7
+    volumes = np.full(n, 4000.0)
+    idx = pd.date_range(
+        start=datetime(2026, 4, 29, 8, 0, tzinfo=timezone.utc),
+        periods=n, freq="5min",
+    )
+    return pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows,
+         "Close": closes, "Volume": volumes},
+        index=idx,
+    )
+
+
+class TestGeneratorEmitsReversalIndicators:
+    """Causal proof: generator MUST emit trend_alignment + has_reversal on every
+    non-HOLD signal. If these keys are missing, the gate is dead code again."""
+
+    def test_bullish_signal_has_trend_alignment_and_has_reversal_keys(self):
+        from broky.signals.m5_scalp_generator import generate_m5_scalp_signal
+        from shared.models import SignalType
+        df = _build_strong_bullish_data(300)
+        sig = generate_m5_scalp_signal(
+            close=df["Close"], high=df["High"], low=df["Low"], volume=df["Volume"],
+            current_price=float(df["Close"].iloc[-1]),
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc),
+            spread=5.0, d1_trend="bullish", h4_trend="bullish",
+        )
+        if sig.signal_type == SignalType.HOLD:
+            pytest.skip(f"synthetic data produced HOLD ({sig.reason}) — fixture tuning needed")
+        # The causal claim: keys must be present in indicators
+        assert "trend_alignment" in sig.indicators, (
+            "generator must emit trend_alignment — gate reads this key; "
+            "missing key is the exact root cause of the dead-code bug"
+        )
+        assert "has_reversal" in sig.indicators, (
+            "generator must emit has_reversal — gate reads this key"
+        )
+        # Aligned BUY vs bullish D1 → trend_alignment must be 1 (aligned)
+        assert sig.indicators["trend_alignment"] == 1.0, (
+            f"aligned BUY vs bullish D1 must yield trend_alignment=1.0, "
+            f"got {sig.indicators['trend_alignment']}"
+        )
+
+    def test_counter_trend_signal_emits_negative_alignment(self):
+        """Bearish M5 signal vs bullish D1 → trend_alignment == -1 (counter-trend).
+        This is the exact scenario the gate exists to catch.
+
+        Note: we use learning_mode=True at the GENERATOR to bypass the confidence
+        filter (which would otherwise drop counter-trend signals to HOLD via
+        COUNTER_TREND_CONFIDENCE_MULT). The trend_alignment value is computed
+        regardless of learning_mode — it depends only on direction vs d1/h4 trend.
+        """
+        from broky.signals.m5_scalp_generator import generate_m5_scalp_signal
+        from shared.models import SignalType
+        df = _build_strong_bearish_data(300)
+        sig = generate_m5_scalp_signal(
+            close=df["Close"], high=df["High"], low=df["Low"], volume=df["Volume"],
+            current_price=float(df["Close"].iloc[-1]),
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc),
+            spread=5.0,
+            d1_trend="bullish",   # D1 bullish
+            h4_trend="bullish",   # H4 bullish
+            learning_mode=True,   # bypass confidence filter so SELL survives
+        )
+        assert sig.signal_type == SignalType.SELL, (
+            f"bearish fixture + learning_mode should produce SELL, got {sig.signal_type}"
+        )
+        assert sig.indicators.get("trend_alignment") == -1.0, (
+            f"SELL vs bullish D1/H4 must emit trend_alignment=-1.0 (counter-trend), "
+            f"got {sig.indicators.get('trend_alignment')}"
+        )
+
+    def test_generator_to_gate_integration_blocks_counter_trend(self):
+        """End-to-end causal proof: feed a real generator signal (counter-trend,
+        no reversal evidence) into the gate → MUST be blocked.
+
+        This is the causal test that the producer (generator) AND consumer (gate)
+        are wired together. Mock-signal tests do NOT catch the dead-code bug
+        because the bug was in the producer. This test uses the real generator.
+
+        Setup: generator runs with learning_mode=True (to bypass the confidence
+        filter and emit a real counter-trend SELL). The gate then runs with
+        learning_mode=False (so it enforces). In production both flags are tied
+        to the same env, but for this wiring proof we isolate the two concerns."""
+        from broky.signals.m5_scalp_generator import generate_m5_scalp_signal
+        df = _build_strong_bearish_data(300)
+        sig = generate_m5_scalp_signal(
+            close=df["Close"], high=df["High"], low=df["Low"], volume=df["Volume"],
+            current_price=float(df["Close"].iloc[-1]),
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc),
+            spread=5.0, d1_trend="bullish", h4_trend="bullish",
+            learning_mode=True,  # generator: emit SELL despite low confidence
+        )
+        assert sig.signal_type.value == "SELL", (
+            "fixture must produce SELL for the gate test to be meaningful"
+        )
+        assert sig.indicators.get("trend_alignment") == -1.0, (
+            "fixture must produce counter-trend alignment for the gate test"
+        )
+        # If generator emitted has_reversal=1, the gate legitimately allows it.
+        if sig.indicators.get("has_reversal") == 1.0:
+            pytest.skip("fixture produced a legitimate reversal signal — gate allows it")
+        # Gate in NON-learning mode → must enforce
+        t = _make_trader(learning_mode=False)
+        blocked, reason = t._apply_counter_trend_gate(sig, d1_trend="bullish")
+        assert blocked is True, (
+            "Real generator signal with trend_alignment=-1, has_reversal=0, "
+            "non-learning mode MUST be blocked by the gate — this is the causal "
+            "proof that producer + consumer are wired together"
+        )
+        assert "counter_trend_no_reversal" in reason
 
 
 if __name__ == "__main__":

@@ -30,12 +30,13 @@ from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_confi
 from broky.risk.position_sizing import calculate_position_size
 from broky.risk.sizing import SIZING_METHODS, fixed_fraction_size, kelly_size, risk_per_trade_size, volatility_adjusted_size
 from broky.risk.spread_filter import check_spread
+from broky.risk.trade_blocker import TradeBlocker, BlockInput
 from broky.signals.m5_scalp_generator import (
     generate_m5_scalp_signal,
     M5_SCALP_SPREAD_MAX,
 )
 from metty.bridge.client import MT5Bridge
-from metty.core.account_registry import get_display_name
+from metty.core.account_registry import get_display_name, get_account_config
 from metty.core.db import (
     close_live_trade,
     get_latest_signal_id,
@@ -80,6 +81,11 @@ class M5ScalpRiskConfig:
     partial_tp_enabled: bool = False  # Feature flag — must be explicitly enabled
     tp1_ratio: float = 0.5   # TP1 at 50% of TP distance from entry
     rr_scale_in: float = 2.5  # RR ratio for the scale-in position
+    # Trailing TP + time stop — ported from live_trader (ISSUE-052 / audit 2026-07-02)
+    trailing_tp_enabled: bool = True
+    trailing_activation_pct: float = 0.20   # arm trailing once MFE >= 0.20%
+    trailing_trail_pct: float = 0.10        # lock at 0.10% below peak
+    time_stop_bars: int = 0   # 0 → fall back to max_holding_bars (12 = 1h); 288 = 24h
 
 
 class M5ScalpTrader:
@@ -198,6 +204,15 @@ class M5ScalpTrader:
             weekly_limit_pct=dd_config["weekly_limit_pct"],
             account_limit_pct=dd_config["account_limit_pct"],
             cooldown_hours=dd_config["cooldown_hours"],
+        )
+        # TradeBlocker — ported from live_trader (ISSUE-052 / audit 2026-07-02)
+        # hard_max_lots, margin_safety, sl sanity, anti-churn daily/weekly count
+        self._trade_blocker = TradeBlocker(
+            daily_trade_count_limit=int(os.environ.get("TRADE_BLOCKER_DAILY_LIMIT", "20")),
+            weekly_trade_count_limit=int(os.environ.get("TRADE_BLOCKER_WEEKLY_LIMIT", "80")),
+            hard_max_lots=float(os.environ.get("TRADE_BLOCKER_HARD_MAX_LOTS", "0.50")),
+            max_risk_pct=0.05,
+            margin_safety_factor=float(os.environ.get("TRADE_BLOCKER_MARGIN_SAFETY", "0.80")),
         )
         self._buy_min_confidence = float(os.environ.get(
             f"BUY_MIN_CONFIDENCE_{self.account}",
@@ -807,6 +822,11 @@ class M5ScalpTrader:
 
         # Initialize MFE/MAE tracking for scale-in position
         self._mfe_mae_state[scale_in_id] = {"mfe": 0.0, "mae": 0.0}
+        # Record scale-in as new trade open for anti-churn counters (ported from live_trader, ISSUE-052)
+        try:
+            self._drawdown_protector.record_trade_open()
+        except Exception as e:
+            logger.debug("[M5Scalp:%s] record_trade_open failed (scale-in): %s", self.display_name, e)
 
         logger.info("[M5Scalp:%s] SCALE_IN #%d %s @ %.2f SL=%.2f TP=%.2f (from #%d)", self.display_name, scale_in_id, direction, current_price, new_sl, tp, trade_id)
 
@@ -1060,6 +1080,52 @@ class M5ScalpTrader:
             self._record_rejection(signal, f"ml_lot_too_small ({lot_size:.4f})", session=session, d1_trend=d1_trend, h4_trend=h4_trend)
             return {"action": "hold", "reason": f"ML risk: lot too small ({lot_size:.4f})", "signal": signal}
 
+        # 8.6b. TradeBlocker — final hard safety gate (ported from live_trader, ISSUE-052 / audit 2026-07-02)
+        # Enforces hard_max_lots, risk_pct_sanity, sl_too_tight, sl_too_wide, margin_safety,
+        # daily/weekly trade count. Closes the gap where DP+CB pass but misconfigured
+        # SL/lots/risk could still reach the broker.
+        sl_distance_pct = abs(signal.price - stop_loss) / signal.price * 100.0
+        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+        margin_required = lot_size * CONTRACT_SIZE * signal.price / max(leverage, 1)
+        mt5_free_margin = self._get_free_margin()
+        if mt5_free_margin is not None:
+            free_margin = mt5_free_margin
+        else:
+            free_margin = max(current_equity - margin_required, 0.0)
+        daily_trades_now = self._drawdown_protector.state.daily_trades
+        weekly_trades_now = self._drawdown_protector.state.weekly_trades
+        tb_verdict = self._trade_blocker.check(BlockInput(
+            open_positions=len(open_trades),
+            max_positions=dynamic_max,
+            daily_trades_today=daily_trades_now,
+            weekly_trades_this_week=weekly_trades_now,
+            lots=lot_size,
+            risk_pct=self.risk.risk_per_trade,
+            sl_distance_pct=sl_distance_pct,
+            equity=current_equity,
+            margin_required=margin_required,
+            free_margin=free_margin,
+            learning_mode=self.learning_mode,
+        ))
+        if tb_verdict.blocked:
+            log_circuit_break(logger, "TRADE_BLOCKER", account=self.account, reason=tb_verdict.reason)
+            self._record_rejection(signal, f"trade_blocker:{tb_verdict.block_name}", session=session, d1_trend=d1_trend, h4_trend=h4_trend)
+            if self._notifier and getattr(self._notifier, "enabled", False):
+                try:
+                    self._notifier.send(
+                        f"<b>⛔ TRADE BLOCKER</b> M5Scalp Account {self.account}\n"
+                        f"Check: {tb_verdict.block_name}\n"
+                        f"Reason: {tb_verdict.reason}\n"
+                        f"lots={lot_size} sl_dist={sl_distance_pct:.2f}% risk={self.risk.risk_per_trade:.2%}"
+                    )
+                except Exception:
+                    pass
+            return {
+                "action": "hold",
+                "reason": f"trade_blocker:{tb_verdict.block_name}:{tb_verdict.reason}",
+                "signal": signal,
+            }
+
         # 8.7. Calendar context for data collection
         minutes_to_next_event, next_event_type, next_event_impact = self._get_calendar_context()
 
@@ -1108,6 +1174,11 @@ class M5ScalpTrader:
             log_trade(logger, "OPENED", account=self.account, direction=direction,
                      price=signal.price, lots=lot_size, sl=stop_loss, tp=take_profit,
                      confidence=signal.confidence, reason=signal.reason)
+            # Record trade open for anti-churn counters (ported from live_trader, ISSUE-052)
+            try:
+                self._drawdown_protector.record_trade_open()
+            except Exception as e:
+                logger.debug("[M5Scalp:%s] record_trade_open failed (dry-run): %s", self.display_name, e)
             if self.event_bus:
                 self.event_bus.publish(Event(
                     type=EventType.TRADE_OPENED,
@@ -1215,6 +1286,11 @@ class M5ScalpTrader:
                 log_trade(logger, "FILLED", account=self.account, direction=direction,
                          price=signal.price, lots=lot_size, sl=stop_loss, tp=take_profit,
                          ticket=ticket)
+                # Record trade open for anti-churn counters (ported from live_trader, ISSUE-052)
+                try:
+                    self._drawdown_protector.record_trade_open()
+                except Exception as e:
+                    logger.debug("[M5Scalp:%s] record_trade_open failed (live): %s", self.display_name, e)
                 if self.event_bus:
                     self.event_bus.publish(Event(
                         type=EventType.TRADE_OPENED,
@@ -1306,6 +1382,24 @@ class M5ScalpTrader:
             if conn:
                 conn.close()
         return 0.0
+
+    def _get_free_margin(self) -> float | None:
+        """Get current account free margin from MT5 (accounts for used margin of
+        already-open positions).
+
+        Ported from live_trader (ISSUE-060). Locally-computed
+        `free_margin = max(equity - new_trade_margin, 0)` ignores used margin of
+        open positions — with dynamic_max up to 5 positions, TradeBlocker could
+        approve a trade that exceeds real free margin → broker reject or margin
+        call. This queries MT5 for the true free_margin.
+        """
+        try:
+            config = self._get_account_config()
+            info = MT5Bridge(config).fetch_account_info_sync()
+            return info.free_margin if info else None
+        except Exception as e:
+            logger.debug("[M5Scalp:%s] Free margin fetch failed: %s", self.display_name, e)
+            return None
 
     def _calculate_max_positions(self, equity: float) -> int:
         """Calculate max simultaneous positions dynamically based on equity and risk.
@@ -1478,11 +1572,33 @@ class M5ScalpTrader:
             exit_reason = None
             exit_price = current_price
 
-            # Check SL/TP
+            # Trailing TP arm — ported from live_trader.py:1036-1055 (audit 2026-07-02)
+            trailing_enabled = (
+                self.risk.trailing_tp_enabled
+                and entry_price > 0
+                and state["mfe"] > 0
+            )
+            trailing_armed = False
+            trailing_level = None
+            if trailing_enabled:
+                gain_pct = state["mfe"] / entry_price * 100.0
+                if gain_pct >= self.risk.trailing_activation_pct:
+                    trailing_armed = True
+                    if direction == "BUY":
+                        peak = entry_price + state["mfe"]
+                        trailing_level = peak * (1 - self.risk.trailing_trail_pct / 100.0)
+                    else:
+                        trough = entry_price - state["mfe"]
+                        trailing_level = trough * (1 + self.risk.trailing_trail_pct / 100.0)
+
+            # Check SL/TP (trailing TP fires between SL and Far TP — mirrors swing)
             if direction == "BUY":
                 if sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
                     exit_price = sl
+                elif trailing_armed and trailing_level is not None and current_price <= trailing_level:
+                    exit_reason = "trailing_tp"
+                    exit_price = round(trailing_level, 2)
                 elif tp > 0 and current_price >= tp:
                     exit_reason = "take_profit"
                     exit_price = tp
@@ -1490,11 +1606,14 @@ class M5ScalpTrader:
                 if sl > 0 and current_price >= sl:
                     exit_reason = "stop_loss"
                     exit_price = sl
+                elif trailing_armed and trailing_level is not None and current_price >= trailing_level:
+                    exit_reason = "trailing_tp"
+                    exit_price = round(trailing_level, 2)
                 elif tp > 0 and current_price <= tp:
                     exit_reason = "take_profit"
                     exit_price = tp
 
-            # Check max holding time (12 M5 bars = 1 hour)
+            # Check max holding time — time_stop_bars (24h) falls back to max_holding_bars (1h)
             if exit_reason is None:
                 try:
                     entry_time = pd.Timestamp(trade["timestamp"])
@@ -1508,7 +1627,8 @@ class M5ScalpTrader:
                         bars_held = len(m5[m5.index > entry_naive])
                     except Exception:
                         pass
-                    if self.risk.max_holding_bars > 0 and bars_held >= self.risk.max_holding_bars:
+                    time_stop = self.risk.time_stop_bars if self.risk.time_stop_bars > 0 else self.risk.max_holding_bars
+                    if time_stop > 0 and bars_held >= time_stop:
                         exit_reason = "max_holding"
                 except Exception:
                     pass

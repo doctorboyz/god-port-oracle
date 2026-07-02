@@ -29,8 +29,17 @@ from broky.indicators.atr import calculate_atr
 from broky.indicators.adx import calculate_adx
 from broky.indicators.volume import calculate_volume_ratio
 from broky.risk.spread_filter import check_spread
+from broky.indicators.rsi import calculate_rsi
+from broky.indicators.stochastic import calculate_stochastic
+from broky.indicators.mfi import calculate_mfi
 from shared.models import Signal, SignalType, TradingMode
 from broky.signals.registry import strategy
+from broky.signals.generator import (
+    detect_swing_structure,
+    compute_reversal_signal,
+    compute_trend_alignment_value,
+    SWING_LOOKBACK,
+)
 
 # M5 Scalp indicator weights — ribbon-heavy with momentum confirmation
 M5_SCALP_WEIGHTS = {
@@ -462,6 +471,43 @@ def generate_m5_scalp_signal(
         else:
             scores["bollinger"] = 0.0
 
+    # ── Reversal-detection inputs (computed now, used after signal_type is set) ──
+    # Required so m5_scalp_trader counter-trend gate (which reads
+    # signal.indicators["trend_alignment"] / ["has_reversal"]) actually has data
+    # to act on. Mirrors generator.py lines 956-991.
+    _latest_rsi = None
+    _latest_stoch_k = None
+    _latest_mfi = None
+    _latest_boll_pct_b = None
+    _macd_hist_val = float(hist) if pd.notna(hist) else None
+    _latest_pdi_val = float(latest_pdi) if pd.notna(latest_pdi) else None
+    _latest_mdi_val = float(latest_mdi) if pd.notna(latest_mdi) else None
+
+    # boll_pct_b = band position (0 = lower band, 1 = upper band)
+    if pd.notna(latest_lower) and pd.notna(latest_upper):
+        _band_range = latest_upper - latest_lower
+        if _band_range > 0 and pd.notna(current_price):
+            _latest_boll_pct_b = (current_price - latest_lower) / _band_range
+
+    try:
+        _rsi_series = calculate_rsi(close, period=14)
+        if pd.notna(_rsi_series.iloc[-1]):
+            _latest_rsi = float(_rsi_series.iloc[-1])
+    except Exception:
+        pass
+    try:
+        _stoch_result = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+        if pd.notna(_stoch_result.k_line.iloc[-1]):
+            _latest_stoch_k = float(_stoch_result.k_line.iloc[-1])
+    except Exception:
+        pass
+    try:
+        _mfi_series = calculate_mfi(high, low, close, volume, period=14)
+        if pd.notna(_mfi_series.iloc[-1]):
+            _latest_mfi = float(_mfi_series.iloc[-1])
+    except Exception:
+        pass
+
     # Volume
     vol_ratio = calculate_volume_ratio(volume, period=p["volume_ma"])
     latest_vol_ratio = vol_ratio.iloc[-1]
@@ -625,6 +671,48 @@ def generate_m5_scalp_signal(
         else:
             signal_type = SignalType.HOLD
             reason += f" (confidence {confidence:.2f} below {min_confidence})"
+
+    # ── Reversal signal detection (for m5_scalp_trader counter-trend gate) ──
+    # MUST run after signal_type is determined. Writes into scores so the
+    # features flow into signal.indicators via dict(scores) below.
+    # Mirrors generator.py lines 1041-1070 (swing strategy).
+    try:
+        _swing_structure = detect_swing_structure(high, low, lookback=SWING_LOOKBACK)
+        has_reversal, reversal_strength = compute_reversal_signal(
+            direction=signal_type.value,
+            d1_trend=d1_trend,
+            h4_trend=h4_trend,
+            rsi=_latest_rsi,
+            stoch_k=_latest_stoch_k,
+            boll_pct_b=_latest_boll_pct_b,
+            mfi=_latest_mfi,
+            macd_hist=_macd_hist_val,
+            plus_di=_latest_pdi_val,
+            minus_di=_latest_mdi_val,
+            boll_bw=boll_bw,
+            swing=_swing_structure,
+        )
+        trend_alignment = compute_trend_alignment_value(
+            direction=signal_type.value,
+            d1_trend=d1_trend,
+            h4_trend=h4_trend,
+            has_reversal=has_reversal,
+        )
+        scores["has_reversal"] = 1.0 if has_reversal else 0.0
+        scores["reversal_strength"] = reversal_strength
+        scores["trend_alignment"] = float(trend_alignment)
+        scores["made_lower_low"] = 1.0 if _swing_structure.get("made_lower_low") else 0.0
+        scores["made_higher_high"] = 1.0 if _swing_structure.get("made_higher_high") else 0.0
+    except Exception:
+        # Defensive: never let reversal detection break signal generation.
+        # If it fails, gate will see no trend_alignment → allow (safe default
+        # for non-counter-trend; counter-trend without evidence will slip through
+        # but other gates still apply).
+        scores["has_reversal"] = 0.0
+        scores["reversal_strength"] = 0.0
+        scores["trend_alignment"] = 0.0
+        scores["made_lower_low"] = 0.0
+        scores["made_higher_high"] = 0.0
 
     # ATR for TP calculation (stored in indicators for trader use)
     indicators = dict(scores)
