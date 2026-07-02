@@ -376,6 +376,46 @@ class M5ScalpTrader:
             pass
         return "unknown"
 
+    def _apply_counter_trend_gate(self, signal, d1_trend: str) -> tuple[bool, str]:
+        """Counter-trend rejection gate — CLAUDE.md "ไม่แทงสวนเทรนด์" iron rule.
+
+        Mirrors live_trader.py:1544-1567 (swing). Rejects when:
+          - trend_alignment == -1 (signal is counter-trend) AND
+          - not has_reversal (no HH/LL + OB/OS + divergence evidence) AND
+          - not learning_mode (ML data collection bypasses) AND
+          - signal is not HOLD (no position to open anyway)
+
+        The m5_scalp signal generator only applies a confidence penalty
+        (COUNTER_TREND_CONFIDENCE_MULT) — it does NOT hard-block. This gate
+        enforces the hard block so m5_scalp cannot open counter-trend trades
+        without reversal evidence, matching the swing trader's contract.
+
+        Returns (blocked, reason). reason is "" when not blocked.
+        """
+        if signal is None:
+            return False, ""
+        try:
+            sig_type = signal.signal_type
+        except AttributeError:
+            return False, ""
+        # HOLD never opens a position — never block
+        if sig_type == SignalType.HOLD:
+            return False, ""
+        if self.learning_mode:
+            return False, ""
+        indicators = getattr(signal, "indicators", None) or {}
+        trend_alignment = indicators.get("trend_alignment")
+        has_reversal = indicators.get("has_reversal")
+        # Defensive: missing/None indicator → cannot prove counter-trend → allow
+        if trend_alignment is None or trend_alignment != -1:
+            return False, ""
+        # trend_alignment == -1: counter-trend. Allow ONLY with reversal evidence.
+        if has_reversal:
+            return False, ""
+        direction = sig_type.value if hasattr(sig_type, "value") else str(sig_type)
+        reason = f"counter_trend_no_reversal:{direction}_vs_{d1_trend}_d1"
+        return True, reason
+
     def _compute_h4_trend(self, candles: dict) -> Optional[str]:
         """Compute H4 trend using EMA 10/50 crossover."""
         from broky.indicators.ema import calculate_ema
@@ -895,6 +935,22 @@ class M5ScalpTrader:
         if signal.signal_type == SignalType.BUY and signal.confidence < self._buy_min_confidence:
             self._record_rejection(signal, f"buy_low_confidence:{signal.confidence:.2f}<{self._buy_min_confidence}", session=session, d1_trend=d1_trend)
             return {"action": "hold", "reason": f"BUY confidence too low: {signal.confidence:.2f} < {self._buy_min_confidence}"}
+
+        # 7b1. Counter-trend rejection gate (CLAUDE.md "ไม่แทงสวนเทรนด์" iron rule).
+        # Generator only penalizes confidence; this hard-blocks counter-trend
+        # signals without reversal evidence. Mirrors live_trader.py:1544-1567.
+        # learning_mode bypasses so ML outcome data is still collected.
+        ct_blocked, ct_reason = self._apply_counter_trend_gate(signal, d1_trend)
+        if ct_blocked:
+            self._record_rejection(signal, ct_reason, session=session, d1_trend=d1_trend)
+            return {
+                "action": "hold",
+                "reason": (
+                    f"counter-trend {signal.signal_type.value} vs {d1_trend} D1 "
+                    f"without reversal evidence (no HH/LL + OB/OS + divergence) — blocked"
+                ),
+                "signal": signal,
+            }
 
         # 7c. Drawdown protection check (sync from DB first — reconciliation-closed trades)
         self._drawdown_protector.sync_pnl_from_db(self.account_id, self.db_path)
