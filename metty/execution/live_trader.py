@@ -897,6 +897,123 @@ class LiveTrader:
             logger.warning("[%s] Deal history fetch failed — skipping reconciliation: %s", self.display_name, e)
             return None
 
+    def _reconcile_external_close(
+        self,
+        ticket: int | None,
+        direction: str,
+        entry_price: float,
+        sl: float,
+        tp: float,
+    ) -> Optional[dict]:
+        """Find the broker-side closing deal for a position already gone from MT5.
+
+        Used by `_monitor_positions` and `_execute_tp1_close` when
+        `_close_mt5_position_with_fill` returns (False, None) because MT5
+        `positions_get(ticket)` returned empty (broker already closed the
+        position via SL/TP/manual). Without this, the trader would treat
+        "position gone" as "MT5 close failed" and leave DB is_open=1 forever
+        — a ghost trade that blocks all new entries (ISSUE-077, 2026-07-06).
+
+        Matching strategies (in order of reliability):
+          0. deal.order == ticket AND deal.type == closing_type
+             (MT5 links closing deals to the open order ticket)
+          1. deal.position_id == ticket (when bridge exposes this field)
+          2. deal.type == closing_type AND price within 0.5% of entry
+             (price-proximity fallback for broker-closed deals where
+             order/position_id are not propagated)
+
+        Args:
+            ticket: position ticket from DB
+            direction: trade direction ("BUY" or "SELL")
+            entry_price: trade entry price (for proximity matching)
+            sl: stop loss (used to derive exit_reason on price match)
+            tp: take profit (used to derive exit_reason on price match)
+
+        Returns:
+            dict {"exit_price": float, "exit_reason": str} if a closing deal
+            is found, else None. exit_reason is derived from the deal's
+            `reason` field (DEAL_REASON_SL=4 → "stop_loss",
+            DEAL_REASON_TP=5 → "take_profit", DEAL_REASON_SO=6 →
+            "margin_call") or its comment pattern, falling back to
+            "closed_by_mt5".
+        """
+        if not ticket:
+            return None
+        deals = self._get_deal_history(days_back=7)
+        # Bridge failure → don't false-close (caller keeps retry behavior)
+        if deals is None:
+            return None
+        if not deals:
+            return None
+
+        ticket_int = int(ticket)
+        # Closing direction: BUY position closed by SELL deal (type=1), vice versa
+        closing_type = 1 if direction.upper() == "BUY" else 0
+
+        # Map MT5 deal reason codes to our exit_reason strings
+        def _reason_from_deal(deal: dict) -> str:
+            reason = deal.get("reason")
+            comment = (deal.get("comment") or "").lower()
+            if reason == 4 or "[sl" in comment or "sl " in comment:
+                return "stop_loss"
+            if reason == 5 or "[tp" in comment or "tp " in comment:
+                return "take_profit"
+            if reason == 6:
+                return "margin_call"
+            return "closed_by_mt5"
+
+        # Strategy 0: deal.order == ticket AND closing direction
+        for deal in deals:
+            deal_order = deal.get("order")
+            if deal_order is None:
+                continue
+            try:
+                if int(deal_order) != ticket_int:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if deal.get("type", -1) == closing_type:
+                price = float(deal.get("price", 0) or 0)
+                if price > 0:
+                    return {"exit_price": round(price, 2), "exit_reason": _reason_from_deal(deal)}
+
+        # Strategy 1: deal.position_id == ticket (if bridge exposes it)
+        for deal in deals:
+            pos_id = deal.get("position_id")
+            if pos_id is None:
+                continue
+            try:
+                if int(pos_id) != ticket_int:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if deal.get("type", -1) == closing_type:
+                price = float(deal.get("price", 0) or 0)
+                if price > 0:
+                    return {"exit_price": round(price, 2), "exit_reason": _reason_from_deal(deal)}
+
+        # Strategy 2: closing direction + price within 0.5% of entry
+        best: dict | None = None
+        best_diff = float("inf")
+        max_diff = abs(entry_price) * 0.005
+        for deal in deals:
+            if deal.get("type", -1) != closing_type:
+                continue
+            price = float(deal.get("price", 0) or 0)
+            if price <= 0:
+                continue
+            diff = abs(price - entry_price)
+            if diff < max_diff and diff < best_diff:
+                best_diff = diff
+                best = deal
+        if best is not None:
+            return {
+                "exit_price": round(float(best.get("price", 0)), 2),
+                "exit_reason": _reason_from_deal(best),
+            }
+
+        return None
+
     def _check_cooldown(self) -> bool:
         """Check if we're still in cooldown after last exit."""
         if self._last_exit_time is None:
@@ -1121,15 +1238,33 @@ class LiveTrader:
                 # The orphan's real PnL was never reconciled back → kill switch flew blind.
                 # ISSUE-063: capture actual close fill price; recompute PnL from it so DB
                 # exit_price + pnl reflect reality (not theoretical SL/TP/tp1 level).
+                # ISSUE-077 (2026-07-06): when MT5 says "position not found" (broker already
+                # closed it via SL/TP), _close_mt5_position_with_fill returns (False, None).
+                # Treating that as "MT5 close failed" left ghost trades that blocked all new
+                # entries. Reconcile from deal history instead — use the broker's actual fill
+                # price + reason so DB PnL is real.
                 actual_fill = None
                 if trade.get("ticket") and not self.dry_run:
                     mt5_ok, actual_fill = self._close_mt5_position_with_fill(trade["ticket"])
                     if not mt5_ok:
-                        logger.warning(
-                            "[%s] MT5 close failed for ticket %s — leaving DB open, will retry next cycle",
-                            self.display_name, trade["ticket"],
+                        external = self._reconcile_external_close(
+                            trade.get("ticket"), direction, entry_price, sl, tp,
                         )
-                        continue  # skip DB close + CB/DP update; retry next cycle
+                        if external is not None:
+                            actual_fill = external["exit_price"]
+                            if external.get("exit_reason"):
+                                exit_reason = external["exit_reason"]
+                            logger.info(
+                                "[%s] Reconciled external close for ticket %s — exit=$%.2f reason=%s",
+                                self.display_name, trade["ticket"], actual_fill, exit_reason,
+                            )
+                            # fall through to DB close with actual_fill
+                        else:
+                            logger.warning(
+                                "[%s] MT5 close failed for ticket %s — leaving DB open, will retry next cycle",
+                                self.display_name, trade["ticket"],
+                            )
+                            continue  # skip DB close + CB/DP update; retry next cycle
                     if actual_fill is not None and actual_fill > 0:
                         exit_price = round(actual_fill, 2)
                         # Recompute PnL with actual fill
@@ -1243,15 +1378,28 @@ class LiveTrader:
         # ISSUE-048: close in MT5 FIRST, only update DB/CB/DP after success.
         # ISSUE-063: capture actual close fill price; use it as exit_price so DB PnL
         # reflects reality (not theoretical tp1_price which can slip on market close).
+        # ISSUE-077 (2026-07-06): reconcile externally-closed positions via deal history
+        # — broker may have already hit SL/TP before we tried to close at TP1.
         actual_fill = None
         if trade.get("ticket") and not self.dry_run:
             mt5_ok, actual_fill = self._close_mt5_position_with_fill(trade["ticket"])
             if not mt5_ok:
-                logger.warning(
-                    "[Swing:%s] MT5 TP1 close failed for ticket %s — leaving DB open, will retry next cycle",
-                    self.display_name, trade["ticket"],
+                external = self._reconcile_external_close(
+                    trade.get("ticket"), direction, entry_price, sl, tp,
                 )
-                return closed  # do NOT close in DB; retry next cycle
+                if external is not None:
+                    actual_fill = external["exit_price"]
+                    logger.info(
+                        "[Swing:%s] Reconciled external close for ticket %s at TP1 — exit=$%.2f",
+                        self.display_name, trade["ticket"], actual_fill,
+                    )
+                    # fall through to DB close with actual_fill
+                else:
+                    logger.warning(
+                        "[Swing:%s] MT5 TP1 close failed for ticket %s — leaving DB open, will retry next cycle",
+                        self.display_name, trade["ticket"],
+                    )
+                    return closed  # do NOT close in DB; retry next cycle
             if actual_fill is not None and actual_fill > 0:
                 exit_price = round(actual_fill, 2)
                 # Recompute PnL with actual fill
