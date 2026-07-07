@@ -523,8 +523,25 @@ class M5ScalpTrader:
 
             cfg = get_account_config(self.account)
             conn = rpyc.connect(cfg.bridge_host, cfg.bridge_internal_port, config={"sync_request_timeout": 10})
-            positions_raw = conn.root.positions_get(symbol=cfg.symbol)
-            conn.close()
+            # ISSUE-078 (2026-07-07): MT5 terminal in Wine requires initialize() before
+            # any query. live_collector's MT5Bridge wrapper calls initialize()+shutdown()
+            # each cycle, leaving the terminal in shutdown state. Without initialize()
+            # here, positions_get returns None (looks like bridge down) when actually
+            # the bridge is fine — race condition where timing decides if trades happen.
+            try:
+                if not conn.root.initialize():
+                    logger.warning(
+                        "[M5Scalp:%s] MT5 initialize failed (last_error=%s) — treating as bridge down",
+                        self.display_name, conn.root.last_error(),
+                    )
+                    return len(get_open_trades(self.account_id, self.db_path)) > 0
+                positions_raw = conn.root.positions_get(symbol=cfg.symbol)
+            finally:
+                try:
+                    conn.root.shutdown()
+                except Exception:
+                    pass
+                conn.close()
 
             # M5SCALP-RECONCILE-1: distinguish bridge-down from bridge-OK-no-positions.
             # positions_get returns None when MT5/bridge is disconnected vs [] when
