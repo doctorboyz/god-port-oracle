@@ -966,6 +966,35 @@ class LiveTrader:
         ticket_int = int(ticket)
         # Closing direction: BUY position closed by SELL deal (type=1), vice versa
         closing_type = 1 if direction.upper() == "BUY" else 0
+        opening_type = 0 if direction.upper() == "BUY" else 1
+
+        # ISSUE-080 (2026-07-08): find the OPEN deal's time so Strategy 2
+        # (price proximity) can exclude closing deals that happened BEFORE
+        # this trade opened. Without this guard, when two trades cluster in
+        # a price neighborhood, Strategy 2 picks the earlier trade's SL/TP
+        # close as the "closest" deal to this trade's entry — recording the
+        # wrong exit_price, pnl, and exit_reason. The OPEN deal has
+        # deal.order == position ticket AND deal.type == opening_type.
+        open_deal_time: float | None = None
+        for deal in deals:
+            deal_order = deal.get("order")
+            if deal_order is None:
+                continue
+            try:
+                if int(deal_order) != ticket_int:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if deal.get("type", -1) != opening_type:
+                continue
+            deal_time = deal.get("time")
+            if deal_time is None:
+                continue
+            try:
+                open_deal_time = float(deal_time)
+            except (TypeError, ValueError):
+                continue
+            break
 
         # Map MT5 deal reason codes to our exit_reason strings
         def _reason_from_deal(deal: dict) -> str:
@@ -1009,13 +1038,28 @@ class LiveTrader:
                 if price > 0:
                     return {"exit_price": round(price, 2), "exit_reason": _reason_from_deal(deal)}
 
-        # Strategy 2: closing direction + price within 0.5% of entry
+        # Strategy 2: closing direction + price within 0.5% of entry + AFTER open
+        # ISSUE-080 (2026-07-08): time guard — a closing deal that happened
+        # BEFORE this trade opened cannot be this trade's close. Without this
+        # guard, when two trades cluster in a price neighborhood, Strategy 2
+        # picks the earlier trade's SL/TP close as the "closest" deal to this
+        # trade's entry — recording the wrong exit_price, pnl, exit_reason.
         best: dict | None = None
         best_diff = float("inf")
         max_diff = abs(entry_price) * 0.005
         for deal in deals:
             if deal.get("type", -1) != closing_type:
                 continue
+            # Time guard: closing deal must come AFTER the open deal
+            if open_deal_time is not None:
+                deal_time = deal.get("time")
+                if deal_time is None:
+                    continue
+                try:
+                    if float(deal_time) <= open_deal_time:
+                        continue
+                except (TypeError, ValueError):
+                    continue
             price = float(deal.get("price", 0) or 0)
             if price <= 0:
                 continue

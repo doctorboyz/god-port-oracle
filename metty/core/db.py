@@ -1071,6 +1071,37 @@ def _match_closing_deal(
 
     # Closing direction is opposite of entry
     closing_type = 1 if direction == "BUY" else 0
+    opening_type = 0 if direction == "BUY" else 1
+
+    # ISSUE-080 (2026-07-08): find the OPEN deal's time so Strategy 1 (price
+    # proximity) can exclude closing deals that happened BEFORE this trade
+    # opened. Without this guard, when two trades cluster in a price
+    # neighborhood, Strategy 1 picks the earlier trade's SL/TP close as the
+    # "closest" deal to this trade's entry — recording the wrong exit_price,
+    # pnl, and exit_reason. The OPEN deal has deal.order == position ticket
+    # AND deal.type == opening_type (BUY open is type=0, SELL open is type=1).
+    open_deal_time: float | None = None
+    if ticket is not None:
+        ticket_int = int(ticket)
+        for deal in deals:
+            deal_order = deal.get("order")
+            if deal_order is None:
+                continue
+            try:
+                if int(deal_order) != ticket_int:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if deal.get("type", -1) != opening_type:
+                continue
+            deal_time = deal.get("time")
+            if deal_time is None:
+                continue
+            try:
+                open_deal_time = float(deal_time)
+            except (TypeError, ValueError):
+                continue
+            break
 
     # Strategy 0: position_id match — MT5 links CLOSING deals to the original
     # position via deal.position_id == position.ticket. The entry deal has
@@ -1105,7 +1136,11 @@ def _match_closing_deal(
                     )
                     return deal
 
-    # Strategy 1: price proximity + direction
+    # Strategy 1: price proximity + direction + AFTER open deal time
+    # ISSUE-080 (2026-07-08): must filter deals by time — a closing deal that
+    # happened BEFORE this trade opened cannot be this trade's close. The
+    # time guard excludes earlier trades' SL/TP closes that happen to be near
+    # this trade's entry price.
     best_match: dict | None = None
     best_price_diff = float("inf")
 
@@ -1115,6 +1150,17 @@ def _match_closing_deal(
             continue
         if deal_type != closing_type:
             continue
+
+        # Time guard: closing deal must come AFTER the open deal
+        if open_deal_time is not None:
+            deal_time = deal.get("time")
+            if deal_time is None:
+                continue
+            try:
+                if float(deal_time) <= open_deal_time:
+                    continue
+            except (TypeError, ValueError):
+                continue
 
         deal_price = float(deal.get("price", 0))
         if deal_price == 0:
