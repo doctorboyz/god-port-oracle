@@ -106,6 +106,7 @@ services:
       - ML_FILTER_ENABLED=${ML_FILTER_ENABLED_A:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
       - ML_MODEL_DIR_A=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
+      - ML_MODEL_DIR=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_A=${MAX_POSITIONS_A:-5}
       - EQUITY_PER_POSITION_A=${EQUITY_PER_POSITION_A:-200}
