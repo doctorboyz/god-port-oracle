@@ -156,6 +156,14 @@ class LiveTrader:
             f"MAX_POSITIONS_CAP_{self.account}",
             os.environ.get("MAX_POSITIONS_CAP", "5"),
         ))
+        # Min positions floor (env MIN_POSITIONS_{account}, default 1).
+        # Real-A sets MIN_POSITIONS_A=2 to prevent position-limit block when
+        # equity drops to $200-400 range (35+ signals blocked on 2026-07-09).
+        # Formula: min(cap, max(min_positions, calculated)) — cap is hard ceiling.
+        self._min_positions = max(1, int(os.environ.get(
+            f"MIN_POSITIONS_{self.account}",
+            os.environ.get("MIN_POSITIONS", "1"),
+        )))
         # ISSUE M3: previously `ACCOUNT_IDS.get(self.account, 3)` silently fell back to 3 (C)
         # if account name was typo'd. Now __init__ raises loud for unknown accounts, so this
         # is guaranteed to be a known account — but assert anyway to be defensive.
@@ -768,21 +776,31 @@ class LiveTrader:
     def _calculate_max_positions(self, equity: float) -> int:
         """Calculate max simultaneous positions dynamically based on equity and risk.
 
-        Formula: max(1, min(cap, floor(equity / equity_per_position)))
+        Formula: min(cap, max(min_positions, floor(equity / equity_per_position)))
 
-        Examples (equity_per_position=200, cap=5):
+        - `min_positions` (env MIN_POSITIONS_{account}, default 1) is the floor —
+          protects against position-limit block when equity drops.
+        - `cap` (env MAX_POSITIONS_CAP_{account}, default 5) is the hard ceiling —
+          cap always wins when cap < floor.
+
+        Examples (equity_per_position=200, cap=5, min_positions=1 default):
           $199 → 1 position  (small account, conservative)
           $400 → 2 positions
           $1000+ → 5 positions (capped)
+        Examples (Real-A: min_positions=2):
+          $78  → 2 positions (floor protects against 1-position block)
+          $200 → 2 positions
+          $400 → 2 positions
+          $600 → 3 positions (calculated exceeds floor)
         """
         if equity <= 0:
-            return 1
+            return min(self._max_positions_cap, self._min_positions)
         calculated = int(equity // self._equity_per_position)
-        result = max(1, min(self._max_positions_cap, calculated))
+        result = min(self._max_positions_cap, max(self._min_positions, calculated))
         logger.debug(
-            "[%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d → %d",
+            "[%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d, min=%d → %d",
             self.display_name, equity, self._equity_per_position,
-            calculated, self._max_positions_cap, result,
+            calculated, self._max_positions_cap, self._min_positions, result,
         )
         return result
 

@@ -230,6 +230,71 @@ class TestComputeTrendAlignmentValue:
         assert compute_trend_alignment_value("BUY", "bearish", "bearish", False) == -1
 
 
+class TestComputeTrendAlignmentH4Fallback:
+    """Test h4 fallback when d1_trend is unknown (2026-07-09 fix).
+
+    Background: m5 uses H1-proxy for d1 → d1=unknown frequently. Before fix,
+    compute_trend_alignment_value returned 0 (neutral) whenever d1=unknown,
+    ignoring h4_trend entirely (h4 was a dead parameter). This let counter-trend
+    trades pass the gate when d1 was unknown but h4 was clearly bearish/bullish.
+
+    Fix: when d1=unknown, fall back to h4_trend. Both unknown → still 0.
+    """
+
+    def test_d1_unknown_h4_bearish_buy_counter(self):
+        """d1=unknown, h4=bearish, BUY → counter_trend (-1).
+
+        This is the exact #5553 scenario: m5 BUY on SELL-bias day, d1=unknown,
+        h4=bearish → should block (was passing as neutral=0 before fix).
+        """
+        assert compute_trend_alignment_value("BUY", "unknown", "bearish", False) == -1
+
+    def test_d1_unknown_h4_bearish_sell_aligned(self):
+        """d1=unknown, h4=bearish, SELL → trend_aligned (1)."""
+        assert compute_trend_alignment_value("SELL", "unknown", "bearish", False) == 1
+
+    def test_d1_unknown_h4_bullish_buy_aligned(self):
+        """d1=unknown, h4=bullish, BUY → trend_aligned (1)."""
+        assert compute_trend_alignment_value("BUY", "unknown", "bullish", False) == 1
+
+    def test_d1_unknown_h4_bullish_sell_counter(self):
+        """d1=unknown, h4=bullish, SELL → counter_trend (-1)."""
+        assert compute_trend_alignment_value("SELL", "unknown", "bullish", False) == -1
+
+    def test_d1_none_h4_bearish_buy_counter(self):
+        """d1=None (not 'unknown'), h4=bearish, BUY → counter_trend (-1).
+
+        Both None and 'unknown' string should trigger h4 fallback.
+        """
+        assert compute_trend_alignment_value("BUY", None, "bearish", False) == -1
+
+    def test_d1_unknown_h4_unknown_both_neutral(self):
+        """d1=unknown, h4=unknown → neutral (0). Both unknown = no trend data."""
+        assert compute_trend_alignment_value("BUY", "unknown", "unknown", False) == 0
+
+    def test_d1_unknown_h4_none_both_neutral(self):
+        """d1=unknown, h4=None → neutral (0)."""
+        assert compute_trend_alignment_value("SELL", "unknown", None, False) == 0
+
+    def test_d1_unknown_h4_bearish_buy_with_reversal_blocks(self):
+        """d1=unknown, h4=bearish, BUY, has_reversal=True → -1 (NOT 2).
+
+        Known limitation: compute_reversal_signal short-circuits on d1=unknown
+        so has_reversal is always False when d1=unknown. Even if a caller
+        passes has_reversal=True, the h4-counter path returns -1 (block),
+        not 2 (reversal allowed). This is conservative — rare case accepted.
+        """
+        assert compute_trend_alignment_value("BUY", "unknown", "bearish", True) == -1
+
+    def test_d1_known_still_uses_d1_not_h4(self):
+        """d1=bullish, h4=bearish, BUY → trend_aligned (1). d1 wins when known.
+
+        h4 fallback only triggers when d1 is unknown. When d1 is known,
+        h4 disagreement is ignored (existing behavior preserved).
+        """
+        assert compute_trend_alignment_value("BUY", "bullish", "bearish", False) == 1
+
+
 class TestFeatureRegistry:
     """Test that new features are in the feature registry."""
 

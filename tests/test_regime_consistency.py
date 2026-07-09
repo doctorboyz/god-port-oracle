@@ -9,6 +9,7 @@ Fix: Single source of truth via classify_regime() with VOLATILE_BW_THRESHOLD=0.0
 """
 
 import pytest
+from datetime import datetime, timezone
 from broky.signals.generator import classify_regime, VOLATILE_BW_THRESHOLD, TRENDING_ADX_THRESHOLD, RANGING_ADX_THRESHOLD
 
 
@@ -166,3 +167,181 @@ class TestRegimeEncoding:
         assert result.loc[0, "regime_encoded"] == 1, "trending should encode to 1"
         assert result.loc[1, "regime_encoded"] == 0, "ranging should encode to 0"
         assert result.loc[2, "regime_encoded"] == 2, "volatile should encode to 2"
+
+
+# ---------------------------------------------------------------------------
+# Ranging hard-block (2026-07-09 fix — Real-A)
+#
+# Bug: CLAUDE.md rule "Ranging = พัก (no trade)" was not enforced. regime=ranging
+# only labeled signals, never blocked them. m5 BUY #5553 lost $8 in ranging regime.
+#
+# Fix: env-driven RANGING_HARD_BLOCK module constant. When True and regime=ranging
+# and not learning_mode, generator returns HOLD with reason "ranging_hard_block".
+# Set RANGING_HARD_BLOCK=1 only in oracle-engine (Real-A) docker-compose env.
+# ---------------------------------------------------------------------------
+
+def _build_trending_candles(n: int = 200):
+    """Build candle data that produces trending regime (ADX ≥ 25)."""
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime, timezone
+    np.random.seed(42)
+    base = 2000.0
+    trend = np.linspace(0, 80, n)  # strong uptrend → high ADX
+    noise = np.random.normal(0, 0.3, n)
+    closes = base + trend + noise
+    spread = np.random.uniform(0.5, 1.5, n)
+    highs = closes + spread
+    lows = closes - spread
+    opens = closes - np.random.uniform(0, 0.5, n)
+    volumes = np.full(n, 3000.0)
+    idx = pd.date_range(start=datetime(2026, 4, 29, 8, 0, tzinfo=timezone.utc),
+                        periods=n, freq="5min")
+    return (pd.Series(closes, index=idx, name="Close"),
+            pd.Series(highs, index=idx, name="High"),
+            pd.Series(lows, index=idx, name="Low"),
+            pd.Series(volumes, index=idx, name="Volume"))
+
+
+def _build_ranging_candles(n: int = 300):
+    """Build candle data that produces ranging regime (ADX < 25, sideways).
+
+    For m5 tests: sideways price action → low ADX → regime=ranging inline.
+    Pure noise around a flat base → ADX typically < 15. Test monkeypatches
+    classify_ribbon_state='bullish' to bypass the ribbon-squeeze gate (which
+    fires before regime classification) so the ranging hard-block is isolated.
+    """
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime, timezone
+    np.random.seed(7)
+    base = 2000.0
+    # Pure noise around flat base → very low ADX (no directional trend)
+    closes = base + np.random.normal(0, 1.5, n).cumsum() * 0.05 + np.random.normal(0, 0.8, n)
+    spread = np.random.uniform(0.5, 1.5, n)
+    highs = closes + spread
+    lows = closes - spread
+    opens = closes + np.random.normal(0, 0.2, n)
+    volumes = np.full(n, 3000.0)
+    idx = pd.date_range(start=datetime(2026, 4, 29, 8, 0, tzinfo=timezone.utc),
+                        periods=n, freq="5min")
+    return (pd.Series(closes, index=idx, name="Close"),
+            pd.Series(highs, index=idx, name="High"),
+            pd.Series(lows, index=idx, name="Low"),
+            pd.Series(volumes, index=idx, name="Volume"))
+
+
+class TestRangingHardBlockSwing:
+    """Test ranging hard-block in swing generator (generate_signal).
+
+    Uses monkeypatch.setattr on the module constant (not importlib.reload)
+    because reload triggers StrategyRegistry re-registration which raises.
+    """
+
+    def test_default_off_ranging_passes(self, monkeypatch):
+        """Without RANGING_HARD_BLOCK env, ranging signal is NOT hard-blocked."""
+        import broky.signals.generator as gen_mod
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", False)
+        assert gen_mod.RANGING_HARD_BLOCK is False
+
+    def test_env_on_enables_hard_block(self, monkeypatch):
+        """RANGING_HARD_BLOCK=1 → module constant True (simulated via setattr)."""
+        import broky.signals.generator as gen_mod
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", True)
+        assert gen_mod.RANGING_HARD_BLOCK is True
+
+    def test_ranging_hard_block_returns_hold(self, monkeypatch):
+        """When hard-block ON and regime=ranging → signal_type=HOLD with ranging_hard_block reason."""
+        import broky.signals.generator as gen_mod
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", True)
+
+        close, high, low, volume = _build_trending_candles()
+        # Force regime=ranging by monkeypatching classify_regime
+        monkeypatch.setattr(gen_mod, "classify_regime", lambda *a, **k: "ranging")
+
+        sig = gen_mod.generate_signal(close, high, low, volume, d1_trend="bullish")
+        assert sig.signal_type.value == "HOLD", (
+            f"ranging regime with hard-block ON must return HOLD, got {sig.signal_type.value}"
+        )
+        assert "ranging_hard_block" in (sig.reason or ""), (
+            f"reason must tag ranging_hard_block for triage, got: {sig.reason}"
+        )
+
+    def test_trending_not_blocked_when_hard_block_on(self, monkeypatch):
+        """When hard-block ON but regime=trending → signal flows normally (not blocked)."""
+        import broky.signals.generator as gen_mod
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", True)
+
+        close, high, low, volume = _build_trending_candles()
+        monkeypatch.setattr(gen_mod, "classify_regime", lambda *a, **k: "trending")
+
+        sig = gen_mod.generate_signal(close, high, low, volume, d1_trend="bullish")
+        # Should NOT be HOLD due to ranging_hard_block (may be HOLD for other reasons,
+        # but reason must not mention ranging_hard_block)
+        assert "ranging_hard_block" not in (sig.reason or ""), (
+            f"trending regime must not trigger ranging_hard_block, got reason: {sig.reason}"
+        )
+
+    def test_learning_mode_bypasses_ranging_hard_block(self, monkeypatch):
+        """learning_mode=True → ranging hard-block bypassed (collect ML data)."""
+        import broky.signals.generator as gen_mod
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", True)
+
+        close, high, low, volume = _build_trending_candles()
+        monkeypatch.setattr(gen_mod, "classify_regime", lambda *a, **k: "ranging")
+
+        sig = gen_mod.generate_signal(close, high, low, volume, d1_trend="bullish",
+                                       learning_mode=True)
+        assert "ranging_hard_block" not in (sig.reason or ""), (
+            f"learning_mode must bypass ranging hard-block, got reason: {sig.reason}"
+        )
+
+
+class TestRangingHardBlockM5:
+    """Test ranging hard-block in m5 generator (generate_m5_scalp_signal).
+
+    m5 uses inline regime classification (ADX<25 → ranging), not classify_regime.
+    Tests use _build_ranging_candles() which produces ADX in [15, 25) so the m5
+    ADX gate (threshold 15) passes and regime=ranging flows to the hard-block.
+    """
+
+    def test_ranging_hard_block_returns_hold(self, monkeypatch):
+        """m5: hard-block ON + regime=ranging → HOLD with ranging_hard_block reason.
+
+        Monkeypatches classify_ribbon_state to return 'bullish' so the ribbon
+        squeeze gate (which fires before regime classification) doesn't short-
+        circuit. This isolates the ranging hard-block as the test target.
+        """
+        import broky.signals.m5_scalp_generator as m5_mod
+        monkeypatch.setattr(m5_mod, "RANGING_HARD_BLOCK", True)
+        monkeypatch.setattr(m5_mod, "classify_ribbon_state", lambda *a, **k: "bullish")
+
+        close, high, low, volume = _build_ranging_candles()
+        sig = m5_mod.generate_m5_scalp_signal(close, high, low, volume,
+                                               current_price=float(close.iloc[-1]),
+                                               timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc),
+                                               spread=5.0,
+                                               d1_trend="unknown", h4_trend="bullish")
+        assert sig.signal_type.value == "HOLD", (
+            f"m5 ranging with hard-block ON must return HOLD, got {sig.signal_type.value}"
+        )
+        assert "ranging_hard_block" in (sig.reason or ""), (
+            f"m5 reason must tag ranging_hard_block, got: {sig.reason}"
+        )
+
+    def test_m5_learning_mode_bypasses(self, monkeypatch):
+        """m5: learning_mode bypasses ranging hard-block."""
+        import broky.signals.m5_scalp_generator as m5_mod
+        monkeypatch.setattr(m5_mod, "RANGING_HARD_BLOCK", True)
+        monkeypatch.setattr(m5_mod, "classify_ribbon_state", lambda *a, **k: "bullish")
+
+        close, high, low, volume = _build_ranging_candles()
+        sig = m5_mod.generate_m5_scalp_signal(close, high, low, volume,
+                                               current_price=float(close.iloc[-1]),
+                                               timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc),
+                                               spread=5.0,
+                                               d1_trend="unknown", h4_trend="bullish",
+                                               learning_mode=True)
+        assert "ranging_hard_block" not in (sig.reason or ""), (
+            f"m5 learning_mode must bypass ranging hard-block, got: {sig.reason}"
+        )

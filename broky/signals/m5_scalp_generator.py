@@ -17,6 +17,7 @@ Key differences from M1 scalp:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -76,6 +77,13 @@ M5_SCALP_MIN_CONFIDENCE = 0.50
 M5_SCALP_ADX_THRESHOLD = 15
 M5_SCALP_SPREAD_MAX = 30
 M5_SCALP_DIRECTION_THRESHOLD = 0.20
+
+# Ranging hard-block (2026-07-09, Real-A): per CLAUDE.md "Ranging = พัก".
+# When True, regime=ranging returns HOLD immediately at the generator level.
+# Env-driven so only oracle-engine (Real-A) sets RANGING_HARD_BLOCK=1;
+# B/C/D (oracle-engine-train) leave it off to collect ML outcomes.
+# learning_mode bypasses. Mirrors broky/signals/generator.py RANGING_HARD_BLOCK.
+RANGING_HARD_BLOCK = os.environ.get("RANGING_HARD_BLOCK", "0") in ("1", "true", "True")
 
 # Sessions where M5 scalp is allowed (all liquid sessions)
 M5_SCALP_SESSIONS = {"london", "overlap", "ny"}
@@ -532,6 +540,25 @@ def generate_m5_scalp_signal(
         regime = "volatile" if boll_bw and boll_bw > 0.04 else "trending"
     else:
         regime = "ranging"
+
+    # ── Ranging hard-block (2026-07-09, Real-A) ──
+    # CLAUDE.md iron rule: "Ranging = พัก". When RANGING_HARD_BLOCK=1 (set only
+    # in oracle-engine env for Real-A) and regime=ranging and not learning_mode,
+    # return HOLD immediately. learning_mode bypasses so ML outcome data is
+    # still collected on B/C/D. Mirrors swing generator's block.
+    if RANGING_HARD_BLOCK and regime == "ranging" and not learning_mode:
+        return Signal(
+            symbol="XAUUSD",
+            signal_type=SignalType.HOLD,
+            confidence=0.0,
+            price=current_price,
+            timestamp=timestamp,
+            timeframe="M5",
+            indicators=scores,
+            reason=f"m5_ranging_hard_block: ADX={adx_val:.1f}<25 [ranging]",
+            regime=regime,
+            trading_mode=TradingMode.M5_SCALP,
+        )
 
     # ADX threshold filter (learning mode: skip ADX gate, record in reason)
     if adx_val < M5_SCALP_ADX_THRESHOLD and not learning_mode:

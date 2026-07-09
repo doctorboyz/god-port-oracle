@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -88,9 +89,20 @@ RANGING_ADX_THRESHOLD = 20
 REGIME_RANGING_CONFIDENCE_MULT = 1.0    # Disabled: good era had no regime penalty (was 0.3)
 REGIME_VOLATILE_SKIP = False            # Disabled: good era had no regime filter
 
+# Ranging hard-block (2026-07-09, Real-A): per CLAUDE.md "Ranging = พัก".
+# When True, regime=ranging returns HOLD immediately at the generator level
+# (mirror of REGIME_VOLATILE_SKIP). Env-driven so only oracle-engine (Real-A)
+# sets RANGING_HARD_BLOCK=1; B/C/D (oracle-engine-train) leave it off to keep
+# collecting ML outcomes in ranging regimes. learning_mode bypasses.
+RANGING_HARD_BLOCK = os.environ.get("RANGING_HARD_BLOCK", "0") in ("1", "true", "True")
+
 # Counter-trend confidence multiplier (trend_alignment == -1)
-# Counter-trend trades have WR ~5-8% lower than trend-aligned
-COUNTER_TREND_CONFIDENCE_MULT = 1.0     # Disabled: good era had no counter-trend penalty (was 0.5)
+# Counter-trend trades have WR ~5-8% lower than trend-aligned.
+# Enabled 2026-07-02: per CLAUDE.md, counter-trend WITHOUT reversal evidence is a
+# bad habit that must be penalized. With the new live_trader rejection gate
+# (trend_alignment==-1 → HOLD), this multiplier is a secondary confidence trim
+# for any path that still reaches the confidence filter.
+COUNTER_TREND_CONFIDENCE_MULT = 0.5
 
 # Reversal signal thresholds — used by compute_reversal_signal()
 # Lowered from RSI 70/30, Stoch 80/20, Boll 0.85/0.15, MFI 80/20
@@ -105,6 +117,87 @@ REVERSAL_OS_BOLL = 0.20       # Bollinger %B oversold (was 0.15, lowered)
 REVERSAL_OB_MFI = 75          # MFI overbought (was 80, lowered)
 REVERSAL_OS_MFI = 25          # MFI oversold (was 20, lowered)
 
+# Swing-structure lookback for HH/LL detection (reversal price-structure confirmation).
+# 20 bars on M5 ≈ 100 min — captures the most recent two swing pivots without
+# reaching back into unrelated regime context.
+SWING_LOOKBACK = 20
+
+
+def detect_swing_structure(
+    high: "pd.Series",
+    low: "pd.Series",
+    lookback: int = SWING_LOOKBACK,
+) -> dict:
+    """Detect recent swing-high / swing-low price structure for reversal confirmation.
+
+    Per CLAUDE.md spec, a reversal trade requires price-structure evidence:
+      - SELL in bullish D1 → price made a LOWER LOW (uptrend structure breaking)
+      - BUY  in bearish D1 → price made a HIGHER HIGH (downtrend structure breaking)
+
+    A swing high is a bar whose high is greater than the highs of its `pivot_window`
+    neighbors; a swing low is symmetric. We scan the last `lookback` bars and
+    identify the two most recent swing highs and two most recent swing lows.
+
+    Args:
+        high: High price series (any TF; M5 is what generate_signal already has).
+        low: Low price series.
+        lookback: Number of recent bars to scan.
+
+    Returns:
+        {
+            "last_swing_high": float|None,
+            "prev_swing_high": float|None,
+            "last_swing_low": float|None,
+            "prev_swing_low": float|None,
+            "made_lower_high": bool,   # last swing high < prev swing high
+            "made_higher_low": bool,   # last swing low  > prev swing low
+            "made_lower_low": bool,    # last swing low  < prev swing low  (uptrend break)
+            "made_higher_high": bool,  # last swing high > prev swing high (downtrend break)
+        }
+    """
+    result = {
+        "last_swing_high": None, "prev_swing_high": None,
+        "last_swing_low": None, "prev_swing_low": None,
+        "made_lower_high": False, "made_higher_low": False,
+        "made_lower_low": False, "made_higher_high": False,
+    }
+    try:
+        if high is None or low is None or len(high) < 5:
+            return result
+        pivot_window = 2  # 2-bar pivot — robust on M5 noise
+        recent_high = high.iloc[-lookback:] if len(high) >= lookback else high
+        recent_low = low.iloc[-lookback:] if len(low) >= lookback else low
+        offset = len(high) - len(recent_high)
+
+        swing_highs: list[tuple[int, float]] = []
+        swing_lows: list[tuple[int, float]] = []
+        for i in range(pivot_window, len(recent_high) - pivot_window):
+            h = float(recent_high.iloc[i])
+            l = float(recent_low.iloc[i])
+            is_swing_high = all(h > float(recent_high.iloc[i - j]) and h > float(recent_high.iloc[i + j])
+                                for j in range(1, pivot_window + 1))
+            is_swing_low = all(l < float(recent_low.iloc[i - j]) and l < float(recent_low.iloc[i + j])
+                               for j in range(1, pivot_window + 1))
+            if is_swing_high:
+                swing_highs.append((i + offset, h))
+            if is_swing_low:
+                swing_lows.append((i + offset, l))
+
+        if len(swing_highs) >= 2:
+            result["last_swing_high"] = swing_highs[-1][1]
+            result["prev_swing_high"] = swing_highs[-2][1]
+            result["made_lower_high"] = swing_highs[-1][1] < swing_highs[-2][1]
+            result["made_higher_high"] = swing_highs[-1][1] > swing_highs[-2][1]
+        if len(swing_lows) >= 2:
+            result["last_swing_low"] = swing_lows[-1][1]
+            result["prev_swing_low"] = swing_lows[-2][1]
+            result["made_higher_low"] = swing_lows[-1][1] > swing_lows[-2][1]
+            result["made_lower_low"] = swing_lows[-1][1] < swing_lows[-2][1]
+    except Exception:
+        # Swing detection must never break signal generation — return neutral structure
+        pass
+    return result
+
 
 def compute_reversal_signal(
     direction: str,
@@ -118,6 +211,7 @@ def compute_reversal_signal(
     plus_di: Optional[float] = None,
     minus_di: Optional[float] = None,
     boll_bw: Optional[float] = None,
+    swing: Optional[dict] = None,
 ) -> tuple[bool, float]:
     """Determine if a counter-trend trade has reversal evidence.
 
@@ -126,9 +220,16 @@ def compute_reversal_signal(
     - Reversal trade (SELL with OB + divergence) = ALLOWED with confidence reduction
     - Ranging = PAUSE (no trade)
 
-    A "reversal signal" requires BOTH:
+    A "reversal signal" requires ALL THREE (CLAUDE.md spec):
     1. Overbought/oversold condition (at least one indicator at extreme)
     2. Divergence/reversal evidence (momentum turning against the trend)
+    3. Price-structure confirmation:
+       - SELL in bullish D1 → made_lower_low (uptrend structure breaking)
+       - BUY  in bearish D1 → made_higher_high (downtrend structure breaking)
+
+    When `swing` is None (legacy callers), criterion 3 is skipped — but the
+    live_trader rejection gate still treats trend_alignment==-1 as a rejection,
+    so legacy callers cannot bypass the rule via the generator alone.
 
     Returns:
         (has_reversal, strength) where:
@@ -214,9 +315,22 @@ def compute_reversal_signal(
         div_count += 1
         div_details.append(f"volatile_bw={boll_bw:.4f}")
 
-    # ── Step 3: Combine into reversal verdict ──
-    # Must have at least 1 OB/OS + at least 1 divergence signal
-    has_reversal = ob_os_count >= 1 and div_count >= 1
+    # ── Step 3: Price-structure confirmation (CLAUDE.md spec) ──
+    # SELL in bullish D1 requires made_lower_low; BUY in bearish D1 requires made_higher_high.
+    # Without swing data (legacy caller), structure_check passes (gate enforced by live_trader).
+    structure_ok = True
+    structure_detail = ""
+    if swing is not None:
+        if is_counter_sell:
+            structure_ok = bool(swing.get("made_lower_low", False))
+            structure_detail = f"made_lower_low={structure_ok}"
+        elif is_counter_buy:
+            structure_ok = bool(swing.get("made_higher_high", False))
+            structure_detail = f"made_higher_high={structure_ok}"
+
+    # ── Step 4: Combine into reversal verdict ──
+    # Must have ALL: (a) OB/OS evidence, (b) divergence evidence, (c) price-structure confirmation
+    has_reversal = ob_os_count >= 1 and div_count >= 1 and structure_ok
 
     # Strength: weighted score (0.0-1.0)
     # OB/OS evidence counts 60%, divergence counts 40%
@@ -227,7 +341,8 @@ def compute_reversal_signal(
     if has_reversal:
         logger.info(
             f"Reversal signal detected: {direction} vs {d1_trend} D1 | "
-            f"OB/OS: {ob_os_details} | Divergence: {div_details} | strength={strength:.2f}"
+            f"OB/OS: {ob_os_details} | Divergence: {div_details} | "
+            f"Structure: {structure_detail or 'n/a'} | strength={strength:.2f}"
         )
 
     return has_reversal, strength
@@ -242,30 +357,45 @@ def compute_trend_alignment_value(
     """Compute trend_alignment feature value for ML.
 
     Values:
-        1  = trend-aligned (trade follows D1 trend)
-        0  = neutral (no trend data)
+        1  = trend-aligned (trade follows HTF trend)
+        0  = neutral (no trend data — both d1 and h4 unknown)
        -1  = counter-trend WITHOUT reversal evidence (bad trade)
         2  = counter-trend WITH reversal evidence (reversal trade — allowed)
+
+    HTF priority: d1 wins when known. When d1 is unknown/None, fall back to h4
+    (2026-07-09 fix — m5 uses H1-proxy for d1 so d1=unknown is frequent; h4 was
+    a dead parameter before this fix, letting counter-trend trades pass when
+    d1 was unknown but h4 was clearly bearish/bullish). Both unknown → 0.
+
+    Known limitation: when d1=unknown, compute_reversal_signal short-circuits
+    and returns has_reversal=False, so the h4-counter path returns -1 (block)
+    even if a reversal is genuine. Conservative — rare case accepted.
 
     This maps to doctorboyz's philosophy:
         trend-following > reversal > neutral > counter-trend
     """
-    if d1_trend is None or d1_trend == "unknown":
-        return 0  # neutral
+    # d1 known → use d1 (primary HTF)
+    if d1_trend not in (None, "unknown"):
+        is_counter = (
+            (d1_trend == "bullish" and direction == "SELL")
+            or (d1_trend == "bearish" and direction == "BUY")
+        )
+        if not is_counter:
+            return 1  # trend-aligned
+        return 2 if has_reversal else -1
 
-    is_counter = (
-        (d1_trend == "bullish" and direction == "SELL")
-        or (d1_trend == "bearish" and direction == "BUY")
-    )
+    # d1 unknown → fall back to h4 if known
+    if h4_trend not in (None, "unknown"):
+        is_counter = (
+            (h4_trend == "bullish" and direction == "SELL")
+            or (h4_trend == "bearish" and direction == "BUY")
+        )
+        if not is_counter:
+            return 1  # trend-aligned with h4
+        # h4-counter — reversal evidence is False when d1=unknown (see docstring)
+        return -1
 
-    if not is_counter:
-        return 1  # trend-aligned
-
-    # Counter-trend — is it a reversal?
-    if has_reversal:
-        return 2  # reversal trade (allowed with caution)
-    else:
-        return -1  # bad counter-trend (no reversal evidence)
+    return 0  # both unknown → neutral
 
 
 def classify_regime(latest_adx: float, boll_bandwidth: Optional[float] = None) -> str:
@@ -829,6 +959,23 @@ def generate_signal(
             band_position = (current_price - boll.lower.iloc[-1]) / band_range
     regime = classify_regime(latest_adx, boll_bw)
 
+    # ── Ranging hard-block (2026-07-09, Real-A) ──
+    # CLAUDE.md iron rule: "Ranging = พัก (no trade)". When RANGING_HARD_BLOCK=1
+    # (set only in oracle-engine env for Real-A) and regime=ranging and not
+    # learning_mode, return HOLD immediately. learning_mode bypasses so ML
+    # outcome data is still collected on B/C/D.
+    if RANGING_HARD_BLOCK and regime == MarketRegime.RANGING.value and not learning_mode:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"ranging_hard_block: ADX={latest_adx:.1f}<25 [{regime}]",
+            regime=regime,
+            strategy_id=strategy_id,
+            weighted_score=0.0,
+            trend_mult=0.0,
+        )
+
     # ── Volatile regime filter: skip signals entirely ──
     # Backtest shows volatile regime loses money (-$94, WR=30.2%).
     # The risk of whipsaw in volatile conditions outweighs potential gains.
@@ -932,8 +1079,9 @@ def generate_signal(
         reason = f"Score={weighted_score:+.2f} | " + ", ".join(active_indicators) if active_indicators else f"Score={weighted_score:+.2f}"
 
     # ── Reversal signal detection ──
-    # Compute whether this counter-trend trade has OB/OS + divergence evidence.
+    # Compute whether this counter-trend trade has OB/OS + divergence + price-structure evidence.
     # This MUST happen after signal_type is determined (above) but before trend filter (below).
+    _swing_structure = detect_swing_structure(high, low, lookback=SWING_LOOKBACK)
     has_reversal, reversal_strength = compute_reversal_signal(
         direction=signal_type.value,
         d1_trend=d1_trend,
@@ -946,6 +1094,7 @@ def generate_signal(
         plus_di=_latest_pdi_val,
         minus_di=_latest_mdi_val,
         boll_bw=boll_bw,
+        swing=_swing_structure,
     )
     trend_alignment = compute_trend_alignment_value(
         direction=signal_type.value,
@@ -957,6 +1106,10 @@ def generate_signal(
     scores["has_reversal"] = 1.0 if has_reversal else 0.0
     scores["reversal_strength"] = reversal_strength
     scores["trend_alignment"] = float(trend_alignment)
+    scores["made_lower_low"] = 1.0 if _swing_structure.get("made_lower_low") else 0.0
+    scores["made_higher_high"] = 1.0 if _swing_structure.get("made_higher_high") else 0.0
+    scores["made_lower_high"] = 1.0 if _swing_structure.get("made_lower_high") else 0.0
+    scores["made_higher_low"] = 1.0 if _swing_structure.get("made_higher_low") else 0.0
 
     # ── Counter-trend confidence penalty ──
     # trend_alignment == -1 means counter-trend WITHOUT reversal evidence.

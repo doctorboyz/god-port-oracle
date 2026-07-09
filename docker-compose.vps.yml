@@ -111,6 +111,14 @@ services:
       - MAX_POSITIONS_A=${MAX_POSITIONS_A:-5}
       - EQUITY_PER_POSITION_A=${EQUITY_PER_POSITION_A:-200}
       - MAX_POSITIONS_CAP_A=${MAX_POSITIONS_CAP_A:-5}
+      # Fix 1 (2026-07-09): min positions floor = 2 for Real-A so equity dip
+      # doesn't collapse max_positions to 1 and block all new entries.
+      # Formula: min(cap, max(min_positions, floor(equity/per_pos)))
+      - MIN_POSITIONS_A=${MIN_POSITIONS_A:-2}
+      # Fix 3 (2026-07-09): ranging hard-block per CLAUDE.md "Ranging = พัก".
+      # When regime=ranging and not learning_mode, generator returns HOLD.
+      # Real-A only — B/C/D (oracle-engine-train) leave unset to collect ML data.
+      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
       - LEARNING_MODE=0
       - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-1.5}
       - RR_RATIO_A=${RR_RATIO_A:-2.5}

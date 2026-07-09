@@ -132,6 +132,14 @@ class M5ScalpTrader:
             f"MAX_POSITIONS_CAP_{self.account}",
             os.environ.get("MAX_POSITIONS_CAP", "5"),
         ))
+        # Min positions floor (env MIN_POSITIONS_{account}, default 1).
+        # Real-A sets MIN_POSITIONS_A=2 to prevent position-limit block when
+        # equity drops (35+ signals blocked on 2026-07-09).
+        # Formula: min(cap, max(min_positions, calculated)) — cap is hard ceiling.
+        self._min_positions = max(1, int(os.environ.get(
+            f"MIN_POSITIONS_{self.account}",
+            os.environ.get("MIN_POSITIONS", "1"),
+        )))
         self.account_id = ACCOUNT_IDS.get(self.account, 1)
         self.risk = risk_config or M5ScalpRiskConfig()
         # Per-account strategy overrides via env vars (for testing different configs)
@@ -1425,31 +1433,41 @@ class M5ScalpTrader:
         (margin + SL risk + spread + slippage). This ensures small accounts
         don't over-leverage while larger accounts can scale up safely.
 
-        Formula: max(1, min(cap, floor(equity / equity_per_position)))
+        Formula: min(cap, max(min_positions, floor(equity / equity_per_position)))
 
-        Examples (equity_per_position=200, cap=5):
+        - `min_positions` (env MIN_POSITIONS_{account}, default 1) is the floor —
+          protects against position-limit block when equity drops.
+        - `cap` (env MAX_POSITIONS_CAP_{account}, default 5) is the hard ceiling —
+          cap always wins when cap < floor.
+
+        Examples (equity_per_position=200, cap=5, min_positions=1 default):
           $199 → 1 position  (small account, conservative)
           $400 → 2 positions
           $600 → 3 positions
           $800 → 4 positions
           $1000+ → 5 positions (capped)
+        Examples (Real-A: min_positions=2):
+          $78  → 2 positions (floor protects against 1-position block)
+          $200 → 2 positions
+          $400 → 2 positions
+          $600 → 3 positions (calculated exceeds floor)
 
         Args:
             equity: Current account equity in USD.
 
         Returns:
-            Maximum number of simultaneous positions (minimum 1).
+            Maximum number of simultaneous positions (minimum = min_positions).
         """
         if equity <= 0:
-            return 1
+            return min(self._max_positions_cap, self._min_positions)
 
         calculated = int(equity // self._equity_per_position)
-        result = max(1, min(self._max_positions_cap, calculated))
+        result = min(self._max_positions_cap, max(self._min_positions, calculated))
 
         logger.debug(
-            "[M5Scalp:%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d → %d",
+            "[M5Scalp:%s] Dynamic max_positions: equity=$%.2f / $%.0f = %d, cap=%d, min=%d → %d",
             self.display_name, equity, self._equity_per_position,
-            calculated, self._max_positions_cap, result,
+            calculated, self._max_positions_cap, self._min_positions, result,
         )
         return result
 

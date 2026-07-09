@@ -381,5 +381,69 @@ class TestGeneratorEmitsReversalIndicators:
         assert "counter_trend_no_reversal" in reason
 
 
+# ---------------------------------------------------------------------------
+# Causal proof: h4 fallback when d1=unknown (2026-07-09 fix — Real-A #5553)
+#
+# Bug: m5 uses H1-proxy for d1 → d1=unknown frequently. compute_trend_alignment_value
+# returned 0 (neutral) when d1=unknown, ignoring h4_trend (dead parameter). Gate
+# only blocks trend_alignment==-1, so d1=unknown + h4=bearish + BUY passed → #5553 lost $8.
+#
+# Fix: when d1=unknown, fall back to h4_trend. Test proves compute + gate work together.
+# ---------------------------------------------------------------------------
+
+class TestH4FallbackIntegration:
+    """End-to-end: compute_trend_alignment_value + gate block #5553 scenario."""
+
+    def test_d1_unknown_h4_bearish_buy_blocked_by_gate(self):
+        """Reproduce #5553: d1=unknown, h4=bearish, BUY → gate must block.
+
+        Before fix: compute returned 0 (neutral) → gate passed → $8 loss.
+        After fix:  compute returns -1 (counter) → gate blocks.
+        """
+        from broky.signals.generator import compute_trend_alignment_value
+        from shared.models import SignalType
+
+        # Step 1: compute trend_alignment with h4 fallback
+        ta = compute_trend_alignment_value("BUY", "unknown", "bearish", False)
+        assert ta == -1, (
+            f"h4 fallback must return -1 for d1=unknown+h4=bearish+BUY, got {ta}"
+        )
+
+        # Step 2: gate must block on trend_alignment=-1
+        t = _make_trader(learning_mode=False)
+        sig = _signal(SignalType.BUY, trend_alignment=ta, has_reversal=0.0)
+        blocked, reason = t._apply_counter_trend_gate(sig, d1_trend="unknown")
+        assert blocked is True, (
+            "gate must block #5553 scenario (d1=unknown, h4=bearish, BUY) after h4 fallback fix"
+        )
+        assert "counter_trend_no_reversal" in reason
+
+    def test_d1_unknown_h4_bullish_buy_aligned_passes(self):
+        """Symmetric: d1=unknown, h4=bullish, BUY → aligned (1) → gate passes."""
+        from broky.signals.generator import compute_trend_alignment_value
+        from shared.models import SignalType
+
+        ta = compute_trend_alignment_value("BUY", "unknown", "bullish", False)
+        assert ta == 1
+
+        t = _make_trader(learning_mode=False)
+        sig = _signal(SignalType.BUY, trend_alignment=ta, has_reversal=0.0)
+        blocked, _ = t._apply_counter_trend_gate(sig, d1_trend="unknown")
+        assert blocked is False
+
+    def test_d1_unknown_h4_unknown_buy_neutral_passes(self):
+        """Both unknown → 0 (neutral) → gate passes (no trend data to oppose)."""
+        from broky.signals.generator import compute_trend_alignment_value
+        from shared.models import SignalType
+
+        ta = compute_trend_alignment_value("BUY", "unknown", "unknown", False)
+        assert ta == 0
+
+        t = _make_trader(learning_mode=False)
+        sig = _signal(SignalType.BUY, trend_alignment=ta, has_reversal=0.0)
+        blocked, _ = t._apply_counter_trend_gate(sig, d1_trend="unknown")
+        assert blocked is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1,15 +1,20 @@
 """Unit tests for `_calculate_max_positions` dynamic position sizing logic.
 
-Tests the formula: max(1, min(cap, floor(equity / equity_per_position)))
+Tests the formula: min(cap, max(min_positions, floor(equity / equity_per_position)))
+
+- `min_positions` (env `MIN_POSITIONS_{account}`, default 1) is the floor.
+- `cap` (env `MAX_POSITIONS_CAP_{account}`, default 5) is the hard ceiling.
+- Cap always wins when cap < floor (semantically: cap is a hard limit).
 
 Both `metty.execution.live_trader.LiveTrader._calculate_max_positions` and
 `metty.execution.m5_scalp_trader.M5ScalpTrader._calculate_max_positions`
 share identical logic. These tests verify the formula directly by binding
-the method to a lightweight stub with just the two required attributes
-(`_equity_per_position`, `_max_positions_cap`), avoiding full trader
-construction (which needs MT5 bridge, DB, env vars, etc.).
+the method to a lightweight stub with just the three required attributes
+(`_equity_per_position`, `_max_positions_cap`, `_min_positions`), avoiding
+full trader construction (which needs MT5 bridge, DB, env vars, etc.).
 
-References: ISSUE-030, learning 2026-06-26_dynamic-max-positions-from-equity.md
+References: ISSUE-030, learning 2026-06-26_dynamic-max-positions-from-equity.md,
+            learning 2026-07-09_min2-h4-fallback-ranging-block.md (Real-A min=2)
 """
 
 from __future__ import annotations
@@ -32,12 +37,17 @@ class _StubTrader:
     """
     _equity_per_position: float
     _max_positions_cap: int
+    _min_positions: int = 1
     display_name: str = "test-trader"
 
 
-def _make_method(trader_cls, equity_per_position: float, cap: int):
+def _make_method(trader_cls, equity_per_position: float, cap: int, min_positions: int = 1):
     """Bind the trader class's `_calculate_max_positions` to a stub instance."""
-    stub = _StubTrader(_equity_per_position=equity_per_position, _max_positions_cap=cap)
+    stub = _StubTrader(
+        _equity_per_position=equity_per_position,
+        _max_positions_cap=cap,
+        _min_positions=min_positions,
+    )
     return trader_cls._calculate_max_positions.__get__(stub, _StubTrader)
 
 
@@ -106,8 +116,19 @@ class TestCalculateMaxPositionsCustomConfig:
         assert method(10_000) == 2
 
     def test_cap_1(self, trader_cls):
-        """Cap=1 — always 1 position regardless of equity."""
+        """Cap=1 — always 1 position regardless of equity (cap is hard ceiling)."""
         method = _make_method(trader_cls, equity_per_position=200.0, cap=1)
+        assert method(0) == 1
+        assert method(500) == 1
+        assert method(10_000) == 1
+
+    def test_cap_below_floor_cap_wins(self, trader_cls):
+        """cap=1, floor=2 — cap wins (hard ceiling), result=1 not 2.
+
+        Formula: min(cap, max(floor, calc)) → min(1, max(2, ...)) = 1.
+        Cap is a hard limit that cannot be overridden by the floor.
+        """
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=1, min_positions=2)
         assert method(0) == 1
         assert method(500) == 1
         assert method(10_000) == 1
@@ -186,27 +207,83 @@ class TestCalculateMaxPositionsEdgeCases:
         assert method(1_000_000_000) == 5
 
 
-# ─── Real-A config scenario (from learning 2026-06-28) ───────────────────
+# ─── Real-A config scenario (min_positions=2 from 2026-07-09) ────────────
 
 @pytest.mark.unit
 @pytest.mark.parametrize("trader_cls", TRADER_CLASSES, ids=["LiveTrader", "M5ScalpTrader"])
 class TestCalculateMaxPositionsRealAScenario:
-    """Verify the exact scenario from good-era-config-restore learning.
+    """Verify Real-A scenario with min_positions=2 (2026-07-09 fix).
 
-    Real-A topped up to $200 with equity_per_position=200, cap=5 → 1 position.
+    Real-A equity had dropped to $346-379 → floor(372/200)=1 → only 1 position
+    allowed → 35+ signals blocked in 24h. Fix: MIN_POSITIONS_A=2 so even at
+    low equity, 2 simultaneous positions are allowed.
+
+    Config: equity_per_position=200, cap=5, min_positions=2 (Real-A).
     """
 
     def test_real_a_at_200_usd(self, trader_cls):
-        """Real-A after $200 top-up: exactly 1 position (200/200=1)."""
-        method = _make_method(trader_cls, equity_per_position=200.0, cap=5)
-        assert method(200.00) == 1
+        """Real-A at $200 with min=2: 2 positions (was 1 before fix).
+
+        Without min=2: floor(200/200)=1 → max(1, min(5, 1)) = 1.
+        With min=2:    min(5, max(2, 1)) = 2.
+        """
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
+        assert method(200.00) == 2
 
     def test_real_a_at_78_usd_pre_topup(self, trader_cls):
-        """Real-A before top-up ($78): still 1 position (floor(78/200)=0 → max(1,0)=1)."""
-        method = _make_method(trader_cls, equity_per_position=200.0, cap=5)
-        assert method(78.00) == 1
+        """Real-A at $78 (low equity): 2 positions with min=2 (was 1).
 
-    def test_real_a_at_400_usd_for_two_positions(self, trader_cls):
-        """To get 2 positions, Real-A needs $400 equity."""
-        method = _make_method(trader_cls, equity_per_position=200.0, cap=5)
+        floor(78/200)=0 → min(5, max(2, 0)) = 2.
+        Floor protects against position-limit block when equity drops.
+        """
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
+        assert method(78.00) == 2
+
+    def test_real_a_at_372_usd_today(self, trader_cls):
+        """Real-A at $372 (today's low equity): 2 positions, not 1.
+
+        This is the exact scenario that blocked 35+ signals on 2026-07-09.
+        floor(372/200)=1 → min(5, max(2, 1)) = 2.
+        """
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
+        assert method(372.00) == 2
+
+    def test_real_a_at_400_usd(self, trader_cls):
+        """Real-A at $400: 2 positions (calculated=2, floor=2, no change)."""
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
         assert method(400.00) == 2
+
+    def test_real_a_at_600_usd(self, trader_cls):
+        """Real-A at $600: 3 positions (calculated=3 > floor=2)."""
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
+        assert method(600.00) == 3
+
+    def test_real_a_at_0_equity(self, trader_cls):
+        """Real-A at $0 with min=2: 2 positions (early return uses floor)."""
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=2)
+        assert method(0) == 2
+
+
+# ─── Default (B/C/D) — min_positions=1, behavior unchanged ───────────────
+
+@pytest.mark.unit
+@pytest.mark.parametrize("trader_cls", TRADER_CLASSES, ids=["LiveTrader", "M5ScalpTrader"])
+class TestCalculateMaxPositionsDefaultMin:
+    """Verify default min_positions=1 (B/C/D demo accounts, no env override).
+
+    These tests confirm the floor change does NOT affect accounts without
+    MIN_POSITIONS_{account} env var set — preserving B/C/D demo behavior.
+    """
+
+    def test_default_min_is_one(self, trader_cls):
+        """Without MIN_POSITIONS env, floor defaults to 1 (B/C/D unchanged)."""
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=1)
+        assert method(0) == 1
+        assert method(199) == 1
+        assert method(200) == 1
+        assert method(400) == 2
+
+    def test_default_zero_equity(self, trader_cls):
+        """Default (min=1): $0 equity → 1 position (preserve old behavior)."""
+        method = _make_method(trader_cls, equity_per_position=200.0, cap=5, min_positions=1)
+        assert method(0) == 1
