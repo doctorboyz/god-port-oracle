@@ -128,6 +128,13 @@ services:
       - PARTIAL_TP_ENABLED_A=${PARTIAL_TP_ENABLED_A:-0}
       - TP1_RATIO_A=${TP1_RATIO_A:-0.5}
       - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
+      # Fix #1 (2026-07-12): widen trailing TP for Real-A — defaults 0.20/0.10
+      # choke winners before 2.5R TP (win:loss 0.82:1 vs design 2.5:1).
+      # arm 0.40% = trail arms after ~$16 MFE (was $8).
+      # trail 0.20% = exit on $8 pullback from peak (was $4) — survives normal noise.
+      # B/C/D keep defaults (0.20/0.10) — only Real-A widened for observation.
+      - TRAILING_ACTIVATION_PCT_A=${TRAILING_ACTIVATION_PCT_A:-0.40}
+      - TRAILING_TRAIL_PCT_A=${TRAILING_TRAIL_PCT_A:-0.20}
       - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-500}
       - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-500}
       - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}

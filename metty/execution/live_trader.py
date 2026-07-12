@@ -226,9 +226,27 @@ class LiveTrader:
             "C": float(os.environ.get("RR_SCALE_IN_C", os.environ.get("RR_SCALE_IN", "2.5"))),
             "D": float(os.environ.get("RR_SCALE_IN_D", os.environ.get("RR_SCALE_IN", "2.5"))),
         }
+        # Fix #1 (2026-07-12): trailing TP params env-configurable per account.
+        # Defaults (0.20/0.10) are too tight for XAUUSD — choke winners before
+        # they reach 2.5R TP, inverting win:loss from design 2.5:1 to actual 0.82:1.
+        # Wider values let winners breathe. See learning 2026-07-12_real-a-post-deploy-3fixes-check.
+        per_account_trail_act = {
+            "A": float(os.environ.get("TRAILING_ACTIVATION_PCT_A", os.environ.get("TRAILING_ACTIVATION_PCT", "0.20"))),
+            "B": float(os.environ.get("TRAILING_ACTIVATION_PCT_B", os.environ.get("TRAILING_ACTIVATION_PCT", "0.20"))),
+            "C": float(os.environ.get("TRAILING_ACTIVATION_PCT_C", os.environ.get("TRAILING_ACTIVATION_PCT", "0.20"))),
+            "D": float(os.environ.get("TRAILING_ACTIVATION_PCT_D", os.environ.get("TRAILING_ACTIVATION_PCT", "0.20"))),
+        }
+        per_account_trail_trail = {
+            "A": float(os.environ.get("TRAILING_TRAIL_PCT_A", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
+            "B": float(os.environ.get("TRAILING_TRAIL_PCT_B", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
+            "C": float(os.environ.get("TRAILING_TRAIL_PCT_C", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
+            "D": float(os.environ.get("TRAILING_TRAIL_PCT_D", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
+        }
         self.risk.partial_tp_enabled = per_account_ptp.get(self.account, self.risk.partial_tp_enabled)
         self.risk.tp1_ratio = per_account_tp1r.get(self.account, self.risk.tp1_ratio)
         self.risk.rr_scale_in = per_account_rrsi.get(self.account, self.risk.rr_scale_in)
+        self.risk.trailing_activation_pct = per_account_trail_act.get(self.account, self.risk.trailing_activation_pct)
+        self.risk.trailing_trail_pct = per_account_trail_trail.get(self.account, self.risk.trailing_trail_pct)
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:
