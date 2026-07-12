@@ -135,6 +135,11 @@ services:
       # B/C/D keep defaults (0.20/0.10) — only Real-A widened for observation.
       - TRAILING_ACTIVATION_PCT_A=${TRAILING_ACTIVATION_PCT_A:-0.40}
       - TRAILING_TRAIL_PCT_A=${TRAILING_TRAIL_PCT_A:-0.20}
+      # Fix #2 (2026-07-12): H4 trend from CLOSED H4 bar only — resampler's
+      # last bin is the in-progress H4 bar; EMA10/50 on its close flipped
+      # 19+ times in 8h on Real-A (07-10) and green-lit 2 counter-trend
+      # SELLs that hit SL. =1 drops the incomplete bar; =0 keeps legacy.
+      - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
       - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-500}
       - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-500}
       - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}

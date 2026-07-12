@@ -456,13 +456,21 @@ class M5ScalpTrader:
         return True, reason
 
     def _compute_h4_trend(self, candles: dict) -> Optional[str]:
-        """Compute H4 trend using EMA 10/50 crossover."""
+        """Compute H4 trend using EMA 10/50 crossover.
+
+        Fix #2 (2026-07-12): drop the last (incomplete) H4 bar before EMA —
+        parity with live_trader._compute_h4_trend. See
+        tests/test_h4_trend_incomplete_bar_causal.py for rationale.
+        H4_USE_CLOSED_BAR_ONLY=1 (default) drops the last row; =0 legacy.
+        """
         from broky.indicators.ema import calculate_ema
         h4 = candles.get("H4")
         if h4 is not None and len(h4) >= 50:
             try:
-                ema10 = calculate_ema(h4["close"], 10).iloc[-1]
-                ema50 = calculate_ema(h4["close"], 50).iloc[-1]
+                use_closed_only = os.environ.get("H4_USE_CLOSED_BAR_ONLY", "1") in ("1", "true", "True")
+                src = h4.iloc[:-1] if use_closed_only and len(h4) > 50 else h4
+                ema10 = calculate_ema(src["close"], 10).iloc[-1]
+                ema50 = calculate_ema(src["close"], 50).iloc[-1]
                 if pd.notna(ema10) and pd.notna(ema50):
                     if ema10 > ema50:
                         return "bullish"

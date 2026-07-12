@@ -596,12 +596,25 @@ class LiveTrader:
         return "bullish" if ema50.iloc[-1] > ema200.iloc[-1] else "bearish"
 
     def _compute_h4_trend(self, h4: Optional[pd.DataFrame]) -> Optional[str]:
-        """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200)."""
+        """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200).
+
+        Fix #2 (2026-07-12): drop the last (incomplete) H4 bar before EMA.
+        `broky.data.resampler.resample_timeframe` includes the in-progress bin
+        as the last row, so EMA10/50 on `iloc[-1]` reads the intra-bar close
+        that oscillates with every M5 tick. On a choppy H4 (EMA10 ≈ EMA50) this
+        flipped the label 19+ times in 8h on Real-A (07-10) and green-lit two
+        counter-trend SELLs that hit SL. H4_USE_CLOSED_BAR_ONLY=1 (default) drops
+        the last row so the label reflects the last CLOSED H4 bar; =0 keeps the
+        legacy noisy behavior for rollback. See
+        tests/test_h4_trend_incomplete_bar_causal.py.
+        """
         if h4 is None or len(h4) < 50:
             return None
         try:
-            ema10 = h4["close"].ewm(span=10, adjust=False).mean()
-            ema50 = h4["close"].ewm(span=50, adjust=False).mean()
+            use_closed_only = os.environ.get("H4_USE_CLOSED_BAR_ONLY", "1") in ("1", "true", "True")
+            src = h4.iloc[:-1] if use_closed_only and len(h4) > 50 else h4
+            ema10 = src["close"].ewm(span=10, adjust=False).mean()
+            ema50 = src["close"].ewm(span=50, adjust=False).mean()
             if pd.isna(ema10.iloc[-1]) or pd.isna(ema50.iloc[-1]):
                 return None
             return "bullish" if ema10.iloc[-1] > ema50.iloc[-1] else "bearish"

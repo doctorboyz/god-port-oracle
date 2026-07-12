@@ -67,11 +67,19 @@ def _determine_d1_trend(d1: pd.DataFrame) -> str:
 
 
 def _compute_h4_trend(h4: pd.DataFrame) -> str:
-    """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200)."""
+    """Compute H4 trend using EMA 10/50 crossover (faster than D1 EMA 50/200).
+
+    Fix #2 (2026-07-12): drop the last (incomplete) H4 bar before EMA —
+    parity with live_trader._compute_h4_trend. See
+    tests/test_h4_trend_incomplete_bar_causal.py for rationale.
+    H4_USE_CLOSED_BAR_ONLY=1 (default) drops the last row; =0 legacy.
+    """
     if h4 is None or len(h4) < 50:
         return "unknown"
     try:
-        close = h4["close"]
+        use_closed_only = os.environ.get("H4_USE_CLOSED_BAR_ONLY", "1") in ("1", "true", "True")
+        src = h4.iloc[:-1] if use_closed_only and len(h4) > 50 else h4
+        close = src["close"]
         ema10 = close.ewm(span=10, adjust=False).mean()
         ema50 = close.ewm(span=50, adjust=False).mean()
         if pd.isna(ema10.iloc[-1]) or pd.isna(ema50.iloc[-1]):
