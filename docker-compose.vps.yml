@@ -120,7 +120,7 @@ services:
       # Real-A only — B/C/D (oracle-engine-train) leave unset to collect ML data.
       - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
       - LEARNING_MODE=0
-      - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-1.5}
+      - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-2.0}
       - RR_RATIO_A=${RR_RATIO_A:-2.5}
       - MIN_CONFIDENCE_A=${MIN_CONFIDENCE_A:-0.45}
       - BUY_MIN_CONFIDENCE_A=${BUY_MIN_CONFIDENCE_A:-0.45}
@@ -140,6 +140,11 @@ services:
       # 19+ times in 8h on Real-A (07-10) and green-lit 2 counter-trend
       # SELLs that hit SL. =1 drops the incomplete bar; =0 keeps legacy.
       - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
+      # Fix #3 (2026-07-12): ATR multiplier 1.5 → 2.0 — SL was tightest of all
+      # accounts (B=2.0, C/D=2.5, forward-engine BEST=2.0). 1.5× on XAUUSD M5
+      # puts SL within normal noise range → stopped on pullbacks even when
+      # direction is right. 2.0 matches B + proven forward config; risk per
+      # trade preserved (position sizing lowers lots to keep $ risk constant).
       - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-500}
       - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-500}
       - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}
