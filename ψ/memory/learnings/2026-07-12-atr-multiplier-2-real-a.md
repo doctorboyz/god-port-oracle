@@ -53,11 +53,54 @@ Pure env tuning — env hook มีอยู่แล้วใน live_trader.py
 - TP ห่างขึ้นตาม RR=2.5 → winner ใหญ่ขึ้น (รวมกับ Fix #1 trailing TP หลวม = win:loss ดีขึ้น)
 - ถ้า ATR ใหญ่มาก (volatile) SL อาจกว้างเกิน → drawdownProtector + ML filter คุมอยู่
 
+## BUGFIX (2026-07-13) — env override ถูกข้าม
+**สำคัญมาก:** Fix #3 deploy ครั้งแรก (commit f5b623d) **ไม่ได้ผล** เลย
+
+### อาการ (Symptom)
+- ตรวจสอบ container: `ATR_MULTIPLIER_A=2.0` ✅ env ถูกตั้ง
+- แต่ trade ใหม่ 2026-07-13 03:10 UTC (swing SELL @ 4056.28) บันทึก `atr_multiplier=2.5` ไม่ใช่ 2.0
+- = env ถูกข้าม → บัญชีเสียเหมือนเดิม
+
+### สาเหตุ (Root Cause — CPT)
+`live_trader.py:206` wrap env override ไว้ใน `if not risk_config:` block:
+```python
+if not risk_config:
+    self.risk.risk_reward_ratio = ...
+    self.risk.min_confidence = ...
+    self.risk.atr_multiplier = per_account_atr.get(...)  # <-- อยู่ใน block
+```
+oracle-engine construct LiveTrader พร้อม risk_config (registry default `atr_multiplier=2.5`)
+→ block ทั้งหมดถูกข้าม → env override ไม่ได้รัน
+
+Fix #1 (trailing TP) อยู่นอก block จึงใช้ได้. Fix #3 อยู่ใน block จึงไม่ได้ผล.
+m5_scalp_trader.py:170 มี bug เดียวกัน.
+
+### Causal Proof
+`tests/test_atr_env_override_risk_config_causal.py` (4 tests)
+- LiveTrader(risk_config=2.5) + env=2.0 → RED: 2.5 (env skipped) → GREEN: 2.0 (env wins)
+- M5ScalpTrader เดียวกัน
+- Sanity: no env → risk_config respected (no regression)
+- No env, no config → registry default 2.5 preserved
+- 200 regression passed
+
+### Fix
+ย้าย `self.risk.atr_multiplier = per_account_atr.get(...)` ออกจาก block
+ไว้ในระดับเดียวกับ Fix #1 (env = explicit user intent → always wins over passed config).
+RR_RATIO + MIN_CONFIDENCE ยังอยู่ใน block (out of scope).
+Commit: af6f3d1.
+
+### บทเรียน (Lesson)
+**Env override = explicit user intent → must ALWAYS win, never gated by `if not risk_config`.**
+ระวังเสมอ: เวลาเพิ่ม env hook ให้เช็คว่า code path ไหนเรียก constructor — ถ้ามี risk_config
+ส่งมา block นี้จะถูกข้าม. ใช้ CPT ทุกครั้ง (env present + risk_config present → env wins).
+
 ## แล้วไง (Next)
 - เก็บข้อมูลต่อ 24-48h: ดูว่า trade ใหม่โดน stop น้อยลง (target stop_rate < 50% จาก ~100%)
 - ดู win:loss รวม Fix #1+#2+#3: ควรกลับเข้าใกล้ 2.5:1
 - ระวัง: ถ้า 48h ไม่มี trade เลย → อาจจะ tight ที่อื่น (ranging block ข้อ 7) ไม่ใช่ ATR
 - B/C/D ไม่แตะ — ใช้ค่าของตัวเองอยู่แล้ว
+- ⚠️ **ข้อควรระวังจาก bugfix**: คราวหน้าเวลา deploy การแก้ env อย่าเพิ่งเชื่อว่า "env ตั้งถูก = ใช้งาน"
+  ต้อง verify ด้วย causal test ที่ instantiate จริง + เช็คค่าจริงใน container
 
 ## ข้อ 4-8 ที่ยังไม่แก้
 4. Market-hours guard (Sunday 10018 rejection)
