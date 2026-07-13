@@ -168,10 +168,14 @@ class M5ScalpTrader:
             "D": float(os.environ.get("M5_MAX_SPREAD_D", os.environ.get("M5_MAX_SPREAD", "30"))),
         }
         if not risk_config:
-            self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
             self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
             self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
             self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
+        # Fix #3 bugfix (2026-07-13): ATR_MULTIPLIER_A env must ALWAYS win, even
+        # when a risk_config is passed (registry default atr_multiplier=2.5).
+        # Previously inside `if not risk_config` → env skipped → trades used 2.5.
+        # See tests/test_atr_env_override_risk_config_causal.py.
+        self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
         # Partial TP overrides per account
         per_account_ptp = {
             "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",

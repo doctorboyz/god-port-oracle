@@ -204,9 +204,15 @@ class LiveTrader:
             "D": float(os.environ.get("MIN_CONFIDENCE_D", os.environ.get("MIN_CONFIDENCE", "0.45"))),
         }
         if not risk_config:
-            self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
             self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
             self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
+        # Fix #3 bugfix (2026-07-13): ATR_MULTIPLIER_A env must ALWAYS win, even
+        # when oracle-engine passes a risk_config (it does — registry default
+        # atr_multiplier=2.5). Previously this line sat inside `if not risk_config`
+        # so env was silently skipped → first new trade recorded 2.5 not 2.0.
+        # Env is explicit user intent → overrides risk_config. See
+        # tests/test_atr_env_override_risk_config_causal.py.
+        self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
         # Partial TP overrides per account
         per_account_ptp = {
             "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
