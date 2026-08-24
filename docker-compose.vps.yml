@@ -199,9 +199,11 @@ services:
       - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
       - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
       - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
-      # AEGIS-only test (2026-07-02): ML filter disabled to test system mechanics alone.
-      # Local MC test (PF 4.13-5.40) used AEGIS only — this matches that baseline.
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-0}
+      # 2026-08-23 deploy: ML filter re-enabled for B/C/D "slow-but-sure" run.
+      # Was off since 2026-07-02 AEGIS-only test. Ensemble verified OOS PF>1.5
+      # on B/C/D (ψ/lab/compare-c-models-2026-06-29/). IRON LAW still holds —
+      # A lives in oracle-engine (separate container), never gets ensemble.
+      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
       - ML_MODEL_DIR=/app/data/models/trade_outcome_v4
       # V4+v6 OR-gate ensemble — verified OOS PF>1.5 on B, C, D (2026-06-29).
@@ -216,11 +218,14 @@ services:
       - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
       - ML_ENSEMBLE_THRESH=${ML_ENSEMBLE_THRESH:-0.45}
       - ML_ENSEMBLE_THRESH_C=${ML_ENSEMBLE_THRESH_C:-0.50}
+      # Demo-D slow-but-sure (2026-08-23): @0.50 → OOS PF 1.66, MaxDD 17.3%, 91 trades
+      # Tighter than B's 0.45 — D is the primary slow-but-sure test bed.
+      - ML_ENSEMBLE_THRESH_D=${ML_ENSEMBLE_THRESH_D:-0.50}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
       - MAX_POSITIONS_C=${MAX_POSITIONS_C:-5}
-      - MAX_POSITIONS_D=${MAX_POSITIONS_D:-5}
+      - MAX_POSITIONS_D=${MAX_POSITIONS_D:-1}
       - EQUITY_PER_POSITION_B=${EQUITY_PER_POSITION_B:-200}
       - EQUITY_PER_POSITION_C=${EQUITY_PER_POSITION_C:-200}
       - EQUITY_PER_POSITION_D=${EQUITY_PER_POSITION_D:-200}
@@ -236,10 +241,10 @@ services:
       - RR_RATIO_D=${RR_RATIO_D:-3.0}
       - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.45}
       - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.45}
-      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
+      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.60}
       - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.45}
       - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.45}
-      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
+      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.55}
       - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
       - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
       - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
@@ -257,7 +262,7 @@ services:
       - INITIAL_BALANCE_C=${INITIAL_BALANCE_C:-1000}
       - INITIAL_EQUITY_C=${INITIAL_EQUITY_C:-1000}
       - INITIAL_BALANCE_D=${INITIAL_BALANCE_D:-100}
-      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-100}
+      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-200}
       - LEVERAGE_D=${LEVERAGE_D:-500}
       - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
       - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
@@ -270,10 +275,18 @@ services:
       - DRAWDOWN_WEEKLY_LIMIT_C=${DRAWDOWN_WEEKLY_LIMIT_C:-0.20}
       - DRAWDOWN_ACCOUNT_LIMIT_C=${DRAWDOWN_ACCOUNT_LIMIT_C:-0.50}
       - DRAWDOWN_COOLDOWN_HOURS_C=${DRAWDOWN_COOLDOWN_HOURS_C:-2}
-      - DRAWDOWN_DAILY_LIMIT_D=${DRAWDOWN_DAILY_LIMIT_D:-0.10}
-      - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.20}
-      - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.50}
-      - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-2}
+      # Demo-D slow-but-sure drawdown (2026-08-23): tight 3/6/15% — kill loss fast
+      # Real-A uses 5/10/20%; D tighter because slow-but-sure = capital preservation first
+      - DRAWDOWN_DAILY_LIMIT_D=${DRAWDOWN_DAILY_LIMIT_D:-0.03}
+      - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.06}
+      - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.15}
+      - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-4}
+      # Demo-D slow-but-sure extras (2026-08-23): 1% risk, single position, slow blocker
+      - RISK_PER_TRADE_D=${RISK_PER_TRADE_D:-0.01}
+      - MIN_POSITIONS_D=${MIN_POSITIONS_D:-1}
+      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-10}
+      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-30}
+      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.05}
       # ═══ MT5 Bridge credentials (B, C, D only — no A) ══════════════
       - MT5_LOGIN_B=${MT5_LOGIN_B:-}
       - MT5_PASSWORD_B=${MT5_PASSWORD_B:-}
