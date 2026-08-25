@@ -1157,16 +1157,26 @@ def generate_signal(
                 # Mean reversion exception: allow counter-trend with reduced size
                 # when price is at Bollinger extreme (oversold for BUY, overbought for SELL)
                 if h4_override:
-                    is_oversold = band_position is not None and band_position <= 0.15
-                    is_overbought = band_position is not None and band_position >= 0.85
+                    # Use the lowered REVERSAL_*_BOLL constants (0.20/0.80) — same thresholds
+                    # used everywhere else in this file (lines 256-279). The hardcoded 0.15/0.85
+                    # here was a 2026-07-02 oversight: XAUUSD hits OB/OS at milder levels, and
+                    # the constants were lowered 2026-07-09 to fix ZERO reversal trades detected.
+                    # This gate never got updated → Demo-D blocked for 53+ days.
+                    # See ψ/memory/learnings/2026-08-25_aegis-gate-blocks-demo-d.md
+                    is_oversold = band_position is not None and band_position <= REVERSAL_OS_BOLL
+                    is_overbought = band_position is not None and band_position >= REVERSAL_OB_BOLL
                     counter_buy = signal_type == SignalType.BUY
                     counter_sell = signal_type == SignalType.SELL
 
                     if counter_buy and is_oversold:
-                        trend_mult = 0.3  # Allow mean-reversion BUY near lower band
+                        # trend_mult bumped 0.3 → 0.7: with raw_conf cap ≈ 0.94 (max bearish
+                        # alignment), 0.94 * 0.3 = 0.28 < MIN_CONFIDENCE 0.60 → exception was
+                        # mathematically impossible. 0.94 * 0.7 = 0.66 ≥ 0.60 → fires.
+                        # Conservative: only very strong signals (raw ≥ 0.857) clear the bar.
+                        trend_mult = 0.7  # Mean-reversion BUY near lower band (was 0.3)
                         reason += f" (H4 override: oversold boll={band_position:.2f} → mean-revert BUY)"
                     elif counter_sell and is_overbought:
-                        trend_mult = 0.3  # Allow mean-reversion SELL near upper band
+                        trend_mult = 0.7  # Mean-reversion SELL near upper band (was 0.3)
                         reason += f" (H4 override: overbought boll={band_position:.2f} → mean-revert SELL)"
                     else:
                         trend_mult = 0.0  # Hard block: no extreme condition → no counter-trend
