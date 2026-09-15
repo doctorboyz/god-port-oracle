@@ -19,6 +19,13 @@
 #   4. TradeOutcomePredictor loads (enabled=True, models>0, engineer loaded)
 #   5. health_check() passes
 #   6. Test prediction returns a numeric P(LOSS) — catches "no prediction" silent fail
+#   7. (oracle-engine-train only) For each dir in ML_ENSEMBLE_MODEL_DIRS:
+#      - dir exists in container volume
+#      - training_results.json + feature_engineer.joblib present
+#      - >=1 .pkl model file
+#      - predict_loss_proba returns numeric AND sub-model count = N/N
+#        (catches silent missing-dir bug — ensemble degraded to N-1/N)
+#      Also iterates per-account ensemble modes (B/C/D) at per-account thresholds.
 
 set -uo pipefail
 
@@ -149,6 +156,91 @@ if md:
     except Exception as e:
         check("predictor load", False, f"exception={e}")
         traceback.print_exc()
+
+    # ─── Ensemble verification (oracle-engine-train only) ───────────────
+    # For each dir in ML_ENSEMBLE_MODEL_DIRS: assert dir exists, has
+    # training_results.json + feature_engineer.joblib + >=1 model file.
+    # Then build EnsemblePredictor and verify EVERY sub-model is loaded
+    # (member count = N/N). Catches the silent missing-dir bug where
+    # the ensemble silently degrades to N-1/N when a model dir is absent
+    # from the named volume (hit 2026-06-30 — v6 missing → ensemble ran
+    # as V4-alone for 12h with no error).
+    try:
+        from broky.ml.ensemble_predictor import EnsemblePredictor
+        ensemble_dirs_raw = os.environ.get("ML_ENSEMBLE_MODEL_DIRS", "")
+        ensemble_dirs = [d for d in ensemble_dirs_raw.split(":") if d]
+        n_dirs = len(ensemble_dirs)
+        check("ML_ENSEMBLE_MODEL_DIRS set", n_dirs > 0, f"n_dirs={n_dirs}")
+        if n_dirs > 0:
+            # 7a. Per-dir presence check
+            for i, d in enumerate(ensemble_dirs, 1):
+                exists = os.path.isdir(d)
+                check(f"ensemble dir [{i}/{n_dirs}] exists", exists, f"path={d}")
+                if not exists:
+                    # Surface the fix command — named volume, rsync does NOT sync into it
+                    print(f"INFO:FIX: docker cp <repo>/data/models/{os.path.basename(d)} "
+                          f"<container>:{os.path.dirname(d)}/")
+                    continue
+                tr = os.path.join(d, "training_results.json")
+                check(f"  dir [{i}/{n_dirs}] training_results.json",
+                      os.path.exists(tr), f"path={tr}")
+                fe = os.path.join(d, "feature_engineer.joblib")
+                check(f"  dir [{i}/{n_dirs}] feature_engineer.joblib",
+                      os.path.exists(fe), f"path={fe}")
+                pkls = [f for f in os.listdir(d) if f.endswith("_model.pkl")]
+                check(f"  dir [{i}/{n_dirs}] has >=1 .pkl model", len(pkls) > 0,
+                      f"n={len(pkls)}")
+                # Engineer module must NOT be bxau (catches ISSUE-034 class)
+                if os.path.exists(fe):
+                    try:
+                        import joblib
+                        eng = joblib.load(fe)
+                        mod = type(eng).__module__ if eng else None
+                        check(f"  dir [{i}/{n_dirs}] engineer not bxau",
+                              not (mod and "bxau" in mod), f"module={mod}")
+                    except Exception as e:
+                        check(f"  dir [{i}/{n_dirs}] engineer loads", False, f"err={e}")
+
+            # 7b. Per-account ensemble modes + sub-model count check
+            # members is list of (mdir, TradeOutcomePredictor) tuples;
+            # check per-sub-model .enabled to catch silent degradation.
+            for acct in ("B", "C", "D"):
+                mode = os.environ.get(f"ML_ENSEMBLE_MODE_{acct}", "").strip().lower()
+                if not mode:
+                    continue
+                thr = (os.environ.get(f"ML_ENSEMBLE_THRESH_{acct}", "").strip()
+                       or os.environ.get("ML_ENSEMBLE_THRESH", "0.50").strip())
+                check(f"ensemble {acct} mode set", bool(mode), f"mode={mode} thresh={thr}")
+                try:
+                    ep = EnsemblePredictor(model_dirs=ensemble_dirs, mode=mode,
+                                            loss_threshold=0.99)
+                    n_total = len(ep.members)
+                    n_enabled = sum(1 for _, p in ep.members if p.enabled)
+                    check(f"ensemble {acct} sub-models {n_enabled}/{n_total}",
+                          n_enabled == n_total and n_total == n_dirs,
+                          f"enabled={n_enabled}/{n_total} expected={n_dirs}")
+                    if n_enabled != n_total:
+                        names = [d for d, p in ep.members if not p.enabled]
+                        print(f"INFO:DEGRADED: ensemble {acct} sub-models disabled: {names}")
+                    ok, msg = ep.health_check()
+                    check(f"ensemble {acct} health_check", ok, f"msg={msg}")
+                    if ok:
+                        proba, label = ep.predict_loss_proba({
+                            "regime": "trending",
+                            "direction": "BUY",
+                            "session": "london",
+                            "d1_trend": "bullish",
+                            "h4_trend": "bullish",
+                            "price_vs_cloud": "above",
+                            "mfi_signal": "neutral",
+                        })
+                        is_num = isinstance(proba, (int, float)) and not isinstance(proba, bool)
+                        check(f"ensemble {acct} prediction numeric", is_num,
+                              f"proba={proba!r} label={label!r}")
+                except Exception as e:
+                    check(f"ensemble {acct} load", False, f"exception={e}")
+    except Exception as e:
+        check("ensemble import", False, f"exception={e}")
 
 for name, ok, detail in checks:
     print(f"CHECK:{name}:{'PASS' if ok else 'FAIL'}:{detail}")

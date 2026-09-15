@@ -252,11 +252,13 @@ class DrawdownProtector:
 
         Returns:
             True if drawdown protection was triggered.
+
+        ISSUE-059: daily_trades/weekly_trades counters are NO LONGER incremented here.
+        They count OPENS (via record_trade_open + DB sync) not CLOSES, so the anti-churn
+        check in TradeBlocker.daily_trade_count_limit actually limits opens per day.
         """
         self._state.daily_pnl += pnl
         self._state.weekly_pnl += pnl
-        self._state.daily_trades += 1
-        self._state.weekly_trades += 1
 
         # Update peak equity
         if equity > self._state.peak_equity:
@@ -274,6 +276,17 @@ class DrawdownProtector:
             )
             return True
         return False
+
+    def record_trade_open(self) -> None:
+        """Increment daily/weekly trade OPEN counters.
+
+        ISSUE-059: anti-churn counter must count OPENS, not CLOSES. Call this when a
+        new trade is opened (after insert_live_trade succeeds). The DB sync
+        (sync_pnl_from_db) also reloads these counts from get_pnl_summary which now
+        counts opens by timestamp.
+        """
+        self._state.daily_trades += 1
+        self._state.weekly_trades += 1
 
     def _init_period(self, now: datetime, equity: float) -> None:
         """Initialize daily/weekly tracking periods."""

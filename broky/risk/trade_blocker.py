@@ -132,7 +132,16 @@ class TradeBlocker:
             )
 
         # 5. Margin safety — block if margin required eats too much free margin
-        if inp.margin_required > 0 and inp.free_margin > 0:
+        # ISSUE-050: previously `if margin_required > 0 and free_margin > 0` — when the trade's
+        # own margin already exceeds equity (free_margin=0), the guard was SKIPPED precisely
+        # when margin is insufficient. Now block outright when free_margin <= 0.
+        if inp.margin_required > 0:
+            if inp.free_margin <= 0:
+                return BlockVerdict(
+                    blocked=True,
+                    reason=f"margin ${inp.margin_required:.2f} required but free margin ${inp.free_margin:.2f} <= 0 (insufficient)",
+                    block_name="margin_safety",
+                )
             if inp.margin_required > inp.free_margin * self.margin_safety_factor:
                 return BlockVerdict(
                     blocked=True,

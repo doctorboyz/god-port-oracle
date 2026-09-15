@@ -6,13 +6,13 @@ returns either {"action": "hold", "reason": ...} (rejection recorded) or
 file exhaustively covers each checkpoint so silent regressions in the
 guard order are caught.
 
-Checkpoint order (live_trader.py:1244-1444):
+Checkpoint order (live_trader.py run_once, post-2026-07-01 bugfix):
   1.  HOLD signal                          → hold, no rejection
   2.  buy_low_confidence                   → hold + rejection
   3.  equity unavailable                   → skip, no rejection
-  4.  drawdown:{reason}                    → hold + rejection
-  5.  position_limit                       → hold + rejection
-  6.  existing_position                    → hold + rejection
+  4.  existing_position                    → hold + rejection (C6: moved before DP)
+  5.  drawdown:{reason}                    → hold + rejection
+  6.  position_limit                       → hold + rejection
   7.  circuit_breaker:{reason}             → hold + rejection (learning_mode off)
   8.  cooldown                             → hold + rejection (learning_mode off)
   9.  calendar_avoid                       → hold + rejection (learning_mode off)
@@ -20,6 +20,12 @@ Checkpoint order (live_trader.py:1244-1444):
   11. ml_filter_circuit_break:{N}_fails    → hold + rejection
   12. ml_filter:{reason}                   → hold + rejection (multiplier == 0)
   13. ml_lot_too_small:{lots}              → hold + rejection (lots < 0.01)
+
+Note (C6 fix, 2026-07-01): _check_existing_position was moved BEFORE
+drawdown_protection.sync_pnl + check so an already-open position is
+detected before DP mutates state. The old order had position_limit (#5)
+before existing_position (#6); the new order is existing (#4) → drawdown
+(#5) → position_limit (#6).
 
 Each test installs a "happy path" that lets the cycle reach the target
 checkpoint, then flips one collaborator to trigger the block. Assertions
@@ -163,6 +169,9 @@ def _install_happy_path(trader, signal: Signal | None = None):
     # Risk checks (all pass)
     _obj("equity", trader, "_get_equity", return_value=1000.0)
     dd = MagicMock(); dd.check.return_value = (True, "ok")
+    # TradeBlocker (C1) reads dd.state.daily_trades / weekly_trades — must be ints
+    dd.state.daily_trades = 0
+    dd.state.weekly_trades = 0
     p = patch.object(trader, "_drawdown_protector", dd)
     patchers["dd"] = p; spies["dd"] = p.start()
     _path("open_trades", "metty.execution.live_trader.get_open_trades", return_value=[])
@@ -546,8 +555,13 @@ class TestBlockingOrder:
         finally:
             _teardown(patchers)
 
-    def test_position_limit_beats_existing_position(self, trader):
-        """position_limit is checked before existing_position."""
+    def test_existing_position_beats_position_limit(self, trader):
+        """C6 fix (2026-07-01): existing_position is now checked BEFORE position_limit.
+
+        Old order: position_limit (#5) → existing_position (#6).
+        New order: existing_position (#4) → drawdown (#5) → position_limit (#6).
+        With both triggers set, existing_position must win.
+        """
         patchers, spies, _ = _install_happy_path(trader)
         _replace(patchers, spies, "open_trades",
                  patch("metty.execution.live_trader.get_open_trades",
@@ -556,8 +570,8 @@ class TestBlockingOrder:
                  patch.object(trader, "_check_existing_position", return_value=True))
         try:
             result = trader.run_once()
-            assert "position limit" in result["reason"]
-            assert spies["reject"].call_args[0][1] == "position_limit"
+            assert "position already open" in result["reason"]
+            assert spies["reject"].call_args[0][1] == "existing_position"
         finally:
             _teardown(patchers)
 

@@ -42,7 +42,6 @@ IMPORTS=(
     "broky.ml.trade_outcome_predictor:compute_features_from_candles"
     "metty.execution.live_trader:LiveTrader"
     "metty.execution.m5_scalp_trader:M5ScalpTrader"
-    "metty.execution.scalp_trader:ScalpTrader"
     "metty.execution.live_collector:LiveCollector"
     "metty.core.db:get_connection"
     "metty.core.db:insert_live_trade"
@@ -50,7 +49,6 @@ IMPORTS=(
     "metty.notify.telegram_bot:TelegramNotifier"
     "metty.bridge.client:MT5Bridge"
     "broky.signals.m5_scalp_generator:generate_m5_scalp_signal"
-    "broky.signals.scalp_generator:generate_scalp_signal"
 )
 
 for entry in "${IMPORTS[@]}"; do
