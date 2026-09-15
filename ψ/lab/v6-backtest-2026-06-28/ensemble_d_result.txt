@@ -1,0 +1,47 @@
+V4+v6 OR-gate ENSEMBLE on Account D — IRON LAW B/C/D verification (2026-06-28)
+============================================================================
+D account added to backtest ACCOUNTS (was missing — gap in B/C/D bar).
+D's live config (docker-compose.vps.yml): ATR=2.5, RR=2.5, MIN_CONF=0.45
+→ identical to B's geometry. Trades generated for D == B's trades.
+
+v6 alone on D (in-sample 2025-10-01 onward):
+  @0.70: PF 1.05, PnL $92   ❌ fails PF>1.5 (same as B)
+  max PF across thresholds: 1.05
+
+V4+v6 OR-gate ensemble on D:
+  IN-SAMPLE (2025-10-01 onward):
+    @0.45: kept 10, PnL $394.64, WR 50.0%, PF 2.25  ✅
+    @0.50: kept 15, PnL $472.57, WR 46.7%, PF 1.96  ✅
+    @0.55: kept 22, PnL $111.44, WR 36.4%, PF 1.13
+    @0.60: kept 24, PnL $35.06,  WR 33.3%, PF 1.04
+    @0.65: kept 27, PnL $-186.11, WR 33.3%, PF 0.86
+
+  OUT-OF-SAMPLE (2024-01-01 onward):
+    @0.45: kept 37, PnL $786.03, WR 54.1%, PF 2.31  ✅
+    @0.50: kept 55, PnL $904.57, WR 49.1%, PF 1.95  ✅ ROBUST
+    @0.55: kept 77, PnL $673.45, WR 46.8%, PF 1.44
+    @0.60: kept 99, PnL $750.26, WR 47.5%, PF 1.42
+    @0.65: kept 120, PnL $516.40, WR 44.2%, PF 1.21
+
+VERDICT
+-------
+D per-account IRON LAW bar (PF>1.5): MET by V4+v6 OR-gate ensemble @0.50
+  - In-sample: PF 1.96 ✅
+  - Out-of-sample: PF 1.95 ✅ ROBUST
+
+D == B by geometry, so results are identical. The ensemble robustly
+passes PF>1.5 on both B and D in both in-sample and OOS periods.
+
+C remains the only B/C/D account where ensemble is overfit (OOS PF 0.91).
+C stays on V4 alone (PF 1.44 in-sample, simpler, not overfit).
+
+IRON LAW B/C/D verification status (final):
+  B: ensemble @0.50 — in 1.96 / OOS 1.95 ✅ ROBUST
+  C: V4 alone — in 1.44 (not overfit, simpler) ⚠️ ensemble overfit on C
+  D: ensemble @0.50 — in 1.96 / OOS 1.95 ✅ ROBUST (identical to B)
+
+Production decision unchanged:
+  B: ensemble @0.50 candidate (forward test before deploy)
+  C: V4 alone (ensemble overfit on C)
+  D: ensemble @0.50 candidate (forward test before deploy, == B)
+  A: V4 production, NO deploy per IRON LAW

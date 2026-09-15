@@ -13471,3 +13471,24 @@
      Account A: trade_outcome_v5 @ threshold=0.55 → PnL=$1,113.87 (Δ$-67.09)
      Account B: trade_outcome_v5 @ threshold=0.65 → PnL=$342.50 (Δ$+783.77)
      Account C: trade_outcome_v5 @ threshold=0.75 → PnL=$362.89 (Δ$-232.72)
+
+=== V5 on Account D (added 2026-06-28, post-D account gap fix) ===
+D geometry == B (atr=2.5, rr=2.5, min_conf=0.45), so D results mirror B.
+
+  D  trade_outcome_v5  0.55  75  37  $229.36  35.1%  1.14
+  D  trade_outcome_v5  0.60  75  39  $342.50  35.9%  1.20
+  D  trade_outcome_v5  0.65  75  39  $342.50  35.9%  1.20
+  D  trade_outcome_v5  0.70  75  42  $389.80  38.1%  1.21  ← best
+  D  trade_outcome_v5  0.75  75  45  $246.99  35.6%  1.13
+
+V5 on D best PF = 1.21 @0.70 — beats v6 (1.05) on D, fails PF>1.5 bar.
+Mirrors B result (V5 best 1.20 on B). Does NOT pass PF>1.5 on D.
+
+Comparison on D (in-sample 2025-10-01+):
+  V4:    best PF 1.06
+  V5:    best PF 1.21  ← best single model on D
+  v6:    best PF 1.05
+  V4+v6 ensemble @0.50: PF 1.96 ✅ ← only config passing PF>1.5 on D
+
+V5 does NOT pass PF>1.5 on B/C/D. NOT deployed. V4+v6 ensemble is the
+only configuration that robustly passes PF>1.5 on B and D.

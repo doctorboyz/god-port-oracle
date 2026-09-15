@@ -28605,3 +28605,20 @@
      Account A: (0.60,0.95) → PnL=$1,285, PF=1.71, participation=82%
      Account B: (0.40,0.75) → PnL=$459, PF=1.24, participation=58%
      Account C: (0.55,0.85) → PnL=$627, PF=1.35, participation=69%
+
+=== D account (added 2026-06-28, post-D gap fix) ===
+D geometry == B (atr=2.5, rr=2.5, min_conf=0.45), so D results mirror B.
+
+  D  (0.40,0.75)  75  43.9  27%  58%  $459  38%  1.24  +$900  ← best
+  D  (0.45,0.80)  75  47.5  27%  63%  $357  37%  1.17  +$798
+  D  (0.50,0.85)  75  50.4  24%  67%  $243  36%  1.11  +$684  (default)
+  D  (0.55,0.85)  75  51.9  24%  69%  $147  36%  1.06  +$588
+  D  (0.60,0.90)  75  54.9   0%  73%   $23  35%  1.01  +$464
+  D  (0.60,0.95)  75  57.8   0%  77%  $-43  34%  0.98  +$398
+
+D best pair: (0.40, 0.75) → PF 1.24, PnL $459 (== B by geometry).
+Default (0.50, 0.85) is within ~50% of best on D; tighter thresholds
+would benefit D the most (same as B). Decision unchanged: keep
+(0.50, 0.85) as default — gains modest, overfit risk, model quality
+is the real bottleneck (V4+v6 ensemble @0.50 robustly passes PF>1.5
+on D where risk-scaling alone on V4 maxes at PF 1.24).

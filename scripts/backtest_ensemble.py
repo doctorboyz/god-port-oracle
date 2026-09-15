@@ -29,24 +29,25 @@ from scripts.backtest_ml_filter import ACCOUNTS, compute_trade_features
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ensemble backtest V4+v6")
-    parser.add_argument("--models-a", required=True, help="First model dir (e.g. v4)")
-    parser.add_argument("--models-b", required=True, help="Second model dir (e.g. v6)")
+    parser = argparse.ArgumentParser(description="Ensemble backtest (N models)")
+    parser.add_argument("--models", nargs="+", required=True, help="Model dirs to ensemble (2+)")
     parser.add_argument("--thresholds", type=float, nargs="+", default=[0.55, 0.60, 0.65, 0.70])
     parser.add_argument("--start", default="2025-10-01")
     parser.add_argument("--equity", type=float, default=1000.0)
     parser.add_argument("--risk", type=float, default=0.02)
     parser.add_argument("--account", default="all")
     parser.add_argument("--mode", default="avg", choices=["avg", "and", "or", "max"],
-                        help="avg=mean(loss), and=block if both>thr, or=block if either>thr, max=block if max>thr")
+                        help="avg=mean(loss), and=block if all>thr, or=block if any>thr, max=block if max>thr")
     args = parser.parse_args()
 
-    pred_a = TradeOutcomePredictor(model_dir=args.models_a, loss_threshold=1.0)
-    pred_b = TradeOutcomePredictor(model_dir=args.models_b, loss_threshold=1.0)
-    if not pred_a.enabled or not pred_b.enabled:
-        print("❌ Failed to load one or both models")
-        sys.exit(1)
-    print(f"✅ Loaded {args.models_a} ({len(pred_a._models)} models) + {args.models_b} ({len(pred_b._models)} models)")
+    predictors = []
+    for mdir in args.models:
+        p = TradeOutcomePredictor(model_dir=mdir, loss_threshold=1.0)
+        if not p.enabled:
+            print(f"❌ Failed to load {mdir}")
+            sys.exit(1)
+        predictors.append((mdir, p))
+    print(f"✅ Loaded {len(predictors)} models: " + ", ".join(f"{m} ({len(p._models)})" for m, p in predictors))
 
     accounts = ACCOUNTS if args.account == "all" else [a for a in ACCOUNTS if a.name == args.account]
 
@@ -97,8 +98,8 @@ def main():
     df_d1_filtered = df_d1[df_d1.index >= cutoff - pd.Timedelta(days=400)].copy()
 
     print("=" * 100)
-    print(f"ENSEMBLE BACKTEST: avg({args.models_a}, {args.models_b})")
-    print(f"  Method: avg(loss_proba_a, loss_proba_b), skip if avg > threshold")
+    print(f"ENSEMBLE BACKTEST: {args.mode}({', '.join(args.models)})")
+    print(f"  Method: {args.mode}-gate over {len(predictors)} models, skip if {args.mode} > threshold")
     print(f"  Period: {args.start} onward")
     print("=" * 100)
 
@@ -145,20 +146,24 @@ def main():
                     if hasattr(trade.direction, "value")
                     else str(trade.direction).upper()
                 )
-                loss_a, _ = pred_a.predict_loss_proba(features=features, regime=regime, direction=direction)
-                loss_b, _ = pred_b.predict_loss_proba(features=features, regime=regime, direction=direction)
-                if loss_a is None or loss_b is None:
+                losses = []
+                for _, pred in predictors:
+                    lp, _ = pred.predict_loss_proba(features=features, regime=regime, direction=direction)
+                    if lp is None:
+                        losses = None
+                        break
+                    losses.append(lp)
+                if losses is None:
                     kept.append(trade)
                     continue
                 if args.mode == "avg":
-                    score = (loss_a + loss_b) / 2.0
-                    block = score > thr
+                    block = (sum(losses) / len(losses)) > thr
                 elif args.mode == "and":
-                    block = (loss_a > thr) and (loss_b > thr)
+                    block = all(l > thr for l in losses)
                 elif args.mode == "or":
-                    block = (loss_a > thr) or (loss_b > thr)
+                    block = any(l > thr for l in losses)
                 elif args.mode == "max":
-                    block = max(loss_a, loss_b) > thr
+                    block = max(losses) > thr
                 if block:
                     blocked += 1
                 else:

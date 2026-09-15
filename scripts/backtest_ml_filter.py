@@ -55,8 +55,13 @@ class AccountConfig:
 
 ACCOUNTS = [
     AccountConfig("A", atr_multiplier=3.0, risk_reward_ratio=3.0, min_confidence=0.35),
-    AccountConfig("B", atr_multiplier=2.5, risk_reward_ratio=2.5, min_confidence=0.45),
-    AccountConfig("C", atr_multiplier=2.0, risk_reward_ratio=2.0, min_confidence=0.60),
+    # Geometry MUST match docker-compose.vps.yml live config exactly.
+    # B: ATR_MULTIPLIER_B=2.0, RR_RATIO_B=2.5, MIN_CONFIDENCE_B=0.45
+    # C: ATR_MULTIPLIER_C=2.0, RR_RATIO_C=2.5, MIN_CONFIDENCE_C=0.45 (NOT 0.60 — earlier mismatch fixed 2026-06-29)
+    # D: ATR_MULTIPLIER_D=2.5, RR_RATIO_D=2.5, MIN_CONFIDENCE_D=0.45
+    AccountConfig("B", atr_multiplier=2.0, risk_reward_ratio=2.5, min_confidence=0.45),
+    AccountConfig("C", atr_multiplier=2.0, risk_reward_ratio=2.5, min_confidence=0.45),
+    AccountConfig("D", atr_multiplier=2.5, risk_reward_ratio=2.5, min_confidence=0.45),
 ]
 
 
@@ -304,7 +309,7 @@ def main():
     parser.add_argument("--start", default="2024-01-01", help="Start date (default: 2024-01-01)")
     parser.add_argument("--equity", type=float, default=1000.0, help="Initial equity (default: 1000)")
     parser.add_argument("--risk", type=float, default=0.02, help="Risk per trade (default: 0.02)")
-    parser.add_argument("--account", choices=["A", "B", "C", "all"], default="all", help="Account to test (default: all)")
+    parser.add_argument("--account", choices=["A", "B", "C", "D", "all"], default="all", help="Account to test (default: all)")
     parser.add_argument("--verbose", action="store_true", help="Show per-trade details")
 
     args = parser.parse_args()

@@ -1,0 +1,40 @@
+3-MODEL ENSEMBLE (V4+V5+v6) OR-gate OUT-OF-SAMPLE (2024-01-01 onward)
+================================================================
+Tested: does adding V5 to V4+v6 ensemble fix C's OOS overfit?
+
+A: unfiltered 289 trades, PnL $1333.55, WR 41.2%, PF 1.25
+  @0.45: kept 12, PnL $114.19, WR 41.7%, PF 1.27
+  @0.50: kept 18, PnL $102.49, WR 44.4%, PF 1.18
+  @0.55: kept 30, PnL $-42.20, WR 40.0%, PF 0.95
+  @0.60: kept 44, PnL $1039.40, WR 47.7%, PF 2.17  ✅
+  @0.65: kept 65, PnL $1533.26, WR 49.2%, PF 2.38  ✅
+
+B: unfiltered 319 trades, PnL $-579.57, WR 36.7%, PF 0.91
+  @0.45: kept 10, PnL $246.43, WR 30.0%, PF 1.72  ✅
+  @0.50: kept 17, PnL $447.93, WR 35.3%, PF 1.89  ✅
+  @0.55: kept 31, PnL $483.61, WR 41.9%, PF 1.68  ✅
+  @0.60: kept 52, PnL $456.38, WR 42.3%, PF 1.44
+  @0.65: kept 73, PnL $222.52, WR 38.4%, PF 1.13
+
+C: unfiltered 352 trades, PnL $280.66, WR 36.1%, PF 1.05
+  @0.45: kept 6, PnL $-182.61, WR 0.0%, PF 0.00   ❌
+  @0.50: kept 17, PnL $-15.92, WR 17.6%, PF 0.96  ❌
+  @0.55: kept 33, PnL $-228.26, WR 24.2%, PF 0.72 ❌
+  @0.60: kept 52, PnL $9.83, WR 28.8%, PF 1.01    ❌
+  @0.65: kept 77, PnL $52.06, WR 32.5%, PF 1.03   ❌
+
+VERDICT
+-------
+B: ROBUST ✅ — PF 1.89 @0.50 (vs 2-model 1.95, marginal change)
+C: OVERFIT ❌ — max PF 1.03, adding V5 did NOT fix OOS overfit
+
+Adding V5 to ensemble does not fix C. C's OOS unfiltered baseline (PF 1.05)
+is structurally weak in 2024 — no ensemble can lift a weak baseline.
+
+Compare 2-model (V4+v6) OOS:
+  B @0.50: PF 1.95 → 3-model @0.50: PF 1.89 (slight drop, V5 adds noise)
+  C @0.50: PF 0.91 → 3-model @0.50: PF 0.96 (marginal, still fail)
+
+Conclusion: 2-model V4+v6 OR-gate ensemble @0.50 remains the best
+production candidate for B. V4 alone for C. V5 does not improve the
+ensemble. C OOS is structurally unsolvable with current data.

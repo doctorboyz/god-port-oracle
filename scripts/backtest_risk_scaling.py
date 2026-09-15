@@ -159,7 +159,7 @@ def main() -> int:
     parser.add_argument("--start", default="2024-01-01", help="Start date (default: 2024-01-01)")
     parser.add_argument("--equity", type=float, default=1000.0, help="Initial equity (default: 1000)")
     parser.add_argument("--risk", type=float, default=0.02, help="Risk per trade (default: 0.02)")
-    parser.add_argument("--account", choices=["A", "B", "C", "all"], default="all", help="Account to test (default: all)")
+    parser.add_argument("--account", choices=["A", "B", "C", "D", "all"], default="all", help="Account to test (default: all)")
     args = parser.parse_args()
 
     model_dir = args.model
