@@ -1,5 +1,6 @@
 """SQLite database schema and connection management for ML data collection."""
 
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -363,6 +364,27 @@ CREATE TABLE IF NOT EXISTS rejected_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_rejected_ts ON rejected_signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_rejected_reason ON rejected_signals(rejection_reason);
+
+-- Account portfolio: variant definitions (variant generator writes these)
+CREATE TABLE IF NOT EXISTS variants (
+    id INTEGER PRIMARY KEY,
+    variant_id TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    sweet_spot_basis TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Account portfolio: append-only audit log (Kappa #1 lifetime memory)
+CREATE TABLE IF NOT EXISTS portfolio_events (
+    id INTEGER PRIMARY KEY,
+    account_name TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    metrics_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_events_account ON portfolio_events(account_name, created_at);
 """
 
 
@@ -535,6 +557,15 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("trade_outcomes", "atr_multiplier", "REAL"),
         ("trade_outcomes", "rr_ratio", "REAL"),
         ("trade_outcomes", "min_confidence_threshold", "REAL"),
+        # Account portfolio (P-accounts, cent real / paper-parallel)
+        ("accounts", "account_type", "TEXT NOT NULL DEFAULT 'demo'"),
+        ("accounts", "variant_id", "TEXT NOT NULL DEFAULT ''"),
+        ("accounts", "portfolio_status", "TEXT NOT NULL DEFAULT 'running'"),
+        ("accounts", "frozen_reason", "TEXT NOT NULL DEFAULT ''"),
+        ("accounts", "frozen_at", "TEXT"),
+        ("accounts", "cooldown_until", "TEXT"),
+        ("accounts", "peak_equity", "REAL"),
+        ("accounts", "baseline_balance", "REAL"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -577,6 +608,269 @@ def insert_account(
         )
         conn.commit()
         return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Account portfolio (P-accounts) — variants, freeze gate, audit events
+# ---------------------------------------------------------------------------
+
+
+def insert_variant(
+    variant_id: str,
+    label: str,
+    params_json: "dict | str",
+    sweet_spot_basis: str,
+    db_path: Optional[Path | str] = None,
+) -> int:
+    """Insert a variant definition (idempotent on variant_id). Returns row id.
+
+    params_json accepts the parsed dict (serialized here) or a JSON string.
+    """
+    if not isinstance(params_json, str):
+        params_json = json.dumps(params_json)
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """INSERT INTO variants (variant_id, label, params_json, sweet_spot_basis)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(variant_id) DO UPDATE SET
+                 label=excluded.label,
+                 params_json=excluded.params_json,
+                 sweet_spot_basis=excluded.sweet_spot_basis""",
+            (variant_id, label, params_json, sweet_spot_basis),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_variant(variant_id: str, db_path: Optional[Path | str] = None) -> Optional[dict]:
+    """Fetch a variant definition by variant_id. Returns dict or None."""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT variant_id, label, params_json, sweet_spot_basis, created_at "
+            "FROM variants WHERE variant_id = ?",
+            (variant_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "variant_id": row[0],
+            "label": row[1],
+            "params": json.loads(row[2]),
+            "sweet_spot_basis": row[3],
+            "created_at": row[4],
+        }
+    finally:
+        conn.close()
+
+
+def get_account_id_by_name(
+    account_name: str,
+    db_path: Optional[Path | str] = None,
+) -> Optional[int]:
+    """Resolve an account's DB primary key by name. None if missing."""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM accounts WHERE name = ?", (account_name,)
+        ).fetchone()
+        return row[0] if row is not None else None
+    finally:
+        conn.close()
+
+
+def get_account_portfolio_state(
+    account_name: str,
+    db_path: Optional[Path | str] = None,
+) -> Optional[dict]:
+    """Read portfolio control state for one account (freeze gate input).
+
+    Returns dict with portfolio_status, frozen_reason, cooldown_until,
+    peak_equity, baseline_balance — or None if the account doesn't exist.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, portfolio_status, frozen_reason, frozen_at, cooldown_until, "
+            "peak_equity, baseline_balance, account_type, variant_id "
+            "FROM accounts WHERE name = ?",
+            (account_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "account_id": row[0],
+            "portfolio_status": row[1],
+            "frozen_reason": row[2],
+            "frozen_at": row[3],
+            "cooldown_until": row[4],
+            "peak_equity": row[5],
+            "baseline_balance": row[6],
+            "account_type": row[7],
+            "variant_id": row[8],
+        }
+    finally:
+        conn.close()
+
+
+def set_portfolio_status(
+    account_name: str,
+    status: str,
+    reason: str = "",
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """Set portfolio_status ('running' | 'frozen' | 'closed'). Returns True if a row changed."""
+    if status not in ("running", "frozen", "closed"):
+        raise ValueError(f"invalid portfolio_status: {status!r}")
+    conn = get_connection(db_path)
+    try:
+        frozen_at = "datetime('now')" if status == "frozen" else "NULL"
+        cursor = conn.execute(
+            f"UPDATE accounts SET portfolio_status = ?, frozen_reason = ?, "
+            f"frozen_at = {frozen_at} WHERE name = ?",
+            (status, reason, account_name),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_cooldown(
+    account_name: str,
+    until_iso: str,
+    reason: str,
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """Set a persistent cooldown_until timestamp (circuit-breaker pause)."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE accounts SET cooldown_until = ? WHERE name = ?",
+            (until_iso, account_name),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def clear_cooldown(
+    account_name: str,
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """Clear a persistent cooldown (after it expires, or on manual resume)."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE accounts SET cooldown_until = NULL WHERE name = ?",
+            (account_name,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_peak_equity(
+    account_name: str,
+    equity: float,
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """High-water mark update: only raises peak_equity, never lowers it."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE accounts SET peak_equity = ? "
+            "WHERE name = ? AND (peak_equity IS NULL OR peak_equity < ?)",
+            (equity, account_name, equity),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_consecutive_losses(
+    account_id: int,
+    db_path: Optional[Path | str] = None,
+) -> int:
+    """Count the trailing run of losing closed trades (newest first) for an account."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT pnl FROM live_trades "
+            "WHERE account_id = ? AND is_open = 0 AND pnl IS NOT NULL "
+            "ORDER BY exit_time DESC, id DESC",
+            (account_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    streak = 0
+    for (pnl,) in rows:
+        if pnl < 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def log_portfolio_event(
+    account_name: str,
+    event_type: str,
+    reason: str,
+    metrics: Optional[dict] = None,
+    db_path: Optional[Path | str] = None,
+) -> int:
+    """Append an audit event (Kappa #1: append-only, never delete)."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """INSERT INTO portfolio_events (account_name, event_type, reason, metrics_json)
+               VALUES (?, ?, ?, ?)""",
+            (account_name, event_type, reason,
+             json.dumps(metrics) if metrics is not None else None),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_recent_portfolio_events(
+    account_name: Optional[str] = None,
+    limit: int = 20,
+    db_path: Optional[Path | str] = None,
+) -> list:
+    """Read recent audit events (newest first), optionally filtered by account."""
+    conn = get_connection(db_path)
+    try:
+        if account_name:
+            rows = conn.execute(
+                "SELECT id, account_name, event_type, reason, metrics_json, created_at "
+                "FROM portfolio_events WHERE account_name = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (account_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, account_name, event_type, reason, metrics_json, created_at "
+                "FROM portfolio_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": r[0], "account_name": r[1], "event_type": r[2],
+                "reason": r[3], "metrics": json.loads(r[4]) if r[4] else None,
+                "created_at": r[5],
+            }
+            for r in rows
+        ]
     finally:
         conn.close()
 

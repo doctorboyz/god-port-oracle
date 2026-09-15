@@ -503,6 +503,53 @@ def run_bridge_status(db_path: str, notifier, accounts: list):
             logger.error("[BridgeStatus] Failed: %s", e)
 
 
+def _seed_portfolio_accounts(accounts: list, db_path) -> None:
+    """Seed + enroll P-accounts (P1-P99) in this container's DB.
+
+    Each P-engine container runs ONE account against its own DB file, so the
+    accounts row must exist before LiveTrader resolves its account_id. This
+    also seeds the variant definitions and enrolls the account (variant_id +
+    baseline + peak + running status + audit event) — self-contained startup,
+    zero extra deploy steps. Idempotent: skips accounts already seeded.
+
+    Values come from per-account env:
+    INITIAL_BALANCE_P1, LEVERAGE_P1, MT5_BRIDGE_P1_HOST/PORT, SIGNAL_GROUP_P1.
+    """
+    from metty.core.db import get_account_id_by_name, insert_account, insert_variant
+    from scripts.generate_variants import (
+        VARIANT_DEFS, build_params, enroll_accounts,
+    )
+
+    for acct_name in accounts:
+        acct_name = acct_name.strip().upper()
+        if not (len(acct_name) >= 2 and acct_name[0] == "P" and acct_name[1:].isdigit()):
+            continue  # legacy A-D seeding handled in main()
+        if get_account_id_by_name(acct_name, Path(db_path)) is not None:
+            continue  # already seeded
+        try:
+            insert_account(
+                name=acct_name,
+                balance=float(os.environ.get(f"INITIAL_BALANCE_{acct_name}", "100")),
+                leverage=int(os.environ.get(f"LEVERAGE_{acct_name}", "2000")),
+                bridge_host=os.environ.get(f"MT5_BRIDGE_{acct_name}_HOST",
+                                           f"mt5{acct_name.lower()}"),
+                bridge_port=int(os.environ.get(f"MT5_BRIDGE_{acct_name}_PORT", "8001")),
+                signal_group=os.environ.get(f"SIGNAL_GROUP_{acct_name}", "portfolio"),
+                db_path=Path(db_path),
+            )
+            for defn in VARIANT_DEFS:
+                insert_variant(defn["variant_id"], defn["label"], build_params(defn),
+                               defn["sweet_spot_basis"], Path(db_path))
+            baseline = float(os.environ.get(f"INITIAL_BALANCE_{acct_name}", "100"))
+            acct_type = os.environ.get(f"ACCOUNT_TYPE_{acct_name}", "demo")
+            enrolled = enroll_accounts([acct_name], Path(db_path),
+                                       baseline_balance=baseline,
+                                       account_type=acct_type)
+            logger.info("Seeded portfolio account %s (enrolled: %s)", acct_name, enrolled)
+        except Exception as exc:
+            logger.warning("Could not seed portfolio account %s: %s", acct_name, exc)
+
+
 def main():
     phase = os.environ.get("TRADING_PHASE", "both")
     accounts = os.environ.get("ACCOUNTS", "A,B,C").split(",")
@@ -537,6 +584,11 @@ def main():
             logger.info("Seeded account %s", acct_name)
         except Exception:
             pass  # Account already exists
+
+    # Seed portfolio accounts (P1-P99): each P-engine container runs ONE
+    # account against its own DB file, so the row must exist before
+    # LiveTrader resolves its account_id.
+    _seed_portfolio_accounts(accounts, db_path)
 
     # Setup Telegram notifier
     tg_token = os.environ.get("TG_BOT_TOKEN", "")

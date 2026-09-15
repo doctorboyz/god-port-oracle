@@ -30,6 +30,7 @@ from broky.risk.circuit_breaker import CircuitBreaker
 from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_config, get_buy_min_confidence
 from broky.risk.trade_blocker import TradeBlocker, BlockInput
 from metty.core.account_registry import get_display_name, get_account_config, get_bridge_config
+from metty.core.portfolio_gate import entry_hour_gate, portfolio_gate
 from broky.risk.position_sizing import (
     calculate_position_size,
     calculate_stop_loss,
@@ -54,6 +55,13 @@ logger = logging.getLogger(__name__)
 
 # Account IDs in the database
 ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _is_portfolio_account(name: str) -> bool:
+    """P-accounts (cent portfolio) — account_id resolved from the accounts
+    table by name at init instead of the static ACCOUNT_IDS map, because each
+    P-engine container runs against its own database file."""
+    return len(name) >= 2 and name[0] == "P" and name[1:].isdigit()
 
 # Risk per trade by account (conservative for demo)
 ACCOUNT_RISK = {"A": 0.01, "B": 0.02, "C": 0.02, "D": 0.02}
@@ -117,10 +125,10 @@ class LiveTrader:
         self.account = account.upper()
         # ISSUE M3: fail loud on unknown account — silent fallback to account_id=3
         # routed Real-A trades to demo "C" in DB → kill switch reacted to demo PnL.
-        if self.account not in ACCOUNT_IDS:
+        if self.account not in ACCOUNT_IDS and not _is_portfolio_account(self.account):
             raise ValueError(
-                f"Unknown account '{self.account}' — must be one of {list(ACCOUNT_IDS)}. "
-                f"Check ACCOUNT_NAME env var."
+                f"Unknown account '{self.account}' — must be one of {list(ACCOUNT_IDS)} "
+                f"or a P-account (P1-P99). Check ACCOUNT_NAME env var."
             )
         self.display_name = get_display_name(self.account)
         self.db_path = db_path
@@ -167,7 +175,20 @@ class LiveTrader:
         # ISSUE M3: previously `ACCOUNT_IDS.get(self.account, 3)` silently fell back to 3 (C)
         # if account name was typo'd. Now __init__ raises loud for unknown accounts, so this
         # is guaranteed to be a known account — but assert anyway to be defensive.
-        self.account_id = ACCOUNT_IDS[self.account]
+        if self.account in ACCOUNT_IDS:
+            self.account_id = ACCOUNT_IDS[self.account]
+        else:
+            # P-accounts: resolve account_id from the accounts table by name.
+            # Each P-engine container runs against its own DB file, so the
+            # static map doesn't apply. Fail loud if the row is missing.
+            from metty.core.db import get_account_id_by_name
+            resolved = get_account_id_by_name(self.account, self.db_path)
+            if resolved is None:
+                raise ValueError(
+                    f"Account '{self.account}' not found in accounts table "
+                    f"(db_path={self.db_path}) — seed it before starting the engine."
+                )
+            self.account_id = resolved
         # ISSUE-067: previously hardcoded ACCOUNT_RISK.get(self.account, 0.02) — env override
         # RISK_PER_TRADE_{account} was silently ignored. Now env wins, then registry, then hardcoded.
         _env_risk = os.environ.get(f"RISK_PER_TRADE_{self.account}")
@@ -1827,6 +1848,46 @@ class LiveTrader:
                     f"counter-trend {signal.signal_type.value} vs {d1_trend} D1 "
                     f"without reversal evidence (no HH/LL + OB/OS + divergence) — blocked"
                 ),
+                "signal": signal,
+            }
+
+        # 4a1b. Entry-hour window gate (P-accounts, sweet-spot golden hours).
+        # Blocks actionable signals outside ENTRY_HOURS_<NAME> / inside
+        # BLOCKED_HOURS_<NAME> (UTC). No env config → no-op (legacy A-D).
+        # Demo-D lesson applies in reverse: the window must gate, not starve —
+        # every P variant keeps min_confidence <= 0.50 so trades stay reachable.
+        _candle_ts = (
+            m5.index[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+            if hasattr(m5.index[-1], "to_pydatetime")
+            else datetime.now(timezone.utc)
+        )
+        _hour_ok, _hour_reason = entry_hour_gate(_candle_ts, self.account)
+        if not _hour_ok:
+            self._record_rejection(
+                signal, f"entry_hour_blocked:{_hour_reason}",
+                session, d1_trend, candles,
+            )
+            return {
+                "action": "hold",
+                "reason": f"entry-hour gate: {_hour_reason}",
+                "signal": signal,
+            }
+
+        # 4a1c. Portfolio freeze/cooldown gate (P-accounts, DB-backed kill
+        # switch written by scripts/portfolio_manager.py). Frozen/cooled
+        # accounts keep monitoring open positions (SL/TP still work) but
+        # never open new ones. Survives container restarts, unlike the
+        # in-memory DrawdownProtector. Accounts with no portfolio state
+        # (A-D in oracle.db) pass through unchanged.
+        _pf_ok, _pf_reason = portfolio_gate(self.account, self.db_path)
+        if not _pf_ok:
+            self._record_rejection(
+                signal, f"portfolio_gate:{_pf_reason}",
+                session, d1_trend, candles,
+            )
+            return {
+                "action": "hold",
+                "reason": f"portfolio gate: {_pf_reason}",
                 "signal": signal,
             }
 

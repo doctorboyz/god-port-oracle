@@ -89,12 +89,18 @@ def get_active_accounts() -> list[str]:
 
 
 def get_display_name(account: str) -> str:
-    """Return human-readable label for an account: 'Real-A', 'Demo-B', etc.
+    """Return human-readable label for an account: 'Real-A', 'Demo-B', 'Cent-P1'.
 
     Reads ACCOUNT_TYPE_<NAME> env var, defaults to 'real' for A, 'demo' for others.
+    Portfolio cent accounts set ACCOUNT_TYPE_Pn=cent_real when live.
     """
     account_type = os.environ.get(f"ACCOUNT_TYPE_{account.upper()}", "real" if account.upper() == "A" else "demo")
-    prefix = "Real" if account_type == "real" else "Demo"
+    if account_type == "cent_real":
+        prefix = "Cent"
+    elif account_type == "real":
+        prefix = "Real"
+    else:
+        prefix = "Demo"
     return f"{prefix}-{account.upper()}"
 
 
@@ -227,9 +233,11 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
     default_bridge_port = _BASE_BRIDGE_PORT + index
     default_bridge_host = f"mt5{name.lower()}"
 
-    # Account type: "real" or "demo" — determines risk limits and display name
+    # Account type: "real", "demo", or "cent_real" (portfolio P-accounts).
+    # cent_real is real money → gets the conservative real-money defaults.
     # Must be read early because symbol, risk, and drawdown defaults depend on it
     account_type = os.environ.get(f"ACCOUNT_TYPE_{name}", "real" if name == "A" else "demo")
+    _is_real_money = account_type in ("real", "cent_real")
 
     # Check if running inside Docker (use mt5X hostnames) or locally (use vpsdeluna)
     # The env var MT5_BRIDGE_<NAME>_HOST overrides everything
@@ -241,7 +249,7 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
 
     # Symbol: real accounts use XAUUSDm (Standard), demo accounts use XAUUSD (Pro)
     # Can be overridden with MT5_SYMBOL_<NAME> env var
-    default_symbol = "XAUUSDm" if account_type == "real" else "XAUUSD"
+    default_symbol = "XAUUSDm" if _is_real_money else "XAUUSD"
     symbol = os.environ.get(f"MT5_SYMBOL_{name}", default_symbol)
 
     # Signal group: cycle through volume/ob_os/ma, override with env var
@@ -251,20 +259,20 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
         default_groups[index % len(default_groups)],
     )
 
-    # Risk per trade: default 1% for real accounts, 2% for demo
-    default_risk = 0.01 if account_type == "real" else 0.02
+    # Risk per trade: default 1% for real money, 2% for demo
+    default_risk = 0.01 if _is_real_money else 0.02
     risk_per_trade = float(os.environ.get(
         f"RISK_PER_TRADE_{name}",
         os.environ.get("RISK_PER_TRADE", str(default_risk)),
     ))
 
-    # BUY confidence: stricter for real accounts (0.50 vs 0.45 for demo)
+    # BUY confidence: stricter for real money (0.50 vs 0.45 for demo)
     # BUY has lower WR than SELL, so real accounts need higher confidence
-    default_buy_confidence = 0.50 if account_type == "real" else 0.45
+    default_buy_confidence = 0.50 if _is_real_money else 0.45
 
     # Drawdown config from env vars with sensible defaults
     # Real accounts: strict 20/30/30%, Demo accounts: lenient 10/20/50%
-    if account_type == "real":
+    if _is_real_money:
         default_daily = 0.20
         default_weekly = 0.30
         default_account = 0.30
