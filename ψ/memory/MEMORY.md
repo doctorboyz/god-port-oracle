@@ -1,6 +1,10 @@
 # God Port Oracle — Memory Index
 
+## Current Handoff
+- [ψ/HANDOFF.md](../HANDOFF.md) — **ฉบับปัจจุบันเสมอ** · ต่องานจากเล่มนี้เล่มเดียว (สถานะงานล่าสุด จุดหยุด ขั้นถัดไป คำเตือน) — ปัจจุบัน: portfolio-cent P1-P3 รอคุณหมอเปิดบช. demo ผ่าน VNC ใส่ credential ที่ .env
+
 ## Learnings
+- [VPS Deploy Verification](learnings/2026-09-16_vps-deploy-verification.md) — bridge=raw socket ไม่ใช่ HTTP, first boot ช้า 10 นาที, path ต้อง ls จริง, baseline→verify พิสูจน์ "ไม่โดนแตะ"
 - [VPS Bridge Restart Architecture](learnings/2026-05-03_vps-bridge-restart.md) — 3-phase startup, user abc, VNC, RPyC bridge on 3 accounts
 - [Wine Prefix Ownership Bug](learnings/2026-05-04_wine-prefix-ownership.md) — chown must happen after gmag11 exits, not after file existence
 - [gmag11 Race Condition](learnings/2026-05-04_gmag11-race-condition.md) — wait for PID, not file existence
@@ -98,4 +102,4 @@
 - [2026-06-19 Account Type + Ghost Positions + Deploy](retrospectives/2026-06/19/22.18_account-type-ghost-positions-deploy.md) — Real-A/Demo-B labels, ghost position fix (MT5 source of truth), 4 accounts on VPS
 - [2026-06-19 Ten Issues Fix + Deploy + One-hot](retrospectives/2026-06/19/23.12_ten-issues-fix-deploy-onehot-regime.md) — 10 issues fixed, PersistentMT5Bridge removed, one-hot regime encoding, deploy verified
 - [2026-06-20 V6 Deploy + Account D Activation](retrospectives/2026-06/20/00.01_deploy-v6-and-account-d.md) — V6 model deployed, Account D activated, MT5 credential fixes, initial balances corrected
-- [2026-06-26 Dynamic Max Positions Deploy](retrospectives/2026-06/26/06.05_dynamic-max-positions-deploy.md) — ghost trade fix, drawdown equity fix, dynamic max_positions from equity deployed
+- [2026-06-26 Dynamic Max Positions Deploy](retrospectives/2026-06/26/06.05_dynamic-max-positions-deploy.md) — ghost trade fix, drawdown equity fix, dynamic max_positions from equity deployed- [AEGIS gate blocks Demo-D 53 days](learnings/2026-08-25_aegis-gate-blocks-demo-d.md) — counter-trend gate บล็อกทุก signal ตั้งแต่ 2026-07-02

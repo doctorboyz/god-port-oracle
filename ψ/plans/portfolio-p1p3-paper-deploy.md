@@ -44,8 +44,10 @@ PORTFOLIO_DATA_DIR=/opt/god-port/data
 ## ลำดับ deploy
 
 ```bash
-# 0. บน VPS: pull branch 2026-07-01-live-trader-bugfix ที่มี commit นี้
+# 0. บน VPS: repo checkout อยู่ที่ /opt/god-port-oracle (ไม่ใช่ /opt/god-port)
+#    pull branch 2026-07-01-live-trader-bugfix ที่มี commit นี้
 #    (image ที่ build จะมี fix afb6d5d อยู่ด้วย — จำเป็น เพราะ engine ใหม่ใช้ AEGIS gate)
+#    ทุก docker compose command ด้านล่างรันจาก cd /opt/god-port-oracle
 
 mkdir -p /opt/god-port/data/p1 /opt/god-port/data/p2 /opt/god-port/data/p3
 
@@ -66,7 +68,7 @@ docker ps --format '{{.Names}} {{.Status}}' | grep -E 'oracle-engine|mt5[a-d]'
 
 # 6. host crontab — portfolio manager ทุก 30 นาที (freeze/DD/CB + weekly summary)
 crontab -e
-# */30 * * * * cd /opt/god-port && source .env && PORTFOLIO_ACCOUNTS=P1,P2,P3 \
+# */30 * * * * cd /opt/god-port-oracle && source .env && PORTFOLIO_ACCOUNTS=P1,P2,P3 \
 #   ACCOUNTS=P1,P2,P3 MT5_BRIDGE_P1_HOST=127.0.0.1 MT5_BRIDGE_P1_PORT=5009 \
 #   MT5_BRIDGE_P2_HOST=127.0.0.1 MT5_BRIDGE_P2_PORT=5010 \
 #   MT5_BRIDGE_P3_HOST=127.0.0.1 MT5_BRIDGE_P3_PORT=5011 \
