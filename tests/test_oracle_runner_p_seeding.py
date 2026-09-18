@@ -87,3 +87,30 @@ class TestSeedPortfolioAccounts:
         monkeypatch.setenv("INITIAL_BALANCE_P1", "100")
         _seed_portfolio_accounts(["P1"], p_db)
         assert get_account_portfolio_state("P1", p_db)["account_type"] == "cent_real"
+    def test_seed_importable_with_only_scripts_dir_on_path(self, tmp_path):
+        """2026-09-18 container crash-loop regression: running as
+        `python scripts/oracle_runner.py` puts ONLY /app/scripts on
+        sys.path (repo root absent), so the lazy
+        `from scripts.generate_variants import ...` raised
+        ModuleNotFoundError — oracle-engine-train crash-looped
+        (RestartCount=9). Fix inserts repo root before that import.
+        This test strips the repo root from sys.path and calls the
+        function: it must get past the import (the empty DB then
+        raises OperationalError, which init_db prevents in real flow).
+        """
+        import sqlite3
+
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        saved = list(sys.path)
+        # mimic container: only scripts/ dir on the path
+        sys.path = [p for p in sys.path if p not in ("", ".", repo_root)]
+        sys.path.append(str(Path(__file__).resolve().parent.parent / "scripts"))
+        sys.modules.pop("scripts", None)
+        sys.modules.pop("scripts.generate_variants", None)
+        try:
+            try:
+                _seed_portfolio_accounts(["P9"], tmp_path / "x.db")
+            except sqlite3.OperationalError:
+                pass  # empty DB — expected; the import is what must survive
+        finally:
+            sys.path[:] = saved

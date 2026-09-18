@@ -516,6 +516,14 @@ def _seed_portfolio_accounts(accounts: list, db_path) -> None:
     INITIAL_BALANCE_P1, LEVERAGE_P1, MT5_BRIDGE_P1_HOST/PORT, SIGNAL_GROUP_P1.
     """
     from metty.core.db import get_account_id_by_name, insert_account, insert_variant
+    # 2026-09-18: when this runs as `python scripts/oracle_runner.py` (the
+    # container entrypoint), sys.path[0] is /app/scripts — the repo root is
+    # NOT on the path, so `from scripts.generate_variants import ...` raised
+    # ModuleNotFoundError and crash-looped the container. Add the repo root
+    # (parent of this file's directory) before importing the sibling module.
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
     from scripts.generate_variants import (
         VARIANT_DEFS, build_params, enroll_accounts,
     )
