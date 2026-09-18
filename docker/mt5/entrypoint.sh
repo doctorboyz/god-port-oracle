@@ -152,7 +152,10 @@ as_abc wine python -m pip install 'numpy<2' --force-reinstall || {
 }
 
 echo "[Phase 1.5] Installing rpyc in Wine Python (for bridge server)..."
-as_abc wine python -m pip install 'rpyc>=5.2.0' || {
+# 2026-09-18: pin <6.0.0 — unpinned install pulled rpyc 6.x on fresh builds
+# (mt5p1-3 got 6.0.2) which rejects 5.x engine clients with
+# "invalid message type: 18". Engine Dockerfile pins ">=5.2.0,<6.0.0".
+as_abc wine python -m pip install 'rpyc>=5.2.0,<6.0.0' || {
     echo "[Phase 1.5] WARNING: rpyc Wine install failed"
 }
 

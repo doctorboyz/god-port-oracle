@@ -216,35 +216,54 @@ services:
       - ML_ENSEMBLE_MODE_C=${ML_ENSEMBLE_MODE_C:-or}
       - ML_ENSEMBLE_MODE_D=${ML_ENSEMBLE_MODE_D:-or}
       - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
-      - ML_ENSEMBLE_THRESH=${ML_ENSEMBLE_THRESH:-0.45}
+      # 2026-09-18 bet strategy (คุณหมอ: "trade ตามแผนใหม่ใน B C D ได้เลย"):
+      # OR @0.50 ทุกใบ — same as Demo-D baseline (Q3). B ยกจาก 0.45 → 0.50.
+      - ML_ENSEMBLE_THRESH=${ML_ENSEMBLE_THRESH:-0.50}
       - ML_ENSEMBLE_THRESH_C=${ML_ENSEMBLE_THRESH_C:-0.50}
       # Demo-D slow-but-sure (2026-08-23): @0.50 → OOS PF 1.66, MaxDD 17.3%, 91 trades
       # Tighter than B's 0.45 — D is the primary slow-but-sure test bed.
       - ML_ENSEMBLE_THRESH_D=${ML_ENSEMBLE_THRESH_D:-0.50}
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
-      - MAX_POSITIONS_B=${MAX_POSITIONS_B:-5}
-      - MAX_POSITIONS_C=${MAX_POSITIONS_C:-5}
+      # 2026-09-18 bet strategy: max_positions=1 ทุกใบ (proposal §4 กติการ่วม)
+      - MAX_POSITIONS_B=${MAX_POSITIONS_B:-1}
+      - MAX_POSITIONS_C=${MAX_POSITIONS_C:-1}
       - MAX_POSITIONS_D=${MAX_POSITIONS_D:-1}
       - EQUITY_PER_POSITION_B=${EQUITY_PER_POSITION_B:-200}
       - EQUITY_PER_POSITION_C=${EQUITY_PER_POSITION_C:-200}
       - EQUITY_PER_POSITION_D=${EQUITY_PER_POSITION_D:-200}
-      - MAX_POSITIONS_CAP_B=${MAX_POSITIONS_CAP_B:-5}
-      - MAX_POSITIONS_CAP_C=${MAX_POSITIONS_CAP_C:-5}
-      - MAX_POSITIONS_CAP_D=${MAX_POSITIONS_CAP_D:-5}
+      - MAX_POSITIONS_CAP_B=${MAX_POSITIONS_CAP_B:-1}
+      - MAX_POSITIONS_CAP_C=${MAX_POSITIONS_CAP_C:-1}
+      - MAX_POSITIONS_CAP_D=${MAX_POSITIONS_CAP_D:-1}
       - LEARNING_MODE=0
+      # 2026-09-18 bet strategy variant mapping (proposal §4):
+      #   B = P1-base-ny:      ATR 2.0 / RR 3.0 / conf 0.50 / risk 0.5% / hours 6,8,18,19,20 UTC
+      #   C = P2-tight-sl:     ATR 1.8 / RR 2.5 / conf 0.50 / risk 0.5% / hours 0,1,6,8 UTC
+      #   D = P3-more-entry:   ATR 2.2 / RR 3.0 / conf 0.45 / risk 1.0% / hours 0,1,18,19,20 UTC
+      #   (D ยกจาก conf 0.60/BUY 0.55 — สูงเกินจะมีสัญญาณถึง = เงียบมาตั้งแต่ ก.ค.)
       - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
-      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.5}
-      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.5}
+      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-1.8}
+      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.2}
       - RR_RATIO_B=${RR_RATIO_B:-3.0}
-      - RR_RATIO_C=${RR_RATIO_C:-3.0}
+      - RR_RATIO_C=${RR_RATIO_C:-2.5}
       - RR_RATIO_D=${RR_RATIO_D:-3.0}
-      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.45}
-      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.45}
-      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.60}
-      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.45}
-      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.45}
-      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.55}
+      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.50}
+      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.50}
+      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
+      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.50}
+      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.50}
+      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
+      # Entry-hour windows (UTC) — golden hours จาก sweet-spot 2,154 trades
+      # blocked 10-12,16,21 BKK = 3,4,5,9,14 UTC (negative-EV)
+      - ENTRY_HOURS_B=${ENTRY_HOURS_B:-6,8,18,19,20}
+      - BLOCKED_HOURS_B=${BLOCKED_HOURS_B:-3,4,5,9,14}
+      - ENTRY_HOURS_C=${ENTRY_HOURS_C:-0,1,6,8}
+      - BLOCKED_HOURS_C=${BLOCKED_HOURS_C:-3,4,5,9,14}
+      - ENTRY_HOURS_D=${ENTRY_HOURS_D:-0,1,18,19,20}
+      - BLOCKED_HOURS_D=${BLOCKED_HOURS_D:-3,4,5,9,14}
+      # Risk per trade: B/C 0.5%, D 1.0% (proposal §4)
+      - RISK_PER_TRADE_B=${RISK_PER_TRADE_B:-0.005}
+      - RISK_PER_TRADE_C=${RISK_PER_TRADE_C:-0.005}
       - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
       - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
       - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
@@ -393,7 +412,8 @@ services:
     container_name: oracle-engine-p1
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-0}   # paper = real orders on DEMO account
+      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
+      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.   # paper = real orders on DEMO account
       - ACCOUNTS=P1
       - DB_PATH=/app/data/oracle_p1.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
@@ -462,7 +482,8 @@ services:
     container_name: oracle-engine-p2
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-0}
+      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
+      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.
       - ACCOUNTS=P2
       - DB_PATH=/app/data/oracle_p2.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
@@ -526,7 +547,8 @@ services:
     container_name: oracle-engine-p3
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-0}
+      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
+      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.
       - ACCOUNTS=P3
       - DB_PATH=/app/data/oracle_p3.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
