@@ -58,6 +58,11 @@ class SignalGroup(str, Enum):
     OB_OS = "ob_os"
     MA = "ma"
     SENTIMENT = "sentiment"
+    # Portfolio P-accounts (P1-P5): seeds set SIGNAL_GROUP_Pn=portfolio.
+    # Without this member, get_bridge_config() raises
+    # "'portfolio' is not a valid SignalGroup" and every P-engine cycle fails
+    # with "Unknown account: Pn" (config never loads).
+    PORTFOLIO = "portfolio"
 
 
 class OrderStatus(str, Enum):

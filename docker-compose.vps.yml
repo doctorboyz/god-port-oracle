@@ -362,7 +362,10 @@ services:
       dockerfile: Dockerfile
     container_name: mt5p1
     environment:
-      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P1:-} /server:${MT5_SERVER_P1:-Exness-MT5Trial7}
+      # 2026-09-18: pass /password: so MT5 auto-logs-in on a fresh volume —
+      # removes the manual VNC login step (VNC canvas is not scriptable without vision).
+      # After first successful login MT5 caches credentials in mt5-config-p1.
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P1:-} /password:${MT5_PASSWORD_P1:-} /server:${MT5_SERVER_P1:-Exness-MT5Trial7}
       - CUSTOM_USER=mt5user
       - PASSWORD=mt5password
     ports:
@@ -378,7 +381,7 @@ services:
       dockerfile: Dockerfile
     container_name: mt5p2
     environment:
-      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P2:-} /server:${MT5_SERVER_P2:-Exness-MT5Trial7}
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P2:-} /password:${MT5_PASSWORD_P2:-} /server:${MT5_SERVER_P2:-Exness-MT5Trial7}
       - CUSTOM_USER=mt5user
       - PASSWORD=mt5password
     ports:
@@ -394,7 +397,7 @@ services:
       dockerfile: Dockerfile
     container_name: mt5p3
     environment:
-      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P3:-} /server:${MT5_SERVER_P3:-Exness-MT5Trial7}
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_P3:-} /password:${MT5_PASSWORD_P3:-} /server:${MT5_SERVER_P3:-Exness-MT5Trial7}
       - CUSTOM_USER=mt5user
       - PASSWORD=mt5password
     ports:

@@ -73,6 +73,7 @@ class MultiAccountManager:
             "ob_os": SignalGroup.OB_OS,
             "ma": SignalGroup.MA,
             "sentiment": SignalGroup.SENTIMENT,
+            "portfolio": SignalGroup.PORTFOLIO,
         }
         for group_str, accounts in raw_routing.items():
             sg = group_map.get(group_str, SignalGroup.VOLUME)

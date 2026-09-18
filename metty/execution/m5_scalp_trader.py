@@ -311,14 +311,18 @@ class M5ScalpTrader:
                 self._ml_enabled = False
 
     def _get_account_config(self):
-        """Get account config for MT5Bridge from registry (single source of truth)."""
+        """Get account config for MT5Bridge from registry (single source of truth).
+
+        2026-09-18: removed the silent fallback to account "A". On a P-engine
+        (ACCOUNTS=P1) that fallback raised a confusing "Account 'A' not found"
+        every cycle; worse, in a mixed ACCOUNTS env it would silently point a
+        P-trader at Real-A's bridge — orders meant for P1 could land on the
+        real-money A account. Unknown account must raise loud (matches
+        LiveTrader._fetch_candles and tests/test_live_trader_bugfix_guards.py M3).
+        """
         from metty.core.account_registry import get_bridge_config
 
-        try:
-            return get_bridge_config(self.account)
-        except ValueError:
-            logger.warning("Unknown account: %s, falling back to account A", self.account)
-            return get_bridge_config("A")
+        return get_bridge_config(self.account)
 
     def _fetch_candles(self, bridge: MT5Bridge) -> Optional[dict[str, pd.DataFrame]]:
         """Fetch M5 candles from MT5 bridge using an already-connected bridge."""
