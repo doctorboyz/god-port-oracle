@@ -49,9 +49,12 @@ ORDER_FILLING_FOK = 0
 ORDER_FILLING_IOC = 2
 
 # Broker-specific symbol names
-# Exness uses XAUUSDm (micro lot), other brokers may use XAUUSD
+# Exness uses XAUUSDm (micro lot), other brokers may use XAUUSD.
+# XAUUSDc (last): Exness Standard Cent accounts (P1-P3) only serve the cent
+# variant — keep it last so Real-A (XAUUSDm) and demo B/C/D (XAUUSD) resolve
+# exactly as before.
 SYMBOL_ALIASES = {
-    "XAUUSD": ["XAUUSDm", "XAUUSD", "XAUUSD.i", "XAUUSDb"],
+    "XAUUSD": ["XAUUSDm", "XAUUSD", "XAUUSD.i", "XAUUSDb", "XAUUSDc"],
 }
 
 
