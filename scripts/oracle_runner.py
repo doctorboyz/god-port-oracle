@@ -257,7 +257,14 @@ def run_m5_scalp_trader(account: str, db_path: str, interval: int, dry_run: bool
 
 
 def run_daily_summary(db_path: str, notifier):
-    """Send daily summary every 24h at 00:00 UTC."""
+    """Send daily summary every 24h at 00:00 UTC.
+
+    Skipped entirely when DAILY_SUMMARY_DISABLED=1 (2026-09-20: doctorboyz
+    requested removal of adisorn_xauusd_bot broadcast spam; trade alerts stay).
+    """
+    if os.environ.get("DAILY_SUMMARY_DISABLED", "0") == "1":
+        logger.info("[DailySummary] DISABLED via DAILY_SUMMARY_DISABLED=1")
+        return
     from metty.notify.telegram_bot import TelegramNotifier
 
     while True:
@@ -450,7 +457,14 @@ def run_auto_retrain(db_path: str, accounts: list, notifier=None):
 
 
 def run_bridge_status(db_path: str, notifier, accounts: list):
-    """Send bridge health status every 4 hours. Auto-reconnects MT5 if needed."""
+    """Send bridge health status every 4 hours. Auto-reconnects MT5 if needed.
+
+    Skipped entirely when BRIDGE_STATUS_DISABLED=1 (2026-09-20: doctorboyz
+    requested removal of adisorn_xauusd_bot broadcast spam; trade alerts stay).
+    """
+    if os.environ.get("BRIDGE_STATUS_DISABLED", "0") == "1":
+        logger.info("[BridgeStatus] DISABLED via BRIDGE_STATUS_DISABLED=1")
+        return
     while True:
         time.sleep(4 * 3600)  # 4 hours
         try:
