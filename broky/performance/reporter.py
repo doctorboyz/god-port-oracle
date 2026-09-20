@@ -8,6 +8,7 @@ Produces two outputs:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -225,18 +226,27 @@ def format_vault_report(
 def save_vault_report(content: str, date: str, psi_root: Optional[Path] = None) -> Path:
     """Save the vault report to ψ/outbox/.
 
+    Skipped entirely when REPORTING_ENABLED != 1 (2026-09-20: doctorboyz cut
+    all Hermes/Telegram reporting while re-planning — ψ/outbox is Hermes'
+    read channel, so nothing is written there either).
+
     Args:
         content: Full report text.
         date: Date string (YYYY-MM-DD).
         psi_root: Path to ψ directory.
 
     Returns:
-        Path to the saved file.
+        Path to the saved file (or the outbox dir path when skipped).
     """
     if psi_root is None:
         psi_root = Path(__file__).parent.parent.parent / "ψ"
 
     outbox = psi_root / "outbox"
+
+    if os.environ.get("REPORTING_ENABLED", "0") != "1":
+        logger.info("Learning report SKIPPED — reporting disabled (REPORTING_ENABLED=0)")
+        return outbox
+
     outbox.mkdir(parents=True, exist_ok=True)
 
     filepath = outbox / f"learning_report_{date}.md"

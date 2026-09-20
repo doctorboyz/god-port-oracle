@@ -229,8 +229,18 @@ def is_weekly_window(now_utc: Optional[datetime] = None) -> bool:
     return now.weekday() == 6 and now.hour == WEEKLY_UTC_HOUR
 
 
+def _reporting_enabled() -> bool:
+    """Master kill-switch for ALL outbound reporting (2026-09-20: doctorboyz
+    cut reporting from Hermes+Telegram entirely while re-planning).
+    Default off — set REPORTING_ENABLED=1 to restore alerts/summaries."""
+    return os.environ.get("REPORTING_ENABLED", "0") == "1"
+
+
 def _send_alerts(text: str) -> None:
     """Telegram alert, best-effort (no token → disabled, no crash)."""
+    if not _reporting_enabled():
+        logger.info("[PM] reporting disabled — alert skipped:\n%s", text)
+        return
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
@@ -289,10 +299,13 @@ def main() -> int:
         _send_alerts("PORTFOLIO ALERT\n" + "\n".join(alert_lines))
 
     if args.weekly or is_weekly_window():
-        summary = build_weekly_summary(accounts, args.db_dir, db_paths)
-        path = _write_inbox_summary(summary, args.psi_dir)
-        _send_alerts(summary)
-        logger.info("[PM] weekly summary → %s", path)
+        if not _reporting_enabled():
+            logger.info("[PM] weekly summary SKIPPED — reporting disabled (REPORTING_ENABLED=0)")
+        else:
+            summary = build_weekly_summary(accounts, args.db_dir, db_paths)
+            path = _write_inbox_summary(summary, args.psi_dir)
+            _send_alerts(summary)
+            logger.info("[PM] weekly summary → %s", path)
 
     logger.info("[PM] done: %s accounts, %d actions%s",
                 len(accounts), len(alert_lines), " (dry-run)" if args.dry_run else "")

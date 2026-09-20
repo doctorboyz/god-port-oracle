@@ -612,9 +612,14 @@ def main():
     # LiveTrader resolves its account_id.
     _seed_portfolio_accounts(accounts, db_path)
 
-    # Setup Telegram notifier
-    tg_token = os.environ.get("TG_BOT_TOKEN", "")
-    tg_chat_id = os.environ.get("TG_CHAT_ID", "")
+    # Setup Telegram notifier.
+    # 2026-09-20: REPORTING_ENABLED (default 0) is the master kill-switch for ALL
+    # outbound reporting (Telegram trade/CB alerts, daily summary, bridge status,
+    # learning/retrain messages). doctorboyz: cut reporting from Hermes+Telegram
+    # entirely while re-planning. Set REPORTING_ENABLED=1 to restore.
+    reporting_enabled = os.environ.get("REPORTING_ENABLED", "0") == "1"
+    tg_token = os.environ.get("TG_BOT_TOKEN", "") if reporting_enabled else ""
+    tg_chat_id = os.environ.get("TG_CHAT_ID", "") if reporting_enabled else ""
     from metty.notify.telegram_bot import TelegramNotifier
     notifier = TelegramNotifier(
         token=tg_token,
@@ -626,7 +631,10 @@ def main():
         notifier.subscribe(_event_bus)
         logger.info("Telegram notifier ENABLED (chat_id=%s)", tg_chat_id)
     else:
-        logger.info("Telegram notifier DISABLED (set TG_BOT_TOKEN + TG_CHAT_ID to enable)")
+        if not reporting_enabled:
+            logger.info("ALL reporting DISABLED (set REPORTING_ENABLED=1 to enable)")
+        else:
+            logger.info("Telegram notifier DISABLED (set TG_BOT_TOKEN + TG_CHAT_ID to enable)")
 
     logger.info("=== Oracle Engine Starting ===")
     logger.info("Phase: %s | Accounts: %s | DB: %s", phase, accounts, db_path)
