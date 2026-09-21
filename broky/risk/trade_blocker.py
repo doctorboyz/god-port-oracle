@@ -52,6 +52,9 @@ class BlockInput:
     lots: float = 0.0
     risk_pct: float = 0.0           # risk_per_trade as decimal (e.g., 0.02)
     sl_distance_pct: float = 0.0    # |entry - sl| / entry * 100
+    sl_distance_price: float = 0.0  # |entry - sl| in PRICE units (mr-bet: SL $ cap)
+    tp_distance_price: float = 0.0  # |entry - tp| in PRICE units (mr-bet: cost gate)
+    spread_price: float = 0.0       # live spread in PRICE units (mr-bet: cost gate)
     equity: float = 0.0
     margin_required: float = 0.0
     free_margin: float = 0.0
@@ -80,6 +83,8 @@ class TradeBlocker:
         max_risk_pct: float = 0.05,        # refuse if risk_per_trade_pct > 5%
         min_sl_distance_pct: float = 0.05, # refuse if SL tighter than 0.05%
         max_sl_distance_pct: float = 5.0,  # refuse if SL wider than 5% (likely bug)
+        max_sl_distance_price: float = 0.0,  # mr-bet: SL wider than this in PRICE units → skip (0 = off)
+        tp_cost_mult: float = 0.0,  # mr-bet: TP must cover >= mult x spread (0 = off)
         margin_safety_factor: float = 0.8,  # block if margin_required > 80% of free_margin
     ):
         self.daily_trade_count_limit = daily_trade_count_limit
@@ -88,6 +93,8 @@ class TradeBlocker:
         self.max_risk_pct = max_risk_pct
         self.min_sl_distance_pct = min_sl_distance_pct
         self.max_sl_distance_pct = max_sl_distance_pct
+        self.max_sl_distance_price = max_sl_distance_price
+        self.tp_cost_mult = tp_cost_mult
         self.margin_safety_factor = margin_safety_factor
 
     def check(self, inp: BlockInput) -> BlockVerdict:
@@ -121,6 +128,36 @@ class TradeBlocker:
                 blocked=True,
                 reason=f"SL distance {inp.sl_distance_pct:.2f}% > max {self.max_sl_distance_pct:.2f}% (likely config bug)",
                 block_name="sl_too_wide",
+            )
+
+        # 3b. SL dollar cap (mr-bet 2026-09-21): SL wider than the cap in PRICE
+        #     units → SKIP the trade. Never shrink — shrinking the SL changes
+        #     the trade thesis. Default 0.0 = off (m5_scalp / Real-A unchanged).
+        if self.max_sl_distance_price > 0 and inp.sl_distance_price > self.max_sl_distance_price:
+            return BlockVerdict(
+                blocked=True,
+                reason=(
+                    f"SL ${inp.sl_distance_price:.2f} > cap ${self.max_sl_distance_price:.2f} "
+                    f"(skip, never shrink)"
+                ),
+                block_name="sl_dollar_cap",
+            )
+
+        # 3c. Cost coverage (mr-bet 2026-09-21): TP must cover >= mult x spread
+        #     (round-trip cost) or friction eats the edge — the high-WR grinder
+        #     lesson: PF 0.99 after cost. Default 0.0 = off.
+        if (
+            self.tp_cost_mult > 0
+            and inp.spread_price > 0
+            and inp.tp_distance_price < self.tp_cost_mult * inp.spread_price
+        ):
+            return BlockVerdict(
+                blocked=True,
+                reason=(
+                    f"TP ${inp.tp_distance_price:.2f} < {self.tp_cost_mult:.1f}x spread "
+                    f"${inp.spread_price:.2f} (friction eats the edge)"
+                ),
+                block_name="cost_coverage",
             )
 
         # 4. Hard cap on lots — refuse if computed lots exceed hard cap
