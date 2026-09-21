@@ -96,6 +96,18 @@ REGIME_VOLATILE_SKIP = False            # Disabled: good era had no regime filte
 # collecting ML outcomes in ranging regimes. learning_mode bypasses.
 RANGING_HARD_BLOCK = os.environ.get("RANGING_HARD_BLOCK", "0") in ("1", "true", "True")
 
+# MR-only mode (2026-09-21, mr-bet B/C/D on oracle-engine-train): when True,
+# ADX >= 20 returns HOLD — the generator produces ranging mean-reversion
+# signals only (Bollinger extreme entries in ADX<20 chop). Env-driven so only
+# oracle-engine-train sets TRENDING_HARD_BLOCK=1; Real-A leaves it off.
+TRENDING_HARD_BLOCK = os.environ.get("TRENDING_HARD_BLOCK", "0") in ("1", "true", "True")
+
+# Disable session confidence multipliers (2026-09-21, mr-bet): MR composite
+# confidence caps at 0.65, so ASIAN ×0.70 → 0.455 < MIN_CONFIDENCE 0.55 makes
+# golden hours UTC 0/1/6 mathematically unreachable. When True, session
+# multipliers stop applying. Train container only; Real-A keeps multipliers.
+SESSION_CONFIDENCE_MULT_DISABLED = os.environ.get("SESSION_CONFIDENCE_MULT_DISABLED", "0") in ("1", "true", "True")
+
 # Counter-trend confidence multiplier (trend_alignment == -1)
 # Counter-trend trades have WR ~5-8% lower than trend-aligned.
 # Enabled 2026-07-02: per CLAUDE.md, counter-trend WITHOUT reversal evidence is a
@@ -707,6 +719,7 @@ def _generate_ranging_signal(
     regime: str,
     min_confidence: float,
     learning_mode: bool = False,
+    boll_threshold: Optional[float] = None,
 ) -> Signal:
     """Generate a signal for ranging markets using Bollinger mean-reversion.
 
@@ -715,6 +728,12 @@ def _generate_ranging_signal(
     - Volume: high volume confirms, low volume weakens
     - MACD: mild momentum confirmation (not primary)
     - Confidence is capped at 0.65 (ranging signals are inherently weaker)
+
+    Args:
+        boll_threshold: Band-position threshold for entry (0.70 = legacy
+            default). mr-bet variants pass per-account values (0.70/0.80/0.85)
+            via LiveTrader — module constants are process-global across
+            B/C/D threads in one container, so it must be a parameter.
 
     Returns HOLD if no clear mean-reversion opportunity exists.
     """
@@ -740,14 +759,17 @@ def _generate_ranging_signal(
             reason="ranging: Bollinger bands invalid", regime=regime,
         )
 
+    # Per-account threshold (mr-bet variants) or legacy module default
+    boll_thr = boll_threshold if boll_threshold is not None else _RANGING_BOLL_THRESHOLD
+
     # Position within bands: 0.0 = at lower band, 1.0 = at upper band, 0.5 = middle
     band_position = (current_price - latest_lower) / band_range
 
     # Direction: near lower band → BUY (expect bounce up), near upper band → SELL (expect revert down)
-    if band_position <= (1.0 - _RANGING_BOLL_THRESHOLD):
+    if band_position <= (1.0 - boll_thr):
         direction = "BUY"
         boll_score = 1.0 - band_position  # Closer to lower band = stronger buy signal
-    elif band_position >= _RANGING_BOLL_THRESHOLD:
+    elif band_position >= boll_thr:
         direction = "SELL"
         boll_score = band_position  # Closer to upper band = stronger sell signal
     else:
@@ -909,6 +931,7 @@ def generate_signal(
     min_confidence: float = MIN_CONFIDENCE,
     strategy_id: str = "",
     learning_mode: bool = False,
+    boll_threshold: Optional[float] = None,
 ) -> Signal:
     """Generate a trading signal by combining indicator scores with JPMorgan scaling rules.
 
@@ -965,6 +988,12 @@ def generate_signal(
             band_position = (current_price - boll.lower.iloc[-1]) / band_range
     regime = classify_regime(latest_adx, boll_bw)
 
+    # MR-only exemption scope (2026-09-21, mr-bet): a ranging MR signal is
+    # counter-trend by nature (SELL at the upper band vs a bullish D1 — that
+    # IS the trade). In MR-only mode, ranging-regime signals are exempt from
+    # the counter-trend penalty and the D1/H4 trend filter below.
+    _mr_ranging = TRENDING_HARD_BLOCK and regime == MarketRegime.RANGING.value
+
     # ── Ranging hard-block (2026-07-09, Real-A) ──
     # CLAUDE.md iron rule: "Ranging = พัก (no trade)". When RANGING_HARD_BLOCK=1
     # (set only in oracle-engine env for Real-A) and regime=ranging and not
@@ -991,6 +1020,24 @@ def generate_signal(
             price=current_price, timestamp=timestamp, timeframe=timeframe,
             indicators=scores,
             reason=f"volatile regime skipped (ADX={latest_adx:.1f}, BW={boll_bw:.4f}) [{regime}]",
+            regime=regime,
+            strategy_id=strategy_id,
+            weighted_score=weighted_score,
+            trend_mult=0.0,
+        )
+
+    # ── MR-only hard block (2026-09-21, mr-bet B/C/D) ──
+    # TRENDING_HARD_BLOCK=1 (oracle-engine-train only): mean-reversion-only
+    # mode. Any cycle with ADX >= 20 returns HOLD — the trend-following path
+    # is closed. The gate is the ADX value at the path switch, not the regime
+    # label (ADX 20-25 labels 'ranging' but is still blocked). Real-A leaves
+    # this off. learning_mode bypasses so ML outcome data keeps flowing.
+    if TRENDING_HARD_BLOCK and latest_adx >= 20 and not learning_mode:
+        return Signal(
+            symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
+            price=current_price, timestamp=timestamp, timeframe=timeframe,
+            indicators=scores,
+            reason=f"trending_hard_block: ADX={latest_adx:.1f}>=20 (MR-only) [{regime}]",
             regime=regime,
             strategy_id=strategy_id,
             weighted_score=weighted_score,
@@ -1050,6 +1097,7 @@ def generate_signal(
             regime=regime,
             min_confidence=min_confidence,
             learning_mode=learning_mode,
+            boll_threshold=boll_threshold,
         )
         if signal.signal_type == SignalType.HOLD:
             return signal
@@ -1118,7 +1166,14 @@ def generate_signal(
     # trend_alignment == -1 means counter-trend WITHOUT reversal evidence.
     # Live data: counter-trend WR ~5-8% lower than trend-aligned.
     # Apply additional penalty on top of the existing trend_mult logic.
-    if trend_alignment == -1 and signal_type != SignalType.HOLD and not learning_mode:
+    # MR-only exemption: a ranging MR signal is counter-trend by nature —
+    # skip the penalty in MR-only mode (mr-bet B/C/D).
+    if (
+        trend_alignment == -1
+        and signal_type != SignalType.HOLD
+        and not learning_mode
+        and not _mr_ranging
+    ):
         confidence *= COUNTER_TREND_CONFIDENCE_MULT
         reason += f" (counter-trend penalty: x{COUNTER_TREND_CONFIDENCE_MULT})"
 
@@ -1137,7 +1192,9 @@ def generate_signal(
     #
     # H4 override: H4 EMA 10/50 responds ~4x faster than D1 EMA 50/200.
     # When H4 disagrees with D1, trend is considered "weakening" regardless of strength.
-    if d1_trend is not None and signal_type != SignalType.HOLD:
+    # MR-only exemption: skip the D1/H4 trend filter for ranging MR signals
+    # (mr-bet) — the whole point of the trade is fading the band extreme.
+    if d1_trend is not None and signal_type != SignalType.HOLD and not _mr_ranging:
         effective_trend = d1_trend
         if h4_trend is not None and h4_trend != "unknown":
             if d1_trend == "bullish" and h4_trend == "bearish":
@@ -1203,8 +1260,13 @@ def generate_signal(
     reason += f" [{regime}]"
 
     # Apply session-based confidence multiplier
+    # (mr-bet): disable via SESSION_CONFIDENCE_MULT_DISABLED=1 — MR confidence
+    # caps at 0.65, so ASIAN ×0.70 starves golden hours UTC 0/1/6.
     session = classify_session(timestamp)
-    session_mult = SESSION_CONFIDENCE_MULTIPLIER.get(session, 1.0)
+    if SESSION_CONFIDENCE_MULT_DISABLED:
+        session_mult = 1.0
+    else:
+        session_mult = SESSION_CONFIDENCE_MULTIPLIER.get(session, 1.0)
     if session_mult != 1.0:
         confidence *= session_mult
         confidence = min(confidence, 1.0)  # Cap at 1.0
