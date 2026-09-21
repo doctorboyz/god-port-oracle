@@ -205,7 +205,10 @@ services:
       - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-0}
       # 2026-09-21 mr-bet: ML ensemble veto ปิด (คุณหมออนุมัติ) — เก็บสถิติ MR สะอาด
       # IRON LAW still holds — A lives in oracle-engine, never gets ensemble.
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-0}
+      # HARD-CODED (ไม่ใช่ ${ML_FILTER_ENABLED:-0}) เพราะ host .env มี ML_FILTER_ENABLED=1
+      # (legacy) ซึ่ง interpolation จะให้ค่านั้นชนะ default — deploy 2026-09-21 เจอจริง
+      # ตรวจพบ ML_FILTER_ENABLED=1 ใน container train ทั้งที่ตั้งใจ 0
+      - ML_FILTER_ENABLED=0
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
       # ML ensemble env ทั้งหมดถูกลบออก 2026-09-21 (mr-bet: ปิด ML veto ตามคุณหมออนุมัติ)
       # Rollback: ดู git history ก่อน commit "chore: mr-bet env" — ML_ENSEMBLE_MODE_*
