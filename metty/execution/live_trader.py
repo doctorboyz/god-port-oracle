@@ -38,6 +38,7 @@ from broky.risk.position_sizing import (
 )
 from broky.risk.sizing import SIZING_METHODS, fixed_fraction_size, kelly_size, risk_per_trade_size, volatility_adjusted_size
 from broky.signals.generator import generate_signal
+from broky.signals import generator as _signal_generator  # module ref: read TRENDING_HARD_BLOCK at init
 from metty.core.db import (
     close_live_trade,
     get_latest_signal_id,
@@ -274,6 +275,37 @@ class LiveTrader:
         self.risk.rr_scale_in = per_account_rrsi.get(self.account, self.risk.rr_scale_in)
         self.risk.trailing_activation_pct = per_account_trail_act.get(self.account, self.risk.trailing_activation_pct)
         self.risk.trailing_trail_pct = per_account_trail_trail.get(self.account, self.risk.trailing_trail_pct)
+
+        # ── mr-bet knobs (2026-09-21, B/C/D on oracle-engine-train) ──
+        # Every default preserves legacy behavior exactly — Real-A (oracle-engine)
+        # and m5_scalp are untouched.
+        _acct = self.account
+        # Time stop: MR trades should resolve fast — 12 M5 bars = 1h (legacy 288 = 24h)
+        self.risk.time_stop_bars = int(os.environ.get(
+            f"TIME_STOP_BARS_{_acct}",
+            os.environ.get("TIME_STOP_BARS", "288"),
+        ))
+        # Trailing TP off → clean exit-reason statistics (TP hits are TP, not trails)
+        self.risk.trailing_tp_enabled = os.environ.get(
+            f"TRAILING_TP_ENABLED_{_acct}",
+            os.environ.get("TRAILING_TP_ENABLED", "1"),
+        ) == "1"
+        # Swing-path max spread gate in POINTS (XAUUSD point=0.01 → 30 pts = $0.30).
+        # Legacy swing path had NO spread gate; default 0 = off.
+        self._max_spread_points = int(float(os.environ.get(
+            f"SWING_MAX_SPREAD_{_acct}",
+            os.environ.get("SWING_MAX_SPREAD", "0"),
+        )))
+        # Per-account Bollinger band threshold for MR entries (B=0.70/C=0.80/D=0.85).
+        # Must be a per-account knob: module constants in generator.py are
+        # process-global across B/C/D threads in this one container.
+        self._mr_boll_threshold = float(os.environ.get(
+            f"MR_BOLL_THRESHOLD_{_acct}",
+            os.environ.get("MR_BOLL_THRESHOLD", "0.70"),
+        ))
+        # Mirror the generator's MR-only flag at init — the trader-side
+        # counter-trend exemption gate needs to know the mode scope.
+        self._mr_mode = bool(getattr(_signal_generator, "TRENDING_HARD_BLOCK", False))
         # Override sizing method from env if set
         env_sizing = os.environ.get("POSITION_SIZING_METHOD", "").strip()
         if env_sizing and env_sizing in SIZING_METHODS:
@@ -282,6 +314,11 @@ class LiveTrader:
         self.circuit_breaker = CircuitBreaker(
             consecutive_loss_limit=self.risk.consecutive_loss_limit,
             daily_loss_limit_pct=self.risk.daily_loss_limit_pct,
+            # mr-bet: 3-loss streak → 24h pause (1440 min); legacy default 15
+            cooldown_minutes=int(os.environ.get(
+                f"CIRCUIT_BREAKER_COOLDOWN_MINUTES_{self.account}",
+                os.environ.get("CIRCUIT_BREAKER_COOLDOWN_MINUTES", "15"),
+            )),
         )
         # ISSUE C1: TradeBlocker (gap-filler) — enforces hard_max_lots, risk_pct_sanity,
         # sl_too_tight, sl_too_wide, margin_safety, daily/weekly trade count limits.
@@ -292,6 +329,12 @@ class LiveTrader:
             hard_max_lots=float(os.environ.get("TRADE_BLOCKER_HARD_MAX_LOTS", "0.50")),
             max_risk_pct=0.05,
             margin_safety_factor=float(os.environ.get("TRADE_BLOCKER_MARGIN_SAFETY", "0.80")),
+            # mr-bet gates (default 0 = off): SL $ cap (skip, never shrink) and
+            # TP >= mult x spread cost coverage
+            max_sl_distance_price=float(os.environ.get(
+                f"SL_CAP_{self.account}", os.environ.get("SL_CAP", "0"))),
+            tp_cost_mult=float(os.environ.get(
+                f"MR_COST_MULT_{self.account}", os.environ.get("MR_COST_MULT", "0"))),
         )
         # Drawdown protection (stricter for real accounts)
         dd_config = get_drawdown_config(self.account)
@@ -328,7 +371,11 @@ class LiveTrader:
         self._last_d1_trend: Optional[str] = None
         self._last_h4_trend: Optional[str] = None
         self._cycle_count: int = 0
-        self.strategy_id = f"swing-{self.account}"
+        # Strategy label for DB stats. mr-bet overrides per account
+        # (STRATEGY_ID_B=mr-bet-B) so new trades separate cleanly from the
+        # old swing-* rows.
+        self.strategy_id = os.environ.get(
+            f"STRATEGY_ID_{self.account}", f"swing-{self.account}")
 
         # Account role labels for logging clarity
         self._account_label = {
@@ -606,11 +653,46 @@ class LiveTrader:
                 price_momentum_24h=price_momentum_24h,
                 min_confidence=self.risk.min_confidence,
                 learning_mode=self.learning_mode,
+                # mr-bet: per-account Bollinger band threshold (B/C/D variants)
+                boll_threshold=self._mr_boll_threshold,
             )
             return signal
         except Exception as e:
             logger.error("Signal generation failed: %s", e)
             return None
+
+    def _counter_trend_gate_mr_exempt(self, signal: Signal) -> bool:
+        """Return True if the 4a1 counter-trend rejection gate should block.
+
+        MR-only exemption (mr-bet 2026-09-21): when this trader runs in
+        MR-only mode (TRENDING_HARD_BLOCK=1 on oracle-engine-train) and the
+        signal is a ranging-regime MR signal, counter-trend rejection does
+        not apply — fading the band extreme against a trending D1 IS the
+        trade. Real-A (mode off) is unchanged: counter-trend still blocks.
+        """
+        ta = signal.indicators.get("trend_alignment") if signal.indicators else None
+        if ta != -1:
+            return False  # not counter-trend → never blocks
+        if self.learning_mode:
+            return False  # collect outcomes for ML
+        if signal.signal_type == SignalType.HOLD:
+            return False
+        if self._mr_mode and (getattr(signal, "regime", None) or "") == "ranging":
+            return False  # MR-only ranging exemption
+        return True
+
+    def _spread_gate_ok(self, spread_points: Optional[float]) -> tuple[bool, str]:
+        """mr-bet max-spread gate for the swing entry path.
+
+        Legacy swing path had no spread gate. When SWING_MAX_SPREAD_{acct} > 0,
+        a spread wider than the knob (points) holds the entry. Default 0 = off.
+        Returns (ok, reason); ok=True means proceed.
+        """
+        if self._max_spread_points <= 0 or spread_points is None:
+            return True, ""
+        if spread_points > self._max_spread_points:
+            return False, f"spread_too_wide:{spread_points:.0f}>{self._max_spread_points}"
+        return True, ""
 
     def _determine_d1_trend(self, d1: Optional[pd.DataFrame]) -> str:
         if d1 is None or len(d1) < 200:
@@ -1830,13 +1912,10 @@ class LiveTrader:
         # trend_alignment == -1 means the signal is counter-trend WITHOUT reversal
         # evidence (no OB/OS + divergence + HH/LL price-structure confirmation).
         # Reject hard; learning_mode bypasses so we still collect outcomes for ML.
+        # mr-bet: ranging MR signals are exempt in MR-only mode (helper).
         _trend_alignment = signal.indicators.get("trend_alignment") if signal.indicators else None
         _has_reversal = signal.indicators.get("has_reversal") if signal.indicators else None
-        if (
-            _trend_alignment == -1
-            and not self.learning_mode
-            and signal.signal_type != SignalType.HOLD
-        ):
+        if self._counter_trend_gate_mr_exempt(signal):
             self._record_rejection(
                 signal,
                 f"counter_trend_no_reversal:{signal.signal_type.value}_vs_{d1_trend}_d1",
@@ -1995,6 +2074,14 @@ class LiveTrader:
             logger.warning("[%s] Spread unavailable — skipping cycle (MT5 may be disconnected)", self.display_name)
             return {"action": "skip", "reason": "spread unavailable (MT5 disconnected?)", "signal": signal}
 
+        # 5a. mr-bet max-spread gate (legacy swing path had none).
+        # SWING_MAX_SPREAD_{acct}=30 (points) → wider spread holds the entry.
+        _spread_ok, _spread_reason = self._spread_gate_ok(_live_spread)
+        if not _spread_ok:
+            self._record_rejection(signal, _spread_reason, session, d1_trend, candles)
+            logger.info("[%s] %s — holding entry", self.display_name, _spread_reason)
+            return {"action": "hold", "reason": _spread_reason, "signal": signal}
+
         # Circuit breaker: if ML filter has failed too many times, stop trading
         if self._ml_enabled and self._ml_fail_count >= ML_MAX_CONSECUTIVE_FAILS:
             logger.critical(
@@ -2127,6 +2214,10 @@ class LiveTrader:
             lots=lots,
             risk_pct=self.risk.risk_per_trade,
             sl_distance_pct=sl_distance_pct,
+            # mr-bet gates: SL $ cap (price units) + TP-vs-cost coverage
+            sl_distance_price=abs(price - sl),
+            tp_distance_price=tp_distance,
+            spread_price=(_live_spread * 0.01) if _live_spread else 0.0,  # XAUUSD point=0.01 (ISSUE-068)
             equity=current_equity,
             margin_required=margin_required,
             free_margin=free_margin,
