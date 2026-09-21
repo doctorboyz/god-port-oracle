@@ -947,6 +947,12 @@ def generate_signal(
 
     scores, latest_adx = calculate_indicator_scores(close, high, low, volume)
 
+    # Compute weighted_score early — every HOLD path below (volatile-skip,
+    # trending_hard_block) needs it for the Signal constructor. Was previously
+    # computed after the volatile-skip branch, causing UnboundLocalError
+    # whenever REGIME_VOLATILE_SKIP fired (fix 2026-09-21).
+    weighted_score = calculate_weighted_score(scores)
+
     # Classify market regime
     boll = calculate_bollinger(close, period=20, std_dev=2.0)
     boll_bw = None
@@ -1029,9 +1035,6 @@ def generate_signal(
             _latest_mdi_val = float(_minus_di_s.iloc[-1]) if pd.notna(_minus_di_s.iloc[-1]) else None
         except Exception:
             pass
-
-    # Compute weighted_score for all paths (needed for Signal constructor even in ranging mode)
-    weighted_score = calculate_weighted_score(scores)
 
     # Ranging market (ADX < 20): use Bollinger mean-reversion instead of trend-following
     # NOTE: Live data shows ranging BUY WR=33% PnL=-$20 → loses money.
