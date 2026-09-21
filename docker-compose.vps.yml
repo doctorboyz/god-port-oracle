@@ -168,6 +168,11 @@ services:
       - MT5_BRIDGE_A_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
+      # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
+      # Was applied directly on VPS without commit — committed 2026-09-21.
+      - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
+      - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
       - oracle-data:/app/data
     depends_on:
@@ -345,6 +350,11 @@ services:
       - MT5_SYMBOL_D=${MT5_SYMBOL_D:-XAUUSD}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
+      # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
+      # Was applied directly on VPS without commit — committed 2026-09-21.
+      - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
+      - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
       # ═══ Auto-retrain — ปิดบน train (mr-bet 2026-09-21): เก็บสถิติ framework เดียว
       # ให้สะอาด ไม่ mix กับ retrain กลางทาง. Real-A never gets auto-retrain (IRON LAW).
       - AUTO_RETRAIN_ENABLED=${AUTO_RETRAIN_ENABLED:-0}
@@ -488,6 +498,11 @@ services:
       - MT5_BRIDGE_P1_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
+      # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
+      # Was applied directly on VPS without commit — committed 2026-09-21.
+      - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
+      - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
       - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/app/data
     depends_on:
@@ -553,6 +568,11 @@ services:
       - MT5_BRIDGE_P2_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
+      # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
+      # Was applied directly on VPS without commit — committed 2026-09-21.
+      - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
+      - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
       - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/app/data
     depends_on:
@@ -618,6 +638,11 @@ services:
       - MT5_BRIDGE_P3_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
+      # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
+      # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
+      # Was applied directly on VPS without commit — committed 2026-09-21.
+      - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
+      - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
       - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/app/data
     depends_on:
