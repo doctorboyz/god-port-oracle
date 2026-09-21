@@ -195,34 +195,16 @@ services:
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
       - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
-      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
-      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
-      - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
-      # 2026-08-23 deploy: ML filter re-enabled for B/C/D "slow-but-sure" run.
-      # Was off since 2026-07-02 AEGIS-only test. Ensemble verified OOS PF>1.5
-      # on B/C/D (ψ/lab/compare-c-models-2026-06-29/). IRON LAW still holds —
-      # A lives in oracle-engine (separate container), never gets ensemble.
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-1}
+      # 2026-09-21 mr-bet: m5-scalp ปิดถาวรบน train (คุณหมอ: ล้างแนวเทรดเก่า) —
+      # B/C/D เหลือ swing trader เป็นพาหนะของสัญญาณ MR เท่านั้น
+      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-0}
+      # 2026-09-21 mr-bet: ML ensemble veto ปิด (คุณหมออนุมัติ) — เก็บสถิติ MR สะอาด
+      # IRON LAW still holds — A lives in oracle-engine, never gets ensemble.
+      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED:-0}
       - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_MODEL_DIR=/app/data/models/trade_outcome_v4
-      # V4+v6 OR-gate ensemble — verified OOS PF>1.5 on B, C, D (2026-06-29).
-      # Geometry unified at RR=3.0; ATR varies per account (B=2.0, C/D=2.5).
-      # B @0.45: in 3.61 / OOS 1.96 (atr=2.0 rr=3.0 → OOS PF 2.60)
-      # C @0.50: in 3.28 / OOS 2.02 (atr=2.5 rr=3.0 — was OOS-overfit at old geometry 2.0:2.5)
-      # D @0.45: in 2.25 / OOS 2.31 (atr=2.5 rr=3.0 → OOS PF 2.55)
-      # NEVER enabled on A (IRON LAW). Full table: ψ/lab/compare-c-models-2026-06-29/
-      - ML_ENSEMBLE_MODE_B=${ML_ENSEMBLE_MODE_B:-or}
-      - ML_ENSEMBLE_MODE_C=${ML_ENSEMBLE_MODE_C:-or}
-      - ML_ENSEMBLE_MODE_D=${ML_ENSEMBLE_MODE_D:-or}
-      - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
-      # 2026-09-18 bet strategy (คุณหมอ: "trade ตามแผนใหม่ใน B C D ได้เลย"):
-      # OR @0.50 ทุกใบ — same as Demo-D baseline (Q3). B ยกจาก 0.45 → 0.50.
-      - ML_ENSEMBLE_THRESH=${ML_ENSEMBLE_THRESH:-0.50}
-      - ML_ENSEMBLE_THRESH_C=${ML_ENSEMBLE_THRESH_C:-0.50}
-      # Demo-D slow-but-sure (2026-08-23): @0.50 → OOS PF 1.66, MaxDD 17.3%, 91 trades
-      # Tighter than B's 0.45 — D is the primary slow-but-sure test bed.
-      - ML_ENSEMBLE_THRESH_D=${ML_ENSEMBLE_THRESH_D:-0.50}
+      # ML ensemble env ทั้งหมดถูกลบออก 2026-09-21 (mr-bet: ปิด ML veto ตามคุณหมออนุมัติ)
+      # Rollback: ดู git history ก่อน commit "chore: mr-bet env" — ML_ENSEMBLE_MODE_*
+      # / ML_ENSEMBLE_MODEL_DIRS / ML_ENSEMBLE_THRESH* อยู่ที่นั่น
       - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
       - MAX_POSITIONS_PER_ACCOUNT=${MAX_POSITIONS_PER_ACCOUNT:-5}
       # 2026-09-18 bet strategy: max_positions=1 ทุกใบ (proposal §4 กติการ่วม)
@@ -236,23 +218,62 @@ services:
       - MAX_POSITIONS_CAP_C=${MAX_POSITIONS_CAP_C:-1}
       - MAX_POSITIONS_CAP_D=${MAX_POSITIONS_CAP_D:-1}
       - LEARNING_MODE=0
-      # 2026-09-18 bet strategy variant mapping (proposal §4):
-      #   B = P1-base-ny:      ATR 2.0 / RR 3.0 / conf 0.50 / risk 0.5% / hours 6,8,18,19,20 UTC
-      #   C = P2-tight-sl:     ATR 1.8 / RR 2.5 / conf 0.50 / risk 0.5% / hours 0,1,6,8 UTC
-      #   D = P3-more-entry:   ATR 2.2 / RR 3.0 / conf 0.45 / risk 1.0% / hours 0,1,18,19,20 UTC
-      #   (D ยกจาก conf 0.60/BUY 0.55 — สูงเกินจะมีสัญญาณถึง = เงียบมาตั้งแต่ ก.ค.)
+      # ═══ 2026-09-21 mr-bet framework: high-WR mean reversion on B/C/D (คุณหมอ:
+      # รื้อ framework เดิม มาทดสอบ bet-style 3 variant บน demo, ล้างแนวเทรดเก่า) ═══
+      # Generator: MR-only mode — ADX>=20 → HOLD, เข้าเฉพาะ Bollinger extreme ใน ranging
+      - TRENDING_HARD_BLOCK=${TRENDING_HARD_BLOCK:-1}
+      # Session multiplier ปิด — MR conf cap 0.65 x ASIAN 0.70 = 0.455 ต่ำกว่า 0.55
+      # เข้าไม่ได้เลยใน golden hours UTC 0/1/6
+      - SESSION_CONFIDENCE_MULT_DISABLED=${SESSION_CONFIDENCE_MULT_DISABLED:-1}
+      # Volatile regime skip เปิด (bug UnboundLocalError แก้แล้ว 2026-09-21)
+      - REGIME_VOLATILE_SKIP=${REGIME_VOLATILE_SKIP:-1}
+      # ป้ายสถิติใหม่ แยกจากแถว swing-* เก่าใน oracle_train.db ทันที
+      - STRATEGY_ID_B=${STRATEGY_ID_B:-mr-bet-B}
+      - STRATEGY_ID_C=${STRATEGY_ID_C:-mr-bet-C}
+      - STRATEGY_ID_D=${STRATEGY_ID_D:-mr-bet-D}
+      # กติการ่วม: ATR 2.0 / risk 0.5% / conf 0.55 / spread<=30pts / TP>=3x cost /
+      # SL<=$12 / time stop 1h (12 bars M5) / trailing+partial TP ปิด / แพ้ 3 ติด พัก 24h
       - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
-      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-1.8}
-      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.2}
-      - RR_RATIO_B=${RR_RATIO_B:-3.0}
-      - RR_RATIO_C=${RR_RATIO_C:-2.5}
-      - RR_RATIO_D=${RR_RATIO_D:-3.0}
-      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.50}
-      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.50}
-      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.45}
-      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.50}
-      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.50}
-      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.45}
+      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.0}
+      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.0}
+      # RR variants: B ปานกลาง 0.8 / C 1.0 / D แม่นสุด 1.2 (low-RR high-WR bet style)
+      - RR_RATIO_B=${RR_RATIO_B:-0.8}
+      - RR_RATIO_C=${RR_RATIO_C:-1.0}
+      - RR_RATIO_D=${RR_RATIO_D:-1.2}
+      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.55}
+      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.55}
+      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.55}
+      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.55}
+      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.55}
+      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.55}
+      # Bollinger threshold variants: B 0.70 / C 0.80 / D 0.85 (ยิ่งสูงยิ่งเข้าน้อย-แม่น)
+      - MR_BOLL_THRESHOLD_B=${MR_BOLL_THRESHOLD_B:-0.70}
+      - MR_BOLL_THRESHOLD_C=${MR_BOLL_THRESHOLD_C:-0.80}
+      - MR_BOLL_THRESHOLD_D=${MR_BOLL_THRESHOLD_D:-0.85}
+      # Swing-path spread gate (pts, XAUUSD 30pts = $0.30)
+      - SWING_MAX_SPREAD_B=${SWING_MAX_SPREAD_B:-30}
+      - SWING_MAX_SPREAD_C=${SWING_MAX_SPREAD_C:-30}
+      - SWING_MAX_SPREAD_D=${SWING_MAX_SPREAD_D:-30}
+      # Cost gate: TP ต้อง >= 3x spread · SL cap $12 (เกิน skip ไม่หด)
+      - MR_COST_MULT_B=${MR_COST_MULT_B:-3.0}
+      - MR_COST_MULT_C=${MR_COST_MULT_C:-3.0}
+      - MR_COST_MULT_D=${MR_COST_MULT_D:-3.0}
+      - SL_CAP_B=${SL_CAP_B:-12.0}
+      - SL_CAP_C=${SL_CAP_C:-12.0}
+      - SL_CAP_D=${SL_CAP_D:-12.0}
+      # Exit: TP ตายตัว + time stop 1h — MR คลี่ตัวเร็ว ค้างเกิน 1h = thesis ตาย
+      - TIME_STOP_BARS_B=${TIME_STOP_BARS_B:-12}
+      - TIME_STOP_BARS_C=${TIME_STOP_BARS_C:-12}
+      - TIME_STOP_BARS_D=${TIME_STOP_BARS_D:-12}
+      - TRAILING_TP_ENABLED_B=${TRAILING_TP_ENABLED_B:-0}
+      - TRAILING_TP_ENABLED_C=${TRAILING_TP_ENABLED_C:-0}
+      - TRAILING_TP_ENABLED_D=${TRAILING_TP_ENABLED_D:-0}
+      # 3-loss streak → พัก 24h (CB cooldown 1440 min)
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_B=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_B:-1440}
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_C=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_C:-1440}
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_D=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_D:-1440}
+      # 2026-09-18 bet strategy variant mapping — superseded 2026-09-21 by
+      # mr-bet (MR-only mean reversion, ตารางข้างบน). เก็บไว้อ้างอิง rollback.
       # Entry-hour windows (UTC) — golden hours จาก sweet-spot 2,154 trades
       # blocked 10-12,16,21 BKK = 3,4,5,9,14 UTC (negative-EV)
       - ENTRY_HOURS_B=${ENTRY_HOURS_B:-6,8,18,19,20}
@@ -261,14 +282,12 @@ services:
       - BLOCKED_HOURS_C=${BLOCKED_HOURS_C:-3,4,5,9,14}
       - ENTRY_HOURS_D=${ENTRY_HOURS_D:-0,1,18,19,20}
       - BLOCKED_HOURS_D=${BLOCKED_HOURS_D:-3,4,5,9,14}
-      # Risk per trade: B/C 0.5%, D 1.0% (proposal §4)
+      # Risk per trade: 0.5% flat ทุกใบ (mr-bet 2026-09-21 — D ลดจาก 1.0%)
       - RISK_PER_TRADE_B=${RISK_PER_TRADE_B:-0.005}
       - RISK_PER_TRADE_C=${RISK_PER_TRADE_C:-0.005}
-      - M5_MAX_SPREAD_B=${M5_MAX_SPREAD_B:-30}
-      - M5_MAX_SPREAD_C=${M5_MAX_SPREAD_C:-30}
-      - M5_MAX_SPREAD_D=${M5_MAX_SPREAD_D:-30}
+      # partial TP ปิดทุกใบ — สถิติ exit สะอาด (TP คือ TP)
       - PARTIAL_TP_ENABLED_B=${PARTIAL_TP_ENABLED_B:-0}
-      - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-1}
+      - PARTIAL_TP_ENABLED_C=${PARTIAL_TP_ENABLED_C:-0}
       - PARTIAL_TP_ENABLED_D=${PARTIAL_TP_ENABLED_D:-0}
       - TP1_RATIO_B=${TP1_RATIO_B:-0.5}
       - TP1_RATIO_C=${TP1_RATIO_C:-0.5}
@@ -300,8 +319,9 @@ services:
       - DRAWDOWN_WEEKLY_LIMIT_D=${DRAWDOWN_WEEKLY_LIMIT_D:-0.06}
       - DRAWDOWN_ACCOUNT_LIMIT_D=${DRAWDOWN_ACCOUNT_LIMIT_D:-0.15}
       - DRAWDOWN_COOLDOWN_HOURS_D=${DRAWDOWN_COOLDOWN_HOURS_D:-4}
-      # Demo-D slow-but-sure extras (2026-08-23): 1% risk, single position, slow blocker
-      - RISK_PER_TRADE_D=${RISK_PER_TRADE_D:-0.01}
+      # Demo-D slow-but-sure extras (2026-08-23): single position, slow blocker
+      # mr-bet 2026-09-21: risk ลดเหลือ 0.5% flat เท่า B/C
+      - RISK_PER_TRADE_D=${RISK_PER_TRADE_D:-0.005}
       - MIN_POSITIONS_D=${MIN_POSITIONS_D:-1}
       - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-10}
       - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-30}
@@ -325,11 +345,9 @@ services:
       - MT5_SYMBOL_D=${MT5_SYMBOL_D:-XAUUSD}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
-      # ═══ Auto-retrain (train container only — IRON LAW: never on oracle-engine) ═══
-      # Triggers TradeOutcomeTrainer daily at 00:10 UTC when ≥50 new trade_outcomes
-      # accumulate and ≥24h since last run. State persists to data/auto_retrain_state.json.
-      # Real-A container (oracle-engine) does NOT set this — V4 model is never auto-overwritten.
-      - AUTO_RETRAIN_ENABLED=${AUTO_RETRAIN_ENABLED:-1}
+      # ═══ Auto-retrain — ปิดบน train (mr-bet 2026-09-21): เก็บสถิติ framework เดียว
+      # ให้สะอาด ไม่ mix กับ retrain กลางทาง. Real-A never gets auto-retrain (IRON LAW).
+      - AUTO_RETRAIN_ENABLED=${AUTO_RETRAIN_ENABLED:-0}
       - AUTO_RETRAIN_MIN_NEW_OUTCOMES=${AUTO_RETRAIN_MIN_NEW_OUTCOMES:-50}
       - AUTO_RETRAIN_MIN_HOURS=${AUTO_RETRAIN_MIN_HOURS:-24}
       - AUTO_RETRAIN_EXPERIMENT=${AUTO_RETRAIN_EXPERIMENT:-trade_outcome_v6}
