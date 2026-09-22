@@ -308,7 +308,12 @@ services:
       - INITIAL_BALANCE_C=${INITIAL_BALANCE_C:-1000}
       - INITIAL_EQUITY_C=${INITIAL_EQUITY_C:-1000}
       - INITIAL_BALANCE_D=${INITIAL_BALANCE_D:-100}
-      - INITIAL_EQUITY_D=${INITIAL_EQUITY_D:-200}
+      # mr-bet 2026-09-23 (คุณหมออนุมัติ): รีเซ็ตฐาน drawdown ของ D จาก 500 (ยุคเก่า
+      # ใน host .env ทำให้ equity $355.67 ติดเส้น 15% = $425 และถูกบล็อกถาวร
+      # ตั้งแต่เริ่ม mr-bet) เป็น equity จริง ณ วันที่รีเซ็ต — HARD-CODED (ไม่ใช่
+      # ${INITIAL_EQUITY_D:-...}) เพราะ host .env มี INITIAL_EQUITY_D=500 ซึ่งจะชนะ
+      # ค่า default เสมอ (บทเรียนเดียวกับ ML_FILTER_ENABLED)
+      - INITIAL_EQUITY_D=355.67
       - LEVERAGE_D=${LEVERAGE_D:-500}
       - ACCOUNT_TYPE_B=${ACCOUNT_TYPE_B:-demo}
       - ACCOUNT_TYPE_C=${ACCOUNT_TYPE_C:-demo}
