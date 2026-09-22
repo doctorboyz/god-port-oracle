@@ -213,21 +213,23 @@ class LiveTrader:
             "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "2.5"))),
             "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "2.5"))),
         }
-        per_account_rr = {
-            "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.5"))),
-            "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.5"))),
-            "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.5"))),
-            "D": float(os.environ.get("RR_RATIO_D", os.environ.get("RR_RATIO", "2.5"))),
-        }
-        per_account_conf = {
-            "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.45"))),
-            "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.45"))),
-            "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.45"))),
-            "D": float(os.environ.get("MIN_CONFIDENCE_D", os.environ.get("MIN_CONFIDENCE", "0.45"))),
-        }
-        if not risk_config:
-            self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
-            self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
+        # mr-bet bugfix (2026-09-23): RR_RATIO_* / MIN_CONFIDENCE_* env must ALWAYS
+        # win — same reasoning as the ATR fix below. oracle_runner passes a
+        # risk_config (risk_per_trade only) for every engine, so the old
+        # `if not risk_config:` branch never fired on the live path and the
+        # per-account RR/conf env was silently skipped: the 2 mr-bet-B trades of
+        # 2026-09-21 shipped with RR 2.5 instead of the RR_RATIO_B=0.8 variant
+        # value (and MIN_CONFIDENCE_B=0.55 was never enforced either).
+        # When env is unset, the risk_config value stands (legacy callers).
+        # Real-A guard: its compose sets RR_RATIO_A=2.5 / MIN_CONFIDENCE_A=0.45 —
+        # identical to RiskConfig defaults, so env-wins changes nothing for A.
+        # See tests/test_rr_conf_env_override_causal.py.
+        _env_rr = os.environ.get(f"RR_RATIO_{self.account}") or os.environ.get("RR_RATIO")
+        if _env_rr is not None:
+            self.risk.risk_reward_ratio = float(_env_rr)
+        _env_conf = os.environ.get(f"MIN_CONFIDENCE_{self.account}") or os.environ.get("MIN_CONFIDENCE")
+        if _env_conf is not None:
+            self.risk.min_confidence = float(_env_conf)
         # Fix #3 bugfix (2026-07-13): ATR_MULTIPLIER_A env must ALWAYS win, even
         # when oracle-engine passes a risk_config (it does — registry default
         # atr_multiplier=2.5). Previously this line sat inside `if not risk_config`
