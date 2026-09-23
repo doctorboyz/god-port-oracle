@@ -32,6 +32,12 @@ from metty.core.db import (
 
 logger = logging.getLogger(__name__)
 
+# Bridge fetch retry (ISSUE-088/072): transient empty/raising fetches are
+# retried per timeframe before the timeframe is skipped. Bounded so a
+# persistent outage still falls back to CSV quickly (3 tries ≈ <8s worst case).
+_BRIDGE_FETCH_ATTEMPTS = 3
+_BRIDGE_FETCH_BACKOFF = (2.0, 4.0)
+
 # Account IDs for live data collection
 # These correspond to accounts in the 'accounts' table
 LIVE_ACCOUNT_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
@@ -231,10 +237,36 @@ class LiveCollector:
 
             candles = {}
             for tf in ["M5", "H1", "H4", "D1"]:
-                df = bridge.fetch_candles_sync("XAUUSD", tf, 500)
-                if not df.empty:
+                # ISSUE-088/072 (2026-09-23): bridge fetches are flaky under
+                # thread contention — a single empty/raising fetch dropped
+                # that timeframe for the whole 5-min cycle (missing snapshot,
+                # open-trade time-stop drift; a raising fetch aborted ALL
+                # remaining timeframes via the outer except). Retry each
+                # timeframe a bounded number of times before giving up on it.
+                df = None
+                for attempt in range(1, _BRIDGE_FETCH_ATTEMPTS + 1):
+                    try:
+                        df = bridge.fetch_candles_sync("XAUUSD", tf, 500)
+                    except Exception as fetch_err:
+                        logger.warning(
+                            "  %s fetch attempt %d/%d raised: %s",
+                            tf, attempt, _BRIDGE_FETCH_ATTEMPTS, fetch_err,
+                        )
+                        df = None
+                    if df is not None and not df.empty:
+                        break
+                    logger.warning(
+                        "  %s fetch attempt %d/%d returned no bars",
+                        tf, attempt, _BRIDGE_FETCH_ATTEMPTS,
+                    )
+                    if attempt < _BRIDGE_FETCH_ATTEMPTS:
+                        time.sleep(_BRIDGE_FETCH_BACKOFF[min(attempt - 1, len(_BRIDGE_FETCH_BACKOFF) - 1)])
+                if df is not None and not df.empty:
                     candles[tf] = _normalize_columns(df)
                     logger.info("  %s: %d bars from MT5", tf, len(df))
+                else:
+                    logger.warning("  %s: no bars after %d attempts, skipping timeframe",
+                                   tf, _BRIDGE_FETCH_ATTEMPTS)
 
             if not candles:
                 logger.warning("No data from MT5 bridge for account %s", self.display_name)
