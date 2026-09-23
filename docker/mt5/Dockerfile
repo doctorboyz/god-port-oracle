@@ -33,7 +33,12 @@ RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+# start-period 900s (ISSUE-090, 2026-09-23): real boot takes 10-30 min
+# (gmag11 init 300s + numpy force-reinstall + rpyc install under Wine +
+# terminal start 30s + bridge). At 180s compose's depends_on
+# condition:service_healthy marked the container unhealthy before boot
+# finished and refused to start oracle-engine-train (left in Created).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=900s --retries=5 \
     CMD python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost', 8001)); s.close()" || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]

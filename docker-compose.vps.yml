@@ -186,7 +186,18 @@ services:
   # installed in production → silent ML filter disable). Reverted B/C/D to V4
   # (proven PF=1.71 @ threshold 0.65) while V11 SELL + V12 BUY are retrained
   # without bxau dependency. See learning 2026-06-28_mixed-v12-bxau-broken.md.
-  # This separation ensures V12 code changes don't affect Real-A.
+  # This separation ensures V12 code changes don't affect Real-A code.
+  #
+  # ⚠️ DEPLOY RUNBOOK (ISSUE-090, 2026-09-23) — `up -d --build` can rebuild
+  # and RECREATE the mt5b/c/d dependency images, and their real boot takes
+  # 10-30 min. Deploy in TWO phases or compose will refuse to start this
+  # service (stays in Created state) while terminals are still booting:
+  #   1) docker compose -f docker-compose.vps.yml up -d --build mt5b mt5c mt5d
+  #      … wait until all three report (healthy) — check with:
+  #      docker inspect --format '{{.Name}}: {{.State.Health.Status}}' mt5b mt5c mt5d
+  #   2) docker compose -f docker-compose.vps.yml up -d --build oracle-engine-train
+  # Then verify with scripts/verify_deploy.py (reads live object values —
+  # never trust os.environ alone; see learning 2026-09-23_env-set-does-not-mean-env-used)
   oracle-engine-train:
     build:
       context: .
