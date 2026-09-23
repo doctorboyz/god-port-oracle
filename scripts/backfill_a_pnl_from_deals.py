@@ -52,14 +52,17 @@ def map_exit_reason(comment: str, deal_reason: int) -> str:
     return "closed_by_mt5"
 
 
-async def fetch_deals():
+async def fetch_deals(days_back: int):
     from metty.core.account_registry import get_bridge_config
     from metty.bridge.client import MT5Bridge
     cfg = get_bridge_config("A")
     bridge = MT5Bridge(cfg)
     await bridge.connect()
     try:
-        deals = await bridge.get_deal_history("XAUUSDm", days_back=35)
+        # days_back must cover the oldest trade being backfilled — the 3
+        # corrupted trades of 2026-07-07/08 (ISSUE-080) are ~78 days old,
+        # far beyond the old hard-coded 35.
+        deals = await bridge.get_deal_history("XAUUSDm", days_back=days_back)
         return deals
     finally:
         await bridge.disconnect()
@@ -145,13 +148,16 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true",
                         help="Commit changes (default: dry-run)")
+    parser.add_argument("--days-back", type=int, default=35,
+                        help="Deal history window in days (default 35; must "
+                             "cover the oldest trade being backfilled)")
     args = parser.parse_args()
 
     print(f"=== Backfill Account A PnL from MT5 deals ({'APPLY' if args.apply else 'DRY-RUN'}) ===")
 
     # 1. Fetch deals
-    print("Fetching deals from MT5 bridge...")
-    deals = await fetch_deals()
+    print(f"Fetching deals from MT5 bridge (days_back={args.days_back})...")
+    deals = await fetch_deals(args.days_back)
     print(f"  Got {len(deals)} deals")
 
     # 2. Pair entries to closes
