@@ -13,6 +13,7 @@ Use bracket notation (info["key"]) not .get("key") to access netref dicts.
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -69,6 +70,23 @@ ACCOUNT_COLUMNS = ["login", "balance", "credit", "profit", "equity", "margin", "
                     "trade_allowed", "trade_expert", "margin_mode"]
 SYMBOL_COLUMNS = ["name", "digits", "trade_mode", "point", "spread", "trade_contract_size",
                   "trade_stop_level", "volume_min", "volume_max", "volume_step"]
+
+
+def _max_deviation_points() -> int:
+    """Max slippage (points) tolerated on market orders (ISSUE-047).
+
+    The legacy hardcoded 20 points = $0.20 on XAUUSD (point=0.01) is inside
+    normal news-time movement between the tick fetch and execution, so
+    orders were rejected (REQUOTE/PRICE_OFF) exactly when risk was highest:
+    entry windows missed, and worse, closes that failed mid-spike left
+    positions open with unbounded risk. Default 100 points ($1.00),
+    env-tunable via MT5_MAX_DEVIATION_POINTS.
+    """
+    try:
+        val = int(os.environ.get("MT5_MAX_DEVIATION_POINTS", "100"))
+    except (TypeError, ValueError):
+        return 100
+    return max(val, 1)
 
 
 def _netref_to_dict(netref_dict, columns: list[str] | None = None) -> dict:
@@ -399,7 +417,7 @@ class MT5Bridge:
                 price,                 # price
                 sl,                    # sl
                 tp,                    # tp
-                20,                    # deviation
+                _max_deviation_points(),  # deviation (ISSUE-047)
                 234000,                # magic
                 f"god-port-{self.config.name}",  # comment
                 ORDER_TIME_GTC,        # type_time
@@ -562,7 +580,7 @@ class MT5Bridge:
                 close_price,          # price
                 0.0,                  # sl
                 0.0,                  # tp
-                20,                   # deviation
+                _max_deviation_points(),  # deviation (ISSUE-047)
                 234000,               # magic
                 f"close-{ticket}",    # comment
                 ORDER_TIME_GTC,       # type_time
@@ -615,7 +633,7 @@ class MT5Bridge:
                 close_price,          # price
                 0.0,                  # sl
                 0.0,                  # tp
-                20,                   # deviation
+                _max_deviation_points(),  # deviation (ISSUE-047)
                 234000,               # magic
                 f"close-{ticket}",    # comment
                 ORDER_TIME_GTC,       # type_time
