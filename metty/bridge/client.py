@@ -89,6 +89,15 @@ def _max_deviation_points() -> int:
     return max(val, 1)
 
 
+# Order-path tick fetch retry (ISSUE-091): symbol_info_tick can return an
+# empty/zero tick for a few hundred ms after a reconnect (Market Watch sync).
+# One flaky fetch used to kill the whole signal ("Symbol XAUUSD not found").
+# Bounded and strictly BEFORE order_send, so it is idempotency-safe (no order
+# has been sent yet — contrast: retrying after order_send could double-fill).
+_TICK_FETCH_ATTEMPTS = 3
+_TICK_RETRY_BACKOFF = (0.5, 1.0)
+
+
 def _netref_to_dict(netref_dict, columns: list[str] | None = None) -> dict:
     """Convert an RPyC netref dict to a local Python dict.
 
@@ -389,11 +398,35 @@ class MT5Bridge:
         resolved = self._resolve_symbol_name(symbol)
 
         try:
-            tick_netref = await asyncio.to_thread(
-                conn.root.symbol_info_tick, resolved,
-            )
-            tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
-            if not tick:
+            # ISSUE-091: retry the tick FETCH (bounded) before giving up.
+            # A transient empty/zero tick right after a reconnect used to kill
+            # the signal with "Symbol not found" even though a good tick was
+            # available one fetch later (mr-bet-D 2026-09-23 00:25 UTC,
+            # rejected_signals id 61558). bid/ask==0 is also treated as "no
+            # usable tick" — the old `if not tick:` check passed it through
+            # and sent the order at price 0.0.
+            tick = None
+            for attempt in range(1, _TICK_FETCH_ATTEMPTS + 1):
+                try:
+                    tick_netref = await asyncio.to_thread(
+                        conn.root.symbol_info_tick, resolved,
+                    )
+                    tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
+                except Exception as tick_err:
+                    logger.warning(
+                        "tick fetch attempt %d/%d for %s raised: %s",
+                        attempt, _TICK_FETCH_ATTEMPTS, resolved, tick_err,
+                    )
+                    tick = None
+                if tick and float(tick.get("bid") or 0) > 0 and float(tick.get("ask") or 0) > 0:
+                    break
+                logger.warning(
+                    "tick fetch attempt %d/%d for %s returned no usable bid/ask",
+                    attempt, _TICK_FETCH_ATTEMPTS, resolved,
+                )
+                if attempt < _TICK_FETCH_ATTEMPTS:
+                    await asyncio.sleep(_TICK_RETRY_BACKOFF[min(attempt - 1, len(_TICK_RETRY_BACKOFF) - 1)])
+            if not tick or float(tick.get("bid") or 0) <= 0 or float(tick.get("ask") or 0) <= 0:
                 return OrderResult(
                     success=False,
                     error=f"Symbol {resolved} not found",
