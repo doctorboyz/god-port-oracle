@@ -854,6 +854,36 @@ class MT5Bridge:
                 await self.disconnect()
         return asyncio.run(_do())
 
+    def position_exists_sync(self, ticket: int) -> Optional[bool]:
+        """Connect, check whether a position ticket is still open, disconnect.
+
+        Returns:
+            True  — position still exists in MT5
+            False — position gone (broker closed it via SL/TP/manual/stopout)
+            None  — bridge failure: UNKNOWN, callers must NOT treat as gone
+
+        ISSUE-041: candle-based exit detection in the trader is blind to
+        broker-side closes that happen intra-bar and recover by the bar
+        close (SL gapped through, then price bounced back). This check is
+        the authoritative "is it still open?" ask for that vanish case.
+        """
+        async def _do():
+            if not await self.connect():
+                return None
+            try:
+                conn = self._ensure_connected()
+                positions_netref = await asyncio.to_thread(
+                    conn.root.positions_get, ticket=ticket,
+                )
+                positions = _netref_to_list(positions_netref, columns=POSITION_COLUMNS)
+                return len(positions) > 0
+            except Exception as e:
+                logger.error("Error checking position %s: %s", ticket, e)
+                return None
+            finally:
+                await self.disconnect()
+        return asyncio.run(_do())
+
     def fetch_deal_history_sync(
         self, symbol: str = "XAUUSD", days_back: int = 7
     ) -> Optional[list[dict]]:

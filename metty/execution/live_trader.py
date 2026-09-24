@@ -1376,6 +1376,27 @@ class LiveTrader:
             logger.warning("Failed to close position %s in MT5: %s", ticket, e)
             return False, None
 
+    def _position_exists_in_mt5(self, ticket: int) -> Optional[bool]:
+        """Is the position still open in MT5? (ISSUE-041 vanish check)
+
+        Returns:
+            True  — still open
+            False — gone (broker closed it via SL/TP/manual/stopout)
+            None  — bridge unhealthy: UNKNOWN, callers must NOT treat as gone
+        """
+        if not ticket or self.dry_run:
+            return True  # paper mode: no broker to ask — assume open
+        try:
+            from metty.bridge.client import MT5Bridge
+            # ISSUE-064: account_registry is the single source of truth for bridge config
+            return MT5Bridge(get_bridge_config(self.account)).position_exists_sync(ticket)
+        except Exception as e:
+            logger.warning(
+                "[%s] Position-exists check failed for ticket %s: %s",
+                self.display_name, ticket, e,
+            )
+            return None
+
     def _monitor_positions(self, candles: dict[str, pd.DataFrame]) -> list[dict]:
         """Check open trades for exit conditions (SL/TP hit, max holding)."""
         open_trades = get_open_trades(self.account_id, self.db_path)
@@ -1493,6 +1514,38 @@ class LiveTrader:
                 if time_stop > 0 and bars_held >= time_stop:
                     exit_reason = "max_holding"
 
+            # ISSUE-041 vanish check: candle-based detection is blind to
+            # broker-side closes that happen intra-bar and recover by the bar
+            # close (SL gapped through on news, then price bounced back above
+            # the level). The M5 close never crosses SL/TP, so the exit branch
+            # below never fires: the trade ghosts in DB forever AND the actual
+            # gapped deal PnL never reaches CB/DP — the kill switch stays
+            # blind exactly on the worst losses. Ask MT5 directly: if the
+            # position is gone, reconcile the real closing deal and record it.
+            external_fill: Optional[float] = None
+            if (
+                exit_reason is None
+                and not self.dry_run
+                and trade.get("ticket")
+            ):
+                exists = self._position_exists_in_mt5(trade["ticket"])
+                if exists is False:
+                    external = self._reconcile_external_close(
+                        trade.get("ticket"), direction, entry_price, sl, tp,
+                    )
+                    if external is not None:
+                        external_fill = external["exit_price"]
+                        exit_price = round(external_fill, 2)
+                        if external.get("exit_reason"):
+                            exit_reason = external["exit_reason"]
+                        logger.info(
+                            "[%s] ISSUE-041: ticket %s vanished from MT5 but candles "
+                            "never saw the exit — reconciled deal exit=$%.2f reason=%s",
+                            self.display_name, trade["ticket"], exit_price, exit_reason,
+                        )
+                    # external None (bridge failed / deal not visible yet):
+                    # leave open, retry the vanish check next cycle
+
             if exit_reason:
                 # Calculate PnL
                 if direction == "BUY":
@@ -1525,8 +1578,11 @@ class LiveTrader:
                 # Treating that as "MT5 close failed" left ghost trades that blocked all new
                 # entries. Reconcile from deal history instead — use the broker's actual fill
                 # price + reason so DB PnL is real.
+                # ISSUE-041: when the vanish check already reconciled the deal,
+                # skip this close attempt (the position is gone; re-asking the
+                # bridge would just fail and re-reconcile the same deal).
                 actual_fill = None
-                if trade.get("ticket") and not self.dry_run:
+                if trade.get("ticket") and not self.dry_run and external_fill is None:
                     mt5_ok, actual_fill = self._close_mt5_position_with_fill(trade["ticket"])
                     if not mt5_ok:
                         external = self._reconcile_external_close(
