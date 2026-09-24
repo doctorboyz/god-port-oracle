@@ -119,6 +119,18 @@ def _patch_bollinger(target_band_position: float, current_price: float) -> None:
     gen_mod.calculate_bollinger = lambda c, period=20, std_dev=2.0: fake  # type: ignore[assignment]
 
 
+@pytest.fixture(autouse=True)
+def _pin_session_mult(monkeypatch):
+    """Disable session confidence multipliers for the whole module.
+
+    SESSION_CONFIDENCE_MULTIPLIER applies ASIAN ×0.70 based on the current
+    WALL-CLOCK session, so confidence-threshold assertions here only held
+    outside Asian hours (suite flaky — observed failing at ~07:00 UTC).
+    Session-of-day is not the mechanism under test; pin it off.
+    """
+    monkeypatch.setattr(gen_mod, "SESSION_CONFIDENCE_MULT_DISABLED", True)
+
+
 @pytest.fixture
 def restore_bollinger():
     """Restore the real calculate_bollinger after each test."""
