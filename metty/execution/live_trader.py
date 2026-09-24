@@ -527,6 +527,38 @@ class LiveTrader:
             logger.debug("[%s] Spread fetch failed: %s", self.display_name, e)
         return None
 
+    def _get_current_quote(self) -> tuple[float, float] | None:
+        """Live (bid, ask) from the MT5 bridge (ISSUE-046). None if unavailable.
+
+        Callers anchor order SL/TP to the fill side (ask for BUY, bid for
+        SELL). None → caller falls back to the spread/2 estimate (ISSUE-053).
+        """
+        try:
+            from metty.bridge.client import MT5Bridge
+            from metty.core.account_registry import get_account_config
+            from metty.core.models import AccountConfig
+
+            cfg = get_account_config(self.account)
+            config = AccountConfig(
+                name=cfg.name,
+                broker_login=cfg.broker_login,
+                broker_server=cfg.broker_server,
+                balance=cfg.initial_balance,
+                leverage=cfg.leverage,
+                bridge_host=cfg.bridge_host,
+                bridge_port=cfg.bridge_internal_port,
+                signal_group=cfg.signal_group,
+            )
+            bridge = MT5Bridge(config)
+            quote = bridge.get_quote_sync(cfg.symbol)
+            if quote is not None:
+                bid, ask = quote
+                if bid > 0 and ask > 0:
+                    return (float(bid), float(ask))
+        except Exception as e:
+            logger.debug("[%s] Quote fetch failed: %s", self.display_name, e)
+        return None
+
     def _get_calendar_context(self) -> tuple[int | None, str | None, str | None]:
         """Get minutes to next event, event type, and impact level."""
         calendar = self._get_calendar()
@@ -2364,16 +2396,37 @@ class LiveTrader:
             # ISSUE-064: use account_registry for bridge config (was hardcoded port_map).
             bridge = MT5Bridge(get_bridge_config(self.account))
 
-            # ISSUE-053: SL/TP were computed from signal.price (M5 close) but MT5 fills at
-            # ask (BUY) / bid (SELL). Absolute SL/TP sent with the order are then ~spread
-            # closer to fill than intended. Recompute SL/TP from an estimated fill price
-            # using current spread (points → price via *0.01 for XAUUSD) so the risk
-            # distance from actual fill is correct.
-            spread_price = (_live_spread or 0) * 0.01  # points → price units
-            if direction == "BUY":
-                est_fill_price = price + spread_price / 2.0  # ask ≈ mid + half-spread
-            else:
-                est_fill_price = price - spread_price / 2.0  # bid ≈ mid - half-spread
+            # ISSUE-046: SL/TP for the ORDER must be anchored to the LIVE quote's
+            # fill side (ask for BUY / bid for SELL) — signal.price is an M5 close,
+            # up to 5 min stale, and the ISSUE-053 spread/2 estimate below only
+            # corrects the bid/ask offset, not drift since the bar closed. On a fast
+            # move the old anchor put the absolute SL/TP dollars away from the true
+            # fill → realized risk distance ≠ configured ATR distance. The spread/2
+            # estimate is kept as fallback when the quote is unavailable.
+            anchor_price = None
+            try:
+                quote = self._get_current_quote()
+            except Exception as e:
+                logger.debug("[%s] _get_current_quote crashed: %s", self.display_name, e)
+                quote = None
+            if quote is not None:
+                _q_bid, _q_ask = quote
+                anchor_price = _q_ask if direction == "BUY" else _q_bid
+                if abs(anchor_price - price) > 0.10:
+                    logger.info(
+                        "[%s] ISSUE-046: anchoring order SL/TP to live quote %.2f "
+                        "(signal.price=%.2f is stale)",
+                        self.display_name, anchor_price, price,
+                    )
+            if anchor_price is None:
+                # ISSUE-053 fallback: estimate fill from current spread
+                # (points → price via *0.01 for XAUUSD) around the signal price.
+                spread_price = (_live_spread or 0) * 0.01
+                if direction == "BUY":
+                    anchor_price = price + spread_price / 2.0  # ask ≈ mid + half-spread
+                else:
+                    anchor_price = price - spread_price / 2.0  # bid ≈ mid - half-spread
+            est_fill_price = anchor_price
             sl_for_order = calculate_stop_loss(
                 est_fill_price, atr_val, direction,
                 self.risk.atr_multiplier, self.risk.spread_buffer,

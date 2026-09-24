@@ -774,6 +774,35 @@ class MT5Bridge:
             return None
         return asyncio.run(_do())
 
+    def get_quote_sync(self, symbol: str = "XAUUSD") -> Optional[tuple[float, float]]:
+        """Connect, fetch (bid, ask), and disconnect in one call (ISSUE-046).
+
+        get_spread_sync discards bid/ask and keeps only the spread — callers
+        that need the FILL SIDE (ask for BUY / bid for SELL) to anchor order
+        SL/TP cannot recover it from a spread alone.
+        """
+        async def _do():
+            if not await self.connect():
+                return None
+            try:
+                conn = self._ensure_connected()
+                resolved = self._resolve_symbol_name(symbol)
+                tick_netref = await asyncio.to_thread(
+                    conn.root.symbol_info_tick, resolved,
+                )
+                tick = _netref_to_dict(tick_netref, columns=TICK_COLUMNS)
+                bid = tick.get("bid", 0)
+                ask = tick.get("ask", 0)
+                if bid > 0 and ask > 0:
+                    return (float(bid), float(ask))
+                return None
+            except Exception as e:
+                logger.error("Error fetching quote for %s: %s", symbol, e)
+                return None
+            finally:
+                await self.disconnect()
+        return asyncio.run(_do())
+
     def fetch_deal_history_sync(
         self, symbol: str = "XAUUSD", days_back: int = 7
     ) -> Optional[list[dict]]:
