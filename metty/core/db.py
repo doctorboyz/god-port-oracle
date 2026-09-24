@@ -801,10 +801,25 @@ def get_consecutive_losses(
     db_path: Optional[Path | str] = None,
 ) -> int:
     """Count the trailing run of losing closed trades (newest first) for an account."""
+    return get_loss_streak_state(account_id, db_path)[0]
+
+
+def get_loss_streak_state(
+    account_id: int,
+    db_path: Optional[Path | str] = None,
+) -> tuple[int, Optional[str]]:
+    """Trailing loss streak (newest first) plus the newest loss's exit_time.
+
+    Companion to get_consecutive_losses for state rehydration (ISSUE-045):
+    CircuitBreaker is in-memory only, so on trader init the streak is
+    restored from this query. The exit_time anchors the cooldown window —
+    a restart mid-pause enforces only the cooldown REMAINDER, not a
+    fresh full window.
+    """
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT pnl FROM live_trades "
+            "SELECT pnl, exit_time FROM live_trades "
             "WHERE account_id = ? AND is_open = 0 AND pnl IS NOT NULL "
             "ORDER BY exit_time DESC, id DESC",
             (account_id,),
@@ -812,12 +827,14 @@ def get_consecutive_losses(
     finally:
         conn.close()
     streak = 0
-    for (pnl,) in rows:
+    last_exit_time: Optional[str] = None
+    for pnl, exit_time in rows:
         if pnl < 0:
             streak += 1
+            last_exit_time = exit_time
         else:
             break
-    return streak
+    return streak, last_exit_time
 
 
 def log_portfolio_event(

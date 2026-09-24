@@ -42,6 +42,7 @@ from broky.signals import generator as _signal_generator  # module ref: read TRE
 from metty.core.db import (
     close_live_trade,
     get_latest_signal_id,
+    get_loss_streak_state,
     get_open_trades,
     init_db,
     insert_live_trade,
@@ -322,6 +323,34 @@ class LiveTrader:
                 os.environ.get("CIRCUIT_BREAKER_COOLDOWN_MINUTES", "15"),
             )),
         )
+        # ISSUE-045: CB state is in-memory only — restore the trailing loss
+        # streak from DB history (the source of truth, pattern:
+        # DrawdownProtector.sync_pnl_from_db) so a container restart
+        # mid-cooldown doesn't evade the pause. Cooldown anchors at the last
+        # loss's exit_time → only the window remainder is enforced.
+        try:
+            _streak, _last_loss_exit = get_loss_streak_state(self.account_id, self.db_path)
+        except Exception as exc:
+            _streak, _last_loss_exit = 0, None
+            logger.warning(
+                "[%s] CB state restore from DB failed: %s — starting fresh",
+                self.display_name, exc,
+            )
+        if _streak:
+            _last_loss_dt = None
+            if _last_loss_exit:
+                try:
+                    _last_loss_dt = datetime.fromisoformat(_last_loss_exit)
+                except ValueError:
+                    _last_loss_dt = None
+                if _last_loss_dt is not None and _last_loss_dt.tzinfo is None:
+                    _last_loss_dt = _last_loss_dt.replace(tzinfo=timezone.utc)
+            self.circuit_breaker.restore_state(_streak, _last_loss_dt)
+            logger.info(
+                "[%s] CB state restored from DB: consecutive_losses=%d%s",
+                self.display_name, _streak,
+                " — cooldown ACTIVE" if self.circuit_breaker.is_active else "",
+            )
         # ISSUE C1: TradeBlocker (gap-filler) — enforces hard_max_lots, risk_pct_sanity,
         # sl_too_tight, sl_too_wide, margin_safety, daily/weekly trade count limits.
         # Not wired before → live path had no protection against misconfigured SL/lots.

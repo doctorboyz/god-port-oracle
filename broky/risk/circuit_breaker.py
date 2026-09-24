@@ -147,6 +147,27 @@ class CircuitBreaker:
         self._state.cooldown_until = None
         self._state.flash_crash_detected = False
 
+    def restore_state(
+        self,
+        consecutive_losses: int,
+        last_loss_time: Optional[datetime] = None,
+    ) -> None:
+        """Rehydrate state from persisted trade history (ISSUE-045).
+
+        CB state is in-memory only, so a container restart mid-cooldown
+        used to start fresh and evade the pause. Called at LiveTrader
+        init with the trailing loss streak from the DB: the streak (and
+        its count) carries over, and if it already reached the limit the
+        cooldown is anchored at the LAST loss time — only the remainder
+        of the window is enforced, not a fresh full cooldown.
+        """
+        self._state.consecutive_losses = consecutive_losses
+        if consecutive_losses < self._consecutive_loss_limit:
+            return
+        self._state.is_active = True
+        anchor = last_loss_time or self._current_time or datetime.now(timezone.utc)
+        self._state.cooldown_until = anchor + timedelta(minutes=self._cooldown_minutes)
+
     def reset_daily(self) -> None:
         """Reset daily PnL tracking — call at start of each trading day."""
         self._daily_pnl = 0.0
