@@ -24,8 +24,10 @@ from metty.core.models import AccountConfig, AccountInfo, OrderResult
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 5
+# Brokerless containers (paper farm) set MT5_BRIDGE_MAX_RETRIES=1 /
+# MT5_BRIDGE_RETRY_DELAY=0 — retrying a nonexistent host only burns the cycle.
+MAX_RETRIES = int(os.environ.get("MT5_BRIDGE_MAX_RETRIES", "3"))
+RETRY_DELAY_SECONDS = float(os.environ.get("MT5_BRIDGE_RETRY_DELAY", "5"))
 
 # MT5 timeframe constants (must match MetaTrader5 Python package)
 MT5_TIMEFRAMES = {

@@ -1,0 +1,114 @@
+# farm_variants.yml — SOURCE OF TRUTH สำหรับ paper trade farm (Mac mini, brokerless)
+#
+# Hermes (scope AI Investor) เสนอ variant ใหม่ = append ลงไฟล์นี้แล้วรัน
+#   python3 scripts/paper_farm_apply.py
+# ซึ่งจะ regenerate docker-compose.paper-farm.yml และ redeploy
+# (DB เดิมคงอยู่, account ใหม่ seed อัตโนมัติผ่าน oracle_runner._seed_portfolio_accounts)
+#
+# รูปแบบ: ทุก variant = 1 paper account ชื่อ P<digits> (LiveTrader รับ P-name ได้)
+# Knob ทุกตัวเป็น env `KNOB_P<digits>` — ดูรายการ knob ทั้งหมดใน
+# ψ/memory/learnings/hermes-paper-farm-protocol.md
+#
+# กติกา farm ทั้งกระบอก (process-global — ใช้ร่วมทุก variant ในก้อนเดียวกัน):
+#   TRENDING_HARD_BLOCK=1  → mr-bet MR-only mode (อ่านตอน import, shared ทั้ง process)
+#   DRY_RUN=1              → เปิด trade ใน DB แบบ paper ไม่ยิง broker จริง
+#   TRADING_PHASE=trade    → ปิด collector (feed มาจาก CSV ไม่ใช่ bridge)
+
+common:
+  # applied to every variant unless overridden in variants.<name>.env
+  INITIAL_BALANCE: "100"
+  INITIAL_EQUITY: "100"
+  LEVERAGE: "2000"
+  ACCOUNT_TYPE: "demo"
+  SIGNAL_GROUP: "portfolio"   # must be a valid SignalGroup enum — "farm" breaks
+                              # get_bridge_config → every cycle "no candle data"
+  RISK_PER_TRADE: "0.005"
+  MAX_POSITIONS: "1"
+  MAX_POSITIONS_CAP: "1"
+  MIN_POSITIONS: "1"
+  ATR_MULTIPLIER: "2.0"
+  MIN_CONFIDENCE: "0.55"
+  BUY_MIN_CONFIDENCE: "0.55"
+  SWING_MAX_SPREAD: "30"
+  MR_COST_MULT: "3.0"
+  SL_CAP: "12.0"
+  TIME_STOP_BARS: "12"
+  TRAILING_TP_ENABLED: "0"
+  CIRCUIT_BREAKER_COOLDOWN_MINUTES: "1440"
+  ENTRY_HOURS: "6,8,18,19,20"
+  BLOCKED_HOURS: "3,4,5,9,14"
+
+groups:
+  - name: farm1
+    # ก้อนละ ≤25 variants — RAM ~500MB base + ~10-30MB/variant (วัดจริงก่อนขยาย)
+    variants: [P11, P12, P13, P14, P15, P16, P17, P18, P19, P20]
+    db_path: /app/data/farm1.db
+
+variants:
+  # ── Base clones: B/C/D ตัวจริงบน VPS (มาตรฐานเทียบ) ──
+  P11:
+    note: "clone-B — RR 0.80 / Boll 0.70 (มาตรฐานเทียบผลเทียบ VPS B)"
+    env:
+      RR_RATIO: "0.80"
+      MR_BOLL_THRESHOLD: "0.70"
+  P12:
+    note: "clone-C — RR 1.00 / Boll 0.80"
+    env:
+      RR_RATIO: "1.00"
+      MR_BOLL_THRESHOLD: "0.80"
+  P13:
+    note: "clone-D — RR 1.20 / Boll 0.85"
+    env:
+      RR_RATIO: "1.20"
+      MR_BOLL_THRESHOLD: "0.85"
+
+  # ── กลายพันธุ์รอบฐาน B (RR 0.80) ──
+  P14:
+    note: "B-ATR15 — SL แคบลง เข้าเร็วออกเร็ว"
+    env:
+      RR_RATIO: "0.80"
+      MR_BOLL_THRESHOLD: "0.70"
+      ATR_MULTIPLIER: "1.5"
+  P15:
+    note: "B-ATR25 — SL กว้างขึ้น ทน noise"
+    env:
+      RR_RATIO: "0.80"
+      MR_BOLL_THRESHOLD: "0.70"
+      ATR_MULTIPLIER: "2.5"
+  P16:
+    note: "B-TS24 — ให้เวลาคลี่ตัว 2 ชม. (time stop 24 bars)"
+    env:
+      RR_RATIO: "0.80"
+      MR_BOLL_THRESHOLD: "0.70"
+      TIME_STOP_BARS: "24"
+
+  # ── กลายพันธุ์รอบฐาน C (RR 1.00) ──
+  P17:
+    note: "C-conf50 — เปิดประตูเข้าง่ายขึ้น"
+    env:
+      RR_RATIO: "1.00"
+      MR_BOLL_THRESHOLD: "0.80"
+      MIN_CONFIDENCE: "0.50"
+      BUY_MIN_CONFIDENCE: "0.50"
+  P18:
+    note: "C-conf60 — เข้มงวดขึ้น เข้าน้อย-แม่นขึ้น"
+    env:
+      RR_RATIO: "1.00"
+      MR_BOLL_THRESHOLD: "0.80"
+      MIN_CONFIDENCE: "0.60"
+      BUY_MIN_CONFIDENCE: "0.60"
+
+  # ── กลายพันธุ์รอบฐาน D (RR 1.20) ──
+  P19:
+    note: "D-ATR15 — RR สูง + SL แคบ (แม่นสุด เสี่ยงสุด)"
+    env:
+      RR_RATIO: "1.20"
+      MR_BOLL_THRESHOLD: "0.85"
+      ATR_MULTIPLIER: "1.5"
+  P20:
+    note: "D-no-hours — ถอด entry-hour gate ออก (เทสว่า hour gate มีค่าจริงไหม)"
+    env:
+      RR_RATIO: "1.20"
+      MR_BOLL_THRESHOLD: "0.85"
+      ENTRY_HOURS: ""
+      BLOCKED_HOURS: ""

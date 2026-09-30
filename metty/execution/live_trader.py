@@ -134,7 +134,9 @@ class LiveTrader:
             )
         self.display_name = get_display_name(self.account)
         self.db_path = db_path
-        self.data_dir = data_dir or Path("data/xau-data")
+        # DATA_DIR env lets a container point at a shared feed volume
+        # (paper farm: read-only CSV feed bind-mounted outside the DB volume).
+        self.data_dir = data_dir or Path(os.environ.get("DATA_DIR") or "data/xau-data")
         self.dry_run = dry_run
         self.learning_mode = os.environ.get("LEARNING_MODE", "0") == "1"
         # ISSUE C3: LEARNING_MODE on Real-A silently bypasses CB/cooldown/calendar/ML-veto.
@@ -156,7 +158,15 @@ class LiveTrader:
             "C": int(os.environ.get("MAX_POSITIONS_C", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
             "D": int(os.environ.get("MAX_POSITIONS_D", os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"))),
         }
-        self.max_positions = per_account_limits.get(self.account, int(os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5")))
+        if self.account in per_account_limits:
+            self.max_positions = per_account_limits[self.account]
+        else:
+            # P-accounts: MAX_POSITIONS_<ACCOUNT> env, else the shared global
+            # (same precedence shape as the knob loop below).
+            self.max_positions = int(os.environ.get(
+                f"MAX_POSITIONS_{self.account}",
+                os.environ.get("MAX_POSITIONS_PER_ACCOUNT", "5"),
+            ))
         # Dynamic position limit: max positions scale with equity
         self._equity_per_position = float(os.environ.get(
             f"EQUITY_PER_POSITION_{self.account}",
@@ -237,7 +247,27 @@ class LiveTrader:
         # so env was silently skipped → first new trade recorded 2.5 not 2.0.
         # Env is explicit user intent → overrides risk_config. See
         # tests/test_atr_env_override_risk_config_causal.py.
-        self.risk.atr_multiplier = per_account_atr.get(self.account, self.risk.atr_multiplier)
+        # Paper-farm generalization (2026-09-30): the per-account dicts cover
+        # A-D only, so KNOB_P11-style env was silently ignored for P-accounts
+        # (the same hazard that bit ATR_MULTIPLIER_P1 on the portfolio deploy).
+        # A-D keep the dict chain exactly; other accounts read
+        # KNOB_{account} → KNOB global → risk_config value (caller's default
+        # survives when env unset). See tests/test_knob_generalization_causal.py.
+        _per_name_knob_attrs = {
+            "ATR_MULTIPLIER": ("atr_multiplier", float),
+            "PARTIAL_TP_ENABLED": ("partial_tp_enabled", lambda v: v == "1"),
+            "TP1_RATIO": ("tp1_ratio", float),
+            "RR_SCALE_IN": ("rr_scale_in", float),
+            "TRAILING_ACTIVATION_PCT": ("trailing_activation_pct", float),
+            "TRAILING_TRAIL_PCT": ("trailing_trail_pct", float),
+        }
+        if self.account in ACCOUNT_IDS:
+            self.risk.atr_multiplier = per_account_atr[self.account]
+        else:
+            for _knob, (_attr, _conv) in _per_name_knob_attrs.items():
+                _env = os.environ.get(f"{_knob}_{self.account}") or os.environ.get(_knob)
+                if _env is not None:
+                    setattr(self.risk, _attr, _conv(_env))
         # Partial TP overrides per account
         per_account_ptp = {
             "A": os.environ.get("PARTIAL_TP_ENABLED_A", os.environ.get("PARTIAL_TP_ENABLED", "0")) == "1",
@@ -273,11 +303,15 @@ class LiveTrader:
             "C": float(os.environ.get("TRAILING_TRAIL_PCT_C", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
             "D": float(os.environ.get("TRAILING_TRAIL_PCT_D", os.environ.get("TRAILING_TRAIL_PCT", "0.10"))),
         }
-        self.risk.partial_tp_enabled = per_account_ptp.get(self.account, self.risk.partial_tp_enabled)
-        self.risk.tp1_ratio = per_account_tp1r.get(self.account, self.risk.tp1_ratio)
-        self.risk.rr_scale_in = per_account_rrsi.get(self.account, self.risk.rr_scale_in)
-        self.risk.trailing_activation_pct = per_account_trail_act.get(self.account, self.risk.trailing_activation_pct)
-        self.risk.trailing_trail_pct = per_account_trail_trail.get(self.account, self.risk.trailing_trail_pct)
+        if self.account in ACCOUNT_IDS:
+            self.risk.partial_tp_enabled = per_account_ptp[self.account]
+            self.risk.tp1_ratio = per_account_tp1r[self.account]
+            self.risk.rr_scale_in = per_account_rrsi[self.account]
+            self.risk.trailing_activation_pct = per_account_trail_act[self.account]
+            self.risk.trailing_trail_pct = per_account_trail_trail[self.account]
+        # Non-A-D accounts: handled by the generic _per_name_knob_attrs loop
+        # above (ATR_MULTIPLIER/PARTIAL_TP_ENABLED/TP1_RATIO/RR_SCALE_IN/
+        # TRAILING_ACTIVATION_PCT/TRAILING_TRAIL_PCT).
 
         # ── mr-bet knobs (2026-09-21, B/C/D on oracle-engine-train) ──
         # Every default preserves legacy behavior exactly — Real-A (oracle-engine)
@@ -387,6 +421,12 @@ class LiveTrader:
             account_limit_pct=dd_config["account_limit_pct"],
             cooldown_hours=dd_config["cooldown_hours"],
         )
+        # Paper-farm equity fallback (2026-09-30): without an MT5 bridge,
+        # _get_equity must reconstruct equity from the DB instead of None
+        # (None skips every cycle — see tests/test_paper_equity_fallback_causal.py).
+        self._paper_initial_equity = _initial_equity
+        self._last_close_price: Optional[float] = None
+        self._paper_equity_logged = False
         # BUY confidence filter (stricter for real accounts)
         self._buy_min_confidence = float(os.environ.get(
             f"BUY_MIN_CONFIDENCE_{self.account}",
@@ -660,7 +700,17 @@ class LiveTrader:
             return self._fetch_candles_csv()
 
     def _fetch_candles_csv(self) -> Optional[dict[str, pd.DataFrame]]:
-        """Fallback: load candles from CSV."""
+        """Fallback: load candles from CSV.
+
+        Paper-farm mode (2026-09-30): the brokerless feed fetcher writes
+        XAUUSD_H1.csv / XAUUSD_D1.csv next to XAUUSD_M5.csv. When present,
+        load them directly — resampling D1 from tail(500) M5 yields ~2 daily
+        bars, leaving d1_trend="unknown" and h4_trend=None on every
+        bridgeless cycle (EMA 50/200 needs 200 D1 bars, EMA 10/50 needs 50
+        H4 bars). H4 resamples from H1 when available. Without the HTF
+        files the legacy resample-from-M5 path is kept unchanged.
+        See tests/test_csv_feed_htf_causal.py.
+        """
         try:
             from broky.data.loader import load_timeframe
             from broky.data.resampler import resample_timeframe
@@ -670,12 +720,27 @@ class LiveTrader:
             if m5_raw.empty:
                 return None
 
-            candles = {
-                "M5": _normalize_columns(m5_raw),
-                "H1": _normalize_columns(resample_timeframe(m5_raw, "H1")),
-                "H4": _normalize_columns(resample_timeframe(m5_raw, "H4")),
-                "D1": _normalize_columns(resample_timeframe(m5_raw, "D1")),
-            }
+            def _load_tf(name: str) -> Optional[pd.DataFrame]:
+                try:
+                    return load_timeframe(self.data_dir, name).tail(WINDOW_SIZE)
+                except FileNotFoundError:
+                    return None
+
+            candles = {"M5": _normalize_columns(m5_raw)}
+
+            h1_raw = _load_tf("H1")
+            if h1_raw is not None and not h1_raw.empty:
+                candles["H1"] = _normalize_columns(h1_raw)
+                candles["H4"] = _normalize_columns(resample_timeframe(h1_raw, "H4"))
+            else:
+                candles["H1"] = _normalize_columns(resample_timeframe(m5_raw, "H1"))
+                candles["H4"] = _normalize_columns(resample_timeframe(m5_raw, "H4"))
+
+            d1_raw = _load_tf("D1")
+            if d1_raw is not None and not d1_raw.empty:
+                candles["D1"] = _normalize_columns(d1_raw)
+            else:
+                candles["D1"] = _normalize_columns(resample_timeframe(m5_raw, "D1"))
             return candles
         except Exception as e:
             logger.error("CSV fallback failed: %s", e)
@@ -916,6 +981,43 @@ class LiveTrader:
             return "ny"
         return "asian"
 
+    def _paper_equity_from_db(self) -> float:
+        """Reconstruct dry_run equity from the DB — brokerless paper farm.
+
+        initial equity + closed PnL + floating PnL of open positions marked
+        at the latest M5 close (self._last_close_price, set each run_once).
+        Floating uses the SAME formula as _monitor_positions closes:
+        BUY (mark-entry)*lot*CONTRACT_SIZE, SELL (entry-mark)*lot*CONTRACT_SIZE.
+        Without a mark price floating is 0 — never fabricate a quote.
+        Live trading NEVER calls this (see _get_equity): real money must see
+        the broker's equity or nothing.
+        """
+        from metty.core.db import get_closed_pnl_sum, get_open_trades
+
+        equity = self._paper_initial_equity + get_closed_pnl_sum(
+            self.account_id, self.db_path
+        )
+        mark = self._last_close_price
+        if mark is not None:
+            for trade in get_open_trades(self.account_id, self.db_path):
+                lot = float(trade.get("lot_size") or 0.0)
+                entry = float(trade.get("entry_price") or 0.0)
+                if lot <= 0 or entry <= 0:
+                    continue
+                if (trade.get("direction") or "").upper() == "BUY":
+                    equity += (mark - entry) * lot * CONTRACT_SIZE
+                else:
+                    equity += (entry - mark) * lot * CONTRACT_SIZE
+        if not self._paper_equity_logged:
+            logger.info(
+                "[%s] Bridge equity unavailable — using paper equity from DB "
+                "(initial=%.2f, closed=%.2f, last_close=%s)",
+                self.display_name, self._paper_initial_equity,
+                get_closed_pnl_sum(self.account_id, self.db_path), mark,
+            )
+            self._paper_equity_logged = True
+        return float(equity)
+
     def _get_equity(self) -> float | None:
         """Get current account equity from MT5. Returns None if unavailable.
 
@@ -940,9 +1042,20 @@ class LiveTrader:
                 signal_group=cfg.signal_group,
             )
             info = MT5Bridge(config).fetch_account_info_sync()
-            return info.equity if info else None
+            equity = info.equity if info else None
+            if equity is None and self.dry_run:
+                # Brokerless paper farm (2026-09-30): with no bridge the cycle
+                # would skip forever. Reconstruct from DB instead — dry_run only,
+                # live still returns None (skip cycle) as before.
+                return self._paper_equity_from_db()
+            return equity
         except Exception as e:
             logger.debug("[%s] Equity fetch failed: %s", self.display_name, e)
+            if self.dry_run:
+                # Brokerless paper farm: bridge unreachable (no MT5 container) —
+                # fall back to DB-derived paper equity instead of skipping the
+                # cycle forever. Live path unchanged (None → cycle skipped).
+                return self._paper_equity_from_db()
             return None
 
     def _get_free_margin(self) -> float | None:
@@ -1992,9 +2105,43 @@ class LiveTrader:
             return {"action": "skip", "reason": "no candle data"}
 
         m5 = candles["M5"]
+        # Paper-farm equity mark: latest M5 close is the price open positions
+        # float against when there is no bridge quote.
+        try:
+            self._last_close_price = float(m5["close"].iloc[-1])
+        except Exception:
+            pass
 
         # 2. Monitor existing positions first
         closed = self._monitor_positions(candles)
+
+        # 2a. Feed staleness guard (paper farm, 2026-09-30): a brokerless CSV
+        # feed that stops updating (Yahoo rate-limit/outage) is re-evaluated
+        # forever otherwise — entries and the paper equity mark freeze against
+        # a bar hours old. MAX_CANDLE_AGE_SECONDS{_<ACCOUNT>} gates it;
+        # 0/unset = off (legacy behavior, VPS bridge feeds unaffected).
+        # Positions were monitored above — exits still work on stale data.
+        _stale_limit = float(os.environ.get(
+            f"MAX_CANDLE_AGE_SECONDS_{self.account}",
+            os.environ.get("MAX_CANDLE_AGE_SECONDS", "0"),
+        ))
+        if _stale_limit > 0:
+            try:
+                _last = m5.index[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+                _age = (datetime.now(timezone.utc) - _last).total_seconds()
+            except Exception:
+                _age = None
+            if _age is not None and _age > _stale_limit:
+                logger.warning(
+                    "[%s] Feed stale: last M5 bar %.0fs old (limit %.0fs) — "
+                    "monitoring only, no new entries",
+                    self.display_name, _age, _stale_limit,
+                )
+                return {
+                    "action": "skip",
+                    "reason": f"feed stale: last M5 bar {_age:.0f}s old "
+                              f"(limit {_stale_limit:.0f}s)",
+                }
 
         # 3. Generate signal
         signal = self._generate_signal(candles)

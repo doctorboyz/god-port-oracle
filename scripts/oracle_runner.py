@@ -518,13 +518,14 @@ def run_bridge_status(db_path: str, notifier, accounts: list):
 
 
 def _seed_portfolio_accounts(accounts: list, db_path) -> None:
-    """Seed + enroll P-accounts (P1-P99) in this container's DB.
+    """Seed + enroll P-accounts (P<digits>) in this container's DB.
 
-    Each P-engine container runs ONE account against its own DB file, so the
-    accounts row must exist before LiveTrader resolves its account_id. This
-    also seeds the variant definitions and enrolls the account (variant_id +
-    baseline + peak + running status + audit event) — self-contained startup,
-    zero extra deploy steps. Idempotent: skips accounts already seeded.
+    The accounts row must exist before LiveTrader resolves its account_id —
+    whether ONE account per container (VPS P-engines) or MANY per container
+    (paper farm: up to ~25 variants share one DB). This also seeds the
+    variant definitions and enrolls the account (variant_id + baseline +
+    peak + running status + audit event) — self-contained startup, zero
+    extra deploy steps. Idempotent: skips accounts already seeded.
 
     Values come from per-account env:
     INITIAL_BALANCE_P1, LEVERAGE_P1, MT5_BRIDGE_P1_HOST/PORT, SIGNAL_GROUP_P1.
@@ -642,11 +643,16 @@ def main():
                 collect_interval, trade_interval, dry_run)
 
     # Auto-login to MT5 before starting trading loops
-    # After container restart, MT5 terminal needs login() to connect to broker
-    logger.info("=== Auto-login MT5 for all accounts ===")
-    login_results = ensure_mt5_logged_in(accounts)
-    logged_in = sum(1 for v in login_results.values() if v)
-    logger.info("MT5 auto-login: %d/%d accounts logged in", logged_in, len(accounts))
+    # After container restart, MT5 terminal needs login() to connect to broker.
+    # Brokerless containers (paper farm — CSV feed, no mt5 service) set
+    # MT5_AUTO_LOGIN=0: retrying 3× against a nonexistent host is pure boot delay.
+    if os.environ.get("MT5_AUTO_LOGIN", "1") != "0":
+        logger.info("=== Auto-login MT5 for all accounts ===")
+        login_results = ensure_mt5_logged_in(accounts)
+        logged_in = sum(1 for v in login_results.values() if v)
+        logger.info("MT5 auto-login: %d/%d accounts logged in", logged_in, len(accounts))
+    else:
+        logger.info("MT5 auto-login SKIPPED (MT5_AUTO_LOGIN=0 — brokerless container)")
 
     scalp_enabled = os.environ.get("SCALP_ENABLED", "0") == "1"
     if scalp_enabled:

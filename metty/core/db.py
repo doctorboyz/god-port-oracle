@@ -395,6 +395,10 @@ def get_connection(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Farm engines run 10 trader threads against one DB in a synchronized
+    # burst every cycle — without a busy timeout, lock contention silently
+    # drops write-only rows (rejections/signals) for that cycle.
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -1303,6 +1307,27 @@ def get_open_trades(
         )
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_closed_pnl_sum(
+    account_id: int,
+    db_path: Optional[Path] = None,
+) -> float:
+    """Sum realized PnL of closed trades for an account (0 when none).
+
+    Paper-farm equity fallback: initial equity + this sum + floating PnL
+    reconstructs dry_run equity without an MT5 bridge.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            """SELECT COALESCE(SUM(pnl), 0) FROM live_trades
+               WHERE account_id = ? AND is_open = 0 AND pnl IS NOT NULL""",
+            (account_id,),
+        )
+        return float(cursor.fetchone()[0] or 0.0)
     finally:
         conn.close()
 
