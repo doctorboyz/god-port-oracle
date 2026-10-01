@@ -34,8 +34,14 @@ COMPOSE_FILE = ROOT / "docker-compose.paper-farm.yml"
 FARM_MODE_ENV = [
     "TRADING_PHASE=trade",          # no collector — feed comes from CSV
     "DRY_RUN=1",                    # paper: insert_live_trade only, never send_order
-    "TRENDING_HARD_BLOCK=1",        # mr-bet MR-only mode (process-global)
-    "RANGING_HARD_BLOCK=1",
+    "TRENDING_HARD_BLOCK=1",        # mr-bet MR-only mode (process-global).
+                                    # NOTE: NO RANGING_HARD_BLOCK here — that is
+                                    # Real-A's gate. MR trades ARE ranging trades;
+                                    # setting both closes every regime (38h / 0
+                                    # trades, tests/test_farm_env_bcd_contract_causal.py)
+    "SESSION_CONFIDENCE_MULT_DISABLED=1",  # BCD contract: MR conf cap 0.65 x
+                                    # ASIAN 0.70 = 0.455 < 0.55 locks out golden
+                                    # hours UTC 0/1/6 (docker-compose.vps.yml)
     "H4_USE_CLOSED_BAR_ONLY=1",
     "M5_SCALP_ENABLED=0",
     "SCALP_ENABLED=0",
