@@ -149,7 +149,10 @@ def fetch_account_equity(account_name: str) -> Optional[float]:
             balance=cfg.initial_balance,
             leverage=cfg.leverage,
             bridge_host=cfg.bridge_host,
-            bridge_port=cfg.bridge_internal_port,
+            # Registry's bridge_port honors MT5_BRIDGE_<name>_PORT (host-cron
+            # dials the published 5009/5010/5011); bridge_internal_port is the
+            # in-container 8001 and is unreachable from the host.
+            bridge_port=cfg.bridge_port,
             signal_group=cfg.signal_group,
         )
         info = MT5Bridge(config).fetch_account_info_sync()
