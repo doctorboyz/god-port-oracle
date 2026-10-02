@@ -57,6 +57,14 @@ FARM_MODE_ENV = [
     "MT5_BRIDGE_MAX_RETRIES=0",     # brokerless: bridge intentionally OFF —
                                     # no connect attempt, no ERROR spam per cycle
     "MT5_BRIDGE_RETRY_DELAY=0",
+    "MOCK_SPREAD_POINTS=20",        # brokerless spread (points): farm has no
+                                    # MT5, so _get_current_spread() returned
+                                    # None and cut EVERY surviving signal with
+                                    # "spread unavailable" (P20 canary: 7/7
+                                    # skipped, 2026-10-02). 20 pts = $0.20:
+                                    # passes SWING_MAX_SPREAD=30 and keeps
+                                    # MR_COST_MULT=3.0 meaningful (TP >= $0.60
+                                    # — real ATR-scaled TPs clear it).
     "MAX_CANDLE_AGE_SECONDS=1800",  # stale-feed guard (GC=F delay ~10-15 min;
                                     # 30 min trips only on a real outage)
     "DAILY_SUMMARY_DISABLED=1",

@@ -78,6 +78,26 @@ class TestFarmEnvBcdContractCausal:
             "unlike the real BCD this farm mirrors"
         )
 
+    def test_mock_spread_points_set(self):
+        # Brokerless farm has no MT5: without a mock spread,
+        # _get_current_spread() returns None and run_once cuts every
+        # surviving signal with "spread unavailable" (P20 canary: 7/7
+        # skipped, 2026-10-02). The value must stay meaningful —
+        # <= SWING_MAX_SPREAD (30) so entries pass, > 0 so MR_COST_MULT
+        # (TP >= 3x spread) keeps enforcing cost coverage.
+        env = _services()["oracle-engine-farm1"]["environment"]
+        matches = [e for e in env if e.startswith("MOCK_SPREAD_POINTS=")]
+        assert matches, (
+            "farm must set MOCK_SPREAD_POINTS — brokerless _get_current_spread() "
+            "is always None and every surviving signal dies on "
+            "'spread unavailable (MT5 disconnected?)'"
+        )
+        value = float(matches[0].split("=", 1)[1])
+        assert 0 < value <= 30.0, (
+            f"MOCK_SPREAD_POINTS={value} is inconsistent with farm gates: "
+            "0 blinds MR_COST_MULT, >30 fails SWING_MAX_SPREAD=30"
+        )
+
     def test_every_service_strips_app_env(self):
         # /app/.env (Real-A era, 70 keys incl. MT5 credentials) must never
         # reach load_dotenv() in a farm container.

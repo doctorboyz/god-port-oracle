@@ -542,7 +542,36 @@ class LiveTrader:
 
         Callers should skip the cycle if spread is None — using 0.0 would
         calculate stop-loss too tight, risking premature SL hits.
+
+        Brokerless/farm override (2026-10-02): MOCK_SPREAD_POINTS{_<ACCOUNT>}
+        (POINTS). When set, return it WITHOUT touching the bridge — the
+        paper farm runs without MT5 (MT5_BRIDGE_MAX_RETRIES=0), so the None
+        below cut every surviving signal with "spread unavailable" (P20
+        canary: 7/7 skipped). Farm uses 20 points = $0.20: passes
+        SWING_MAX_SPREAD=30 and keeps MR_COST_MULT=3.0 meaningful
+        (TP >= 3 x $0.20 = $0.60 — real ATR-scaled TPs clear it easily).
+        Unset → legacy bridge path (live/VPS unchanged). See
+        tests/test_spread_mock_farm_causal.py.
         """
+        mock = os.environ.get(
+            f"MOCK_SPREAD_POINTS_{self.account}",
+            os.environ.get("MOCK_SPREAD_POINTS"),
+        )
+        if mock is not None:
+            try:
+                value = float(mock)
+            except ValueError:
+                logger.warning(
+                    "[%s] MOCK_SPREAD_POINTS not a number: %r — ignoring",
+                    self.display_name, mock,
+                )
+            else:
+                if value >= 0:
+                    return value
+                logger.warning(
+                    "[%s] MOCK_SPREAD_POINTS negative: %r — ignoring",
+                    self.display_name, mock,
+                )
         try:
             from metty.bridge.client import MT5Bridge
             from metty.core.account_registry import get_account_config
