@@ -1,17 +1,46 @@
 # HANDOFF — Portfolio-cent P1-P3 paper-parallel
 
-> **ฉบับปัจจุบัน (แทนที่เก่า)** · เขียน 2026-09-18 โดย God Port (Metty role) · ต่องานได้ทันทีจากเอกสารนี้เล่มเดียว
+> **ฉบับปัจจุบัน (แทนที่เก่า)** · เขียน 2026-09-18 โดย God Port (Metty role) · อัปเดต 2026-09-21 หลังแก้ P3 สำเร็จ · ต่องานได้ทันทีจากเอกสารนี้เล่มเดียว
 > เอกสารอ้างอิง: proposal `ψ/outbox/proposal_portfolio-cent-20260915T172221Z.md` (Hermes APPROVED 2026-09-16, คำตัดสิน Q1-Q5) · status `ψ/outbox/status_portfolio-deploy-phase1_20260916.md` · runbook `ψ/plans/portfolio-p1p3-paper-deploy.md` · ISSUE-087
 
 ---
 
-## ⚠️ สถานะปัจจุบัน (2026-09-18): **หยุดทั้งหมดตามคำสั่งคุณหมอ (ตัวเลือก a)**
+## ⚠️ อัปเดตใหญ่ 2026-09-23: งาน active ตอนนี้คือ mr-bet (ไม่ใช่ P1-P3)
 
-คุณหมอสั่งหยุดงาน P1-P3 ทั้งหมด ผ่าน Hermes — **engine-p1..3 + mt5p1..3 ถูก `docker stop` ไปแล้วทั้ง 6 ตัว** ตั้งแต่ 2026-09-18 ~14:50 UTC ไม่มีอะไรรันอยู่เบื้องหลัง กลับมาทำต่อ = start containers ตาม §3
+คุณหมอสั่งรื้อแนวเทรดเก่าทั้งหมดบน demo B/C/D แล้วมาทดสอบ **mr-bet framework** (high-WR mean reversion) — branch `mr-bet-bcd` deploy เรียบร้อย (ดู plan เดิม `~/.claude/plans/sequential-honking-whisper.md` + retro `ψ/memory/retrospectives/2026-09/23/`)
 
-**เหตุผลที่หยุด**: แก้ login ไม่สำเร็จเพราะ MT5 terminal build ใหม่ (6198) ตายบน wine (ดู §2) + คุณหมอไม่ต้องการให้ไปต่อในตอนนี้ ทั้งนี้แม้จะไม่หยุดก็ไม่มีความเสี่ยงเงินจริง (DRY_RUN_PORTFOLIO=1 + bridge ต่อไม่ได้ = ส่ง order ไม่ได้อยู่แล้ว)
+**สถานะล่าสุดหลัง deploy ครั้งที่ 2 (23 ก.ย. แก้ 2 bug)**:
+- RR bug แก้แล้ว (commit 5e91619): env `RR_RATIO_*`/`MIN_CONFIDENCE_*` ชนะ risk_config เสมอ — ตรวจรับจาก LiveTrader object จริงใน container: B=0.8/C=1.0/D=1.2, conf 0.55 ครบ ✅
+- ฐาน drawdown D รีเซ็ตแล้ว (commit b51744d): `initial_equity=355.67` ยืนยันจาก object จริง ✅ ไม่มี "Account drawdown limit" อีก
+- Real-A (oracle-engine) + mt5a ไม่โดนแตะ (Up 2 days / Up 2 months) ✅
+- **deploy เผลอ recreate mt5b/c/d** (base image rebuild) → terminal บูต ~30 นาที กว่า healthcheck (start-period 180s) จะกลับมา healthy — เก็บเป็น ISSUE-090: ทุกครั้งที่ recreate mt5 container, compose จะปฏิเสธสตาร์ท train จน terminal healthy — **deploy รอบหน้าให้ up mt5b/c/d ก่อน รอ healthy แล้ว up train**
+- บทเรียนสำคัญ (ISSUE-089): ตรวจรับ config ต้องอ่านจาก object ที่ใช้จริง ไม่ใช่ echo os.environ — **ตรวจรับมาตรฐาน: `docker cp scripts/verify_deploy.py oracle-engine-train:/tmp/ && docker exec oracle-engine-train python /tmp/verify_deploy.py --accounts B,C,D --preset mr-bet`** (อ่านค่าจาก LiveTrader จริง, ผิดเมทริกซ์ = exit 1) — ใช้แทนการเขียนสคริปต์ /tmp ใหม่ทุกครั้ง
+- การทดสอบเดินหน้าเรื่อยๆ: เกณฑ์ PF>1.3 หลัง cost ที่ 200+ ไม้ — สถิติกรอง `strategy_id LIKE 'mr-bet-%'` และแยกช่วงก่อน/หลัง fix RR (5e91619) เพราะไม้ก่อน fix ใช้ RR 2.5
 
-**Real-A ปลอดภัย**: `oracle-engine` + `mt5a` ยัง "Up 2 months" เป๊ะ แต่พบ `oracle-engine-train` **"Up About an hour"** ซึ่งไม่ตรง baseline เดิม (ควรจะ Up 3 weeks+) — session นี้ไม่ได้แตะ container นี้ แค่ engine-p1 (ที่หยุดเอง) — **คุณหมอควรตรวจว่า train restart ได้เช่นไร** (อาจ crash + auto-restart ด้วย `restart: unless-stopped`)
+---
+
+## ⚠️ สถานะปัจจุบัน (2026-09-21): **P3 แก้สำเร็จ — bridge ครบทั้ง 7 บัญชี**
+
+สรุปการตรวจสอบ + แก้ P3 วันที่ 21 ก.ย. (สั่งโดยคุณหมอ):
+
+1. **P3 กลับมาใช้ได้แล้ว**: terminal mt5p3 รัน build **6182** (ไม่ใช่ 6198) และ authorize '184149114' @ Exness-MT5Real25 สำเร็จ 15:08 — `account_info()` คืน login ครบ
+   - ข้อความ "Invalid account" ที่เห็นช่วง 14:55 เป็นอาการชั่วคราว ไม่ใช่บัญชีตาย
+   - **บทเรียนสำคัญ**: blocker เดิมไม่ใช่ "build ใหม่ทุกตัว" แต่เฉพาะ build 6198 — build 6182 ใช้ IPC บน Wine 10 ได้ปกติ (mt5p1 รัน 6182 + initialize ผ่าน)
+2. **บล็อก LiveUpdate แล้วทั้ง 3 ตัว (mt5p1/p2/p3)**: ลบ dir `liveupdate` ใน data dir `D0E8209F77C8CF37AD8BF550E51FF075` แล้ววาง **ไฟล์เปล่าชื่อ `liveupdate`** แทน (terminal mkdir ทับไฟล์ไม่ได้ → update ตายตั้งแต่ staging) — แพตเทิร์นเดียวกับที่ mt5a เป็นอยู่ ("failed to save mt5clw64.6182" แต่ยังเทรดได้มา 2 เดือน)
+   - แก้กลับ: `rm` ไฟล์นั้นแล้ว mkdir ชื่อ `liveupdate`
+3. **สิ่งที่ยังบล็อกการเทรด P1-P3 (ไม่ใช่ bug)**: Exness ปิด **"trading has been disabled - disabled on server"** + "balance management disabled" เพราะเป็นบช. cent ยอด **$0** — ต้องฝากเงินเข้า (เท่าไหร่ก็ได้ ไม่ใช่ $0) Exness จะเปิดเอง
+4. **Real-A ยอด $0 จริง ไม่ใช่พอร์ตแตก**: deal history แสดงถอน $296.70 เมื่อ ~14 ก.ค. หลัง trade สุดท้าย (13 ก.ค.) — engine ยังวิเคราะห์ปกติทุก 5 นาที แต่ drawdown block ใน DB จำ equity เก่า $299.59 ไว้ ถ้าจะกลับมาเทรด Real-A ต้อง (a) ฝากเงิน (b) เคลียร์ค่า drawdown block
+5. **mt5a ปลอดภัยแล้วโดย design**: dir `liveupdate` ของ mt5a ถูก chmod read-only (`dr-xr-xr-x`) ไว้ตั้งแต่ 2026-09-20 23:23 (session ก่อนทำ) — นั่นคือสาเหตุที่ LiveUpdate มันล้มเหลวทุก ~5 นาที ("failed to save mt5clw64.6182") ไม่ใช่ความบังเอิญ Real-A จึงอยู่บน build เดิมที่ IPC ใช้ได้
+
+---
+
+## สถานะ engine/containers (อัปเดต 2026-09-21)
+
+**engine-p1..3 ยังหยุดอยู่** (Exited ตามคำสั่งคุณหมอ 2026-09-18 ตัวเลือก a) — แต่ **mt5p1..3 ถูก start กลับมาแล้ว** และตอนนี้ bridge ใช้ได้ครบทั้ง 3 ตัว ไม่มีความเสี่ยงเงินจริง (DRY_RUN_PORTFOLIO=1 + บช. $0 = Exness ปิด trading server-side อยู่แล้ว)
+
+ประวัติเหตุผลที่หยุด (2026-09-18): แก้ login ไม่สำเร็จเพราะ terminal build 6198 ตายบน wine (ดู §2) — **ตอนนี้อุปสรรคนั้นหมดไปแล้ว** (build 6182 ใช้ IPC ได้)
+
+**oracle-engine / oracle-engine-train**: Up 36h ทั้งคู่ (restart พร้อมกัน ~2026-09-19 น่าจะจาก deploy commit 2cdd701) — Real-A วิเคราะห์ตลาดปกติ แต่เทรดจริงไม่ได้เพราะยอด $0 (ถอนออกแล้ว 14 ก.ค.) + drawdown block ค้างใน DB
 
 ## 1. งานที่เสร็จแล้ว (สรุปใหม่)
 
@@ -69,6 +98,8 @@ ssh vpsdeluna 'sqlite3 /opt/god-port/data/p1/oracle_p1.db \
   "SELECT name, portfolio_status, variant_id, baseline_balance FROM accounts;"'
 
 # 5. ตั้ง host crontab (ยังไม่ได้ตั้ง — Claude CronCreate ไม่ survive session)
+#    2026-10-02 (ISSUE-094): มีรายการใหม่เพิ่ม — mr-bet PF monitor รายวัน 10:17 BKK
+#    (ตรวจ TZ ก่อนติดตั้ง: timedatectl — ถ้า UTC ใช้ '17 3 * * *')
 ssh vpsdeluna 'crontab -e'
 # */30 * * * * cd /opt/god-port-oracle && source .env && PORTFOLIO_ACCOUNTS=P1,P2,P3 \
 #   ACCOUNTS=P1,P2,P3 MT5_BRIDGE_P1_HOST=127.0.0.1 MT5_BRIDGE_P1_PORT=5009 \
@@ -76,6 +107,12 @@ ssh vpsdeluna 'crontab -e'
 #   MT5_BRIDGE_P3_HOST=127.0.0.1 MT5_BRIDGE_P3_PORT=5011 \
 #   python3 scripts/portfolio_manager.py --db-dir /opt/god-port/data --psi-dir ψ \
 #   >> /var/log/portfolio-manager.log 2>&1
+# 17 10 * * * cd /opt/god-port-oracle && set -a && . ./.env && set +a && \
+#   docker cp scripts/pf_monitor.py oracle-engine-train:/tmp/pf_monitor.py && \
+#   docker exec -i -e TG_BOT_TOKEN -e TG_CHAT_ID -e REPORTING_ENABLED=1 \
+#   oracle-engine-train python3 /tmp/pf_monitor.py >> /var/log/pf-monitor.log 2>&1
+#   (เกณฑ์: PF<0.5 / ไม่มีไม้ >24h (ปิดช่วง weekend) / balance -5% ต่อวันเทียบ snapshot
+#    รันก่อน; ต้อง git pull บน VPS ก่อนครั้งแรกเพื่อให้มี scripts/pf_monitor.py)
 
 # 6. เขียนรายงานผล ψ/outbox/result_portfolio-*.md ให้ Hermes (ตาม PM addition 3) — ยังไม่ได้เขียน
 ```

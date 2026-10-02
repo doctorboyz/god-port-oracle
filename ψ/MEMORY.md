@@ -1,0 +1,5 @@
+- [MT5 healthy ≠ terminal logged in](memory/learnings/2026-09-24_mt5-healthy-ne-terminal-logged-in.md) — หลัง recreate: รอ 'Snapshot collected' ไม่ใช่ healthcheck; auto-login ยอมแพ้เร็ว
+- [Live mr-bet data lives in VPS container DB](memory/learnings/2026-09-24_live-mr-bet-data-in-container-db.md) — อย่าใช้ local oracle_vps.db (stale พ.ค.); query oracle_train.db ใน oracle-engine-train + RPyC bridge ไม่ใช่ HTTP; แยกไม้ก่อน/หลัง fix RR
+- [Compose env no-op class](memory/learnings/2026-10-02_compose-env-noop-class.md) — knob ใหม่ = pattern RANGING_HARD_BLOCK + subprocess contract test พิสูจน์ env ถึง flag (ห้าม reload)
+- [COPY . . bakes context](memory/learnings/2026-10-02_copy-dotdot-bakes-context.md) — .dockerignore บังคับ; เอา .env ออก = load_dotenv no-op ต้อง pin คืนใน compose; ผลจริง 3.98GB→1.67GB
+- [Login retry needs spacing](memory/learnings/2026-10-02_login-retry-needs-spacing.md) — boot window เป็น "ช่วงเวลา" ไม่ใช่สถานะถาวร; retry bound ต้อง < cycle interval; brokerless guard ก่อน rpyc
