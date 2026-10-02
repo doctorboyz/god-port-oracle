@@ -104,6 +104,13 @@ services:
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
       - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      # ISSUE-103 (2026-10-02): .env is no longer baked into the image, so
+      # load_dotenv() inside the container is a no-op. Pin here (compose
+      # interpolation reads the host .env at compose time) to preserve the
+      # values that previously leaked in via the baked copy (host .env L80).
+      # LEARNING_MODE=0 mirrors the vps compose C3 guard: never on Real-A.
+      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
+      - LEARNING_MODE=0
     volumes:
       - shared-data:/app/data
     depends_on:

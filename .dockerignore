@@ -1,0 +1,46 @@
+# .dockerignore — ISSUE-103 (2026-10-02)
+# COPY . . previously baked data/ 1.6GB (oracle.db 1.4GB), .git/ 49M, ψ/ 15M,
+# tests/ 3.2M AND the host .env (real MT5 credentials) into every image layer.
+# Disk hit 100% mid-deploy 2026-10-02 because rebuilds re-accumulate these
+# layers. Runtime NEVER reads baked data/ — every compose file shadows
+# /app/data with a volume (named volume or bind mount).
+#
+# KEEP baked (runtime needs them): scripts/, broky/, metty/, shared/, docker/,
+# pyproject.toml, Dockerfile, farm_variants.yml.
+
+# Secrets — /app/.env leak class (ISSUE-099) dies with this
+.env
+.env.*
+
+# Runtime data — always volume-mounted, never read from the baked copy
+data
+*.db
+*.log
+*.pkl
+*.joblib
+models
+
+# VCS / host-only tooling
+.git
+.gitignore
+.claude
+.synapse
+.codex
+.pytest_cache
+.ruff_cache
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+
+# Host-only agent memory system — zero runtime references
+ψ
+
+# Tests / build artifacts
+tests
+graphify-out
+*.egg-info
+build
+dist
+.DS_Store
