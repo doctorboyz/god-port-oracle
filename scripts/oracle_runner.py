@@ -573,21 +573,21 @@ def _seed_portfolio_accounts(accounts: list, db_path) -> None:
             logger.warning("Could not seed portfolio account %s: %s", acct_name, exc)
 
 
-def main():
-    phase = os.environ.get("TRADING_PHASE", "both")
-    accounts = os.environ.get("ACCOUNTS", "A,B,C").split(",")
-    db_path = os.environ.get("DB_PATH", "/app/data/oracle.db")
-    collect_interval = int(os.environ.get("COLLECT_INTERVAL", "300"))
-    trade_interval = int(os.environ.get("TRADE_INTERVAL", "300"))
-    dry_run = os.environ.get("DRY_RUN", "1") == "1"
+def _seed_default_accounts(db_path) -> None:
+    """Seed demo A/B/C accounts if they don't exist yet (legacy behavior).
 
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    from metty.core.db import init_db, insert_account
-    init_db(Path(db_path))
-
-    # Seed demo accounts if they don't exist yet
+    Farm opt-out (2026-10-02): SEED_DEFAULT_ACCOUNTS=0 skips seeding
+    entirely. The paper farm DBs hold only P-accounts, and this seeder
+    runs on EVERY boot — deleting the A/B/C rows was futile because the
+    next restart re-created them (live proof: deleted rows came back as
+    ids 14-16 after the 10:00 UTC redeploy, caught by
+    farm_balance_snapshot). Unset/1 → legacy seeding (VPS unchanged).
+    See tests/test_default_account_seeding_causal.py.
+    """
+    if os.environ.get("SEED_DEFAULT_ACCOUNTS", "1") != "1":
+        logger.info("SEED_DEFAULT_ACCOUNTS=0 — skipping A/B/C demo seeding")
+        return
+    from metty.core.db import insert_account
     default_accounts = {
         "A": {"balance": 100.0, "leverage": 2000, "host": os.environ.get("MT5_BRIDGE_A_HOST", "mt5a"), "port": int(os.environ.get("MT5_BRIDGE_A_PORT", "8001")), "group": "conservative"},
         "B": {"balance": 500.0, "leverage": 500, "host": os.environ.get("MT5_BRIDGE_B_HOST", "mt5b"), "port": int(os.environ.get("MT5_BRIDGE_B_PORT", "8001")), "group": "moderate"},
@@ -607,6 +607,23 @@ def main():
             logger.info("Seeded account %s", acct_name)
         except Exception:
             pass  # Account already exists
+
+
+def main():
+    phase = os.environ.get("TRADING_PHASE", "both")
+    accounts = os.environ.get("ACCOUNTS", "A,B,C").split(",")
+    db_path = os.environ.get("DB_PATH", "/app/data/oracle.db")
+    collect_interval = int(os.environ.get("COLLECT_INTERVAL", "300"))
+    trade_interval = int(os.environ.get("TRADE_INTERVAL", "300"))
+    dry_run = os.environ.get("DRY_RUN", "1") == "1"
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from metty.core.db import init_db
+    init_db(Path(db_path))
+
+    _seed_default_accounts(db_path)
 
     # Seed portfolio accounts (P1-P99): each P-engine container runs ONE
     # account against its own DB file, so the row must exist before

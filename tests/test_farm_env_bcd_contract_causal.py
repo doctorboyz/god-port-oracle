@@ -98,6 +98,16 @@ class TestFarmEnvBcdContractCausal:
             "0 blinds MR_COST_MULT, >30 fails SWING_MAX_SPREAD=30"
         )
 
+    def test_default_account_seeding_disabled(self):
+        # The boot-time A/B/C demo seeder re-created deleted rows on every
+        # restart (zombie accounts id 14-16 on 2026-10-02) — farm DBs must
+        # opt out. Unset/1 = legacy seeding (VPS unchanged).
+        env = _services()["oracle-engine-farm1"]["environment"]
+        assert "SEED_DEFAULT_ACCOUNTS=0" in env, (
+            "farm must set SEED_DEFAULT_ACCOUNTS=0 — deleting A/B/C rows is "
+            "futile while every restart re-seeds them"
+        )
+
     def test_every_service_strips_app_env(self):
         # /app/.env (Real-A era, 70 keys incl. MT5 credentials) must never
         # reach load_dotenv() in a farm container.

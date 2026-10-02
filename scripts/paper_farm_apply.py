@@ -54,6 +54,10 @@ FARM_MODE_ENV = [
     "TRADE_INTERVAL=300",
     "ML_FILTER_ENABLED=0",
     "MT5_AUTO_LOGIN=0",             # no mt5 service in this compose — skip boot retries
+    "SEED_DEFAULT_ACCOUNTS=0",      # farm DBs hold only P-accounts: the boot-time
+                                    # A/B/C demo seeder re-created deleted rows on
+                                    # every restart (came back as id 14-16 after the
+                                    # 2026-10-02 redeploy). Unset/1 = legacy (VPS).
     "MT5_BRIDGE_MAX_RETRIES=0",     # brokerless: bridge intentionally OFF —
                                     # no connect attempt, no ERROR spam per cycle
     "MT5_BRIDGE_RETRY_DELAY=0",
