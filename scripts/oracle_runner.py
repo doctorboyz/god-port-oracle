@@ -44,6 +44,15 @@ from shared.events import EventBus
 
 _event_bus = EventBus()
 
+# MT5 re-login spaced retry (2026-10-02, ISSUE-093): when a container is
+# recreated the terminal GUI finishes auto-login MINUTES after the healthcheck
+# turns healthy, so a single unspaced login attempt per cycle gave up while the
+# terminal was still booting (live 2026-09-24: auto-login quit 02:48, terminal
+# self-logged-in 03:03). These knobs bound the retry loop inside
+# _mt5_health_check: 3 x 60s = 180s < the 300s cycle interval.
+MT5_RELOGIN_ATTEMPTS = int(os.environ.get("MT5_RELOGIN_ATTEMPTS", "3"))
+MT5_RELOGIN_SPACING_SECONDS = int(os.environ.get("MT5_RELOGIN_SPACING_SECONDS", "60"))
+
 
 def ensure_mt5_logged_in(accounts: list, max_retries: int = 3) -> dict:
     """Auto-login to MT5 for each account before trading starts.
@@ -112,58 +121,100 @@ def ensure_mt5_logged_in(accounts: list, max_retries: int = 3) -> dict:
                     time.sleep(5)
 
         if name not in results:
-            logger.error("[%s] MT5 auto-login FAILED after %d attempts — manual VNC login required", display, max_retries)
+            # 2026-10-02 (ISSUE-093): the old message claimed "manual VNC login
+            # required" — false: the terminal GUI self-logs-in minutes later and
+            # the cycle health check below retries with spacing.
+            logger.error(
+                "[%s] MT5 auto-login not ready after %d attempts — terminal likely "
+                "still booting; cycle health check will retry (spaced)",
+                display, max_retries,
+            )
             results[name] = False
 
     return results
 
 
 def _mt5_health_check(account: str) -> bool:
-    """Quick check if MT5 is logged in for an account. Re-login if not.
+    """Check if MT5 is logged in for an account, re-login with spacing if not.
 
     Returns True if MT5 is responsive and logged in, False otherwise.
     Called before each trading/collection cycle to handle disconnections.
+
+    2026-10-02 (ISSUE-093): previously a single unspaced attempt per cycle.
+    The terminal GUI finishes auto-login minutes AFTER the healthcheck turns
+    healthy, so one attempt reliably gave up mid-boot. Now bounded spaced
+    retries (MT5_RELOGIN_ATTEMPTS x MT5_RELOGIN_SPACING_SECONDS, defaults
+    3 x 60s — under the 300s cycle). Brokerless containers pin
+    MT5_AUTO_LOGIN=0 and skip rpyc entirely (paper farm noise dies too).
     """
     import rpyc
 
+    if os.environ.get("MT5_AUTO_LOGIN", "1") == "0":
+        return False
+
     cfg = get_account_config(account)
     display = cfg.display_name
-    try:
-        conn = rpyc.connect(
-            cfg.bridge_host, cfg.bridge_internal_port,
-            config={"sync_request_timeout": 10},
-        )
-        # Quick check: can we get account_info?
-        info = conn.root.account_info()
-        if info is not None:
-            # Already logged in — just close and return
-            conn.close()
-            return True
 
-        # Not logged in — try to login
-        logger.info("[%s] MT5 not logged in, auto-reconnecting...", display)
-        conn.root.initialize()
-        login_ok = conn.root.login(
-            int(cfg.broker_login),
-            cfg.broker_password,
-            cfg.broker_server,
-        )
-        if login_ok:
+    for attempt in range(1, MT5_RELOGIN_ATTEMPTS + 1):
+        conn = None
+        try:
+            conn = rpyc.connect(
+                cfg.bridge_host, cfg.bridge_internal_port,
+                config={"sync_request_timeout": 10},
+            )
+            # Quick check: can we get account_info?
             info = conn.root.account_info()
             if info is not None:
-                balance = info["balance"]
-                equity = info["equity"]
-                logger.info("[%s] MT5 re-login successful: balance=%.2f equity=%.2f", display, balance, equity)
+                if attempt > 1:
+                    logger.info("[%s] MT5 re-login successful on attempt %d", display, attempt)
                 conn.close()
                 return True
+
+            # Not logged in — try to login
+            logger.info(
+                "[%s] MT5 not logged in, auto-reconnecting (attempt %d/%d, "
+                "terminal may still be booting)...",
+                display, attempt, MT5_RELOGIN_ATTEMPTS,
+            )
+            init_ok = conn.root.initialize()
+            if not init_ok:
+                err = conn.root.last_error()
+                logger.warning("[%s] MT5 initialize failed (attempt %d): %s", display, attempt, err)
+                conn.close()
+                conn = None
             else:
-                logger.warning("[%s] MT5 login returned True but account_info still None", display)
-        else:
-            err = conn.root.last_error()
-            logger.warning("[%s] MT5 re-login failed: %s", display, err)
-        conn.close()
-    except Exception as e:
-        logger.warning("[%s] MT5 health check failed: %s", display, e)
+                login_ok = conn.root.login(
+                    int(cfg.broker_login),
+                    cfg.broker_password,
+                    cfg.broker_server,
+                )
+                if login_ok:
+                    info = conn.root.account_info()
+                    if info is not None:
+                        balance = info["balance"]
+                        equity = info["equity"]
+                        logger.info(
+                            "[%s] MT5 re-login successful: balance=%.2f equity=%.2f",
+                            display, balance, equity,
+                        )
+                        conn.close()
+                        return True
+                    logger.warning("[%s] MT5 login returned True but account_info still None", display)
+                else:
+                    err = conn.root.last_error()
+                    logger.warning("[%s] MT5 re-login failed (attempt %d): %s", display, attempt, err)
+                conn.close()
+                conn = None
+        except Exception as e:
+            logger.warning("[%s] MT5 health check failed (attempt %d): %s", display, attempt, e)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        # Space out attempts so the terminal has time to finish booting.
+        if attempt < MT5_RELOGIN_ATTEMPTS:
+            time.sleep(MT5_RELOGIN_SPACING_SECONDS)
 
     return False
 
