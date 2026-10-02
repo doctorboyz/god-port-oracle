@@ -97,10 +97,14 @@ ssh vpsdeluna 'docker exec oracle-engine-p1 python /tmp/bridge_check.py 1'  # �
 ssh vpsdeluna 'sqlite3 /opt/god-port/data/p1/oracle_p1.db \
   "SELECT name, portfolio_status, variant_id, baseline_balance FROM accounts;"'
 
-# 5. ตั้ง host crontab (ยังไม่ได้ตั้ง — Claude CronCreate ไม่ survive session)
-#    2026-10-02 (ISSUE-094): มีรายการใหม่เพิ่ม — mr-bet PF monitor รายวัน 10:17 BKK
-#    (ตรวจ TZ ก่อนติดตั้ง: timedatectl — ถ้า UTC ใช้ '17 3 * * *')
-ssh vpsdeluna 'crontab -e'
+# 5. ✅ ติดตั้ง host crontab แล้ว (2026-10-03, คุณหมออนุมัติ "ติดตั้ง crontab เลย พร้อม portfolio_manager")
+#    4 แถว: demo-D pull + env backup (เดิม) + portfolio_manager */30 + PF monitor "17 3 * * *"
+#    (03:17 UTC = 10:17 BKK, VPS timedatectl = UTC ยืนยันแล้ว) — backup ก่อนติดตั้ง: /opt/env-backups/crontab.bak.20261003
+#    smoke test ผ่านทั้งสอง job ด้วยคำสั่ง cron ตัวจริง: PM ต่อ bridge ได้ทั้ง 3 ใบ (127.0.0.1:5009/5010/5011,
+#    equity จริง, 0 actions), PF monitor รายงานออก + จับ anomaly จริง (B/C/D PF<0.5 ทั้งสามใบ, C no-trade 44.8h)
+#    ⚠️ แก้ bug ก่อนติดตั้งได้ผล: portfolio_manager ต่อ bridge ผิด port (internal 8001 แทน published
+#    5009/5010/5011) — runbook env เดิมเป็น no-op, ต้องแก้โค้ดก่อน (fix + causal test ใน mr-bet-bcd:
+#    scripts/portfolio_manager.py ใช้ cfg.bridge_port แล้ว, full suite 1048 passed)
 # */30 * * * * cd /opt/god-port-oracle && source .env && PORTFOLIO_ACCOUNTS=P1,P2,P3 \
 #   ACCOUNTS=P1,P2,P3 MT5_BRIDGE_P1_HOST=127.0.0.1 MT5_BRIDGE_P1_PORT=5009 \
 #   MT5_BRIDGE_P2_HOST=127.0.0.1 MT5_BRIDGE_P2_PORT=5010 \
@@ -129,7 +133,9 @@ ssh vpsdeluna 'crontab -e'
 
 ## 5. คำถามค้างที่ต้องตอบเมื่อกลับมาทำต่อ
 
-1. **Standard หรือ Cent**: บช. 3 ใบเป็น real (Exness-MT5Real25) แต่ยังไม่รู้ว่า Standard หรือ Cent (ยังไม่เคยดึง `account_info` สำเร็จเพราะ §2) — ต้องดู currency (USCent = cent) เพื่อตั้ง `ACCOUNT_TYPE_P1..P3=real|cent_real` ใน .env ให้ถูก (ตอนนี้ default `demo` ทำให้ display name เป็น "Demo-P1" ทั้งที่เป็นบช.จริง)
+1. **Standard หรือ Cent**: ✅ ตอบแล้ว (2026-10-03) — smoke test portfolio_manager ต่อ bridge สำเร็จ
+   symbol resolve เป็น **XAUUSDc** → ทั้งสามใบเป็น **Cent accounts** → ควรตั้ง `ACCOUNT_TYPE_P1..P3=cent_real`
+   ใน .env VPS (ตอนนี้ default `demo` ทำให้ display name "Demo-P1" ทั้งที่เป็นเงินจริง) — รอคุณหมออนุมัติแก้ .env
 2. **DRY_RUN_PORTFOLIO=0**: รอคุณหมอตัดสินใจหลัง verify ว่า engine รันสมบูรณ์ + รู้ประเภทบช.แน่ชัด
 
 ## 6. ตัวเลขพารามิเตอร์ variant (จาก proposal §4) — ตั้งค่าไว้ใน compose/generator แล้ว

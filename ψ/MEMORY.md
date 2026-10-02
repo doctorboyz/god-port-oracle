@@ -3,3 +3,5 @@
 - [Compose env no-op class](memory/learnings/2026-10-02_compose-env-noop-class.md) — knob ใหม่ = pattern RANGING_HARD_BLOCK + subprocess contract test พิสูจน์ env ถึง flag (ห้าม reload)
 - [COPY . . bakes context](memory/learnings/2026-10-02_copy-dotdot-bakes-context.md) — .dockerignore บังคับ; เอา .env ออก = load_dotenv no-op ต้อง pin คืนใน compose; ผลจริง 3.98GB→1.67GB
 - [Login retry needs spacing](memory/learnings/2026-10-02_login-retry-needs-spacing.md) — boot window เป็น "ช่วงเวลา" ไม่ใช่สถานะถาวร; retry bound ต้อง < cycle interval; brokerless guard ก่อน rpyc
+- [Pre-deploy check context ไม่ใช่ runbook](memory/learnings/2026-10-03_pre-deploy-check-context-not-runbook.md) — up --build ก่อนเช็ค 3 ข้อ: share image กับใคร, อะไรถูก recreate, state อะไรหาย; two-phase จำเป็นเฉพาะ recreate mt5 จริง
+- [Pipe กลืน exit code ผ่าน ssh](memory/learnings/2026-10-03_pipe-swallows-ssh-exit-code.md) — background deploy จบด้วย pipe = exit 0 แอบแม้ build ล้ม; echo exit code + อ่าน output ก่อนเชื่อ notification
