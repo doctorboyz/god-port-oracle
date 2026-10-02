@@ -168,6 +168,16 @@ class MT5Bridge:
 
     async def connect(self) -> bool:
         """Connect to the RPyC bridge server and initialize MT5."""
+        # MT5_BRIDGE_MAX_RETRIES=0 = bridge intentionally off (brokerless
+        # paper farm): not a fault, so no rpyc attempt and no ERROR spam —
+        # 10 farm accounts x 4 calls x 288 cycles was 11,520 ERROR lines/day.
+        if MAX_RETRIES <= 0:
+            logger.debug(
+                "Bridge disabled (MT5_BRIDGE_MAX_RETRIES=0) for %s:%s",
+                self.host, self.port,
+            )
+            self._connected = False
+            return False
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 self._conn = await asyncio.to_thread(

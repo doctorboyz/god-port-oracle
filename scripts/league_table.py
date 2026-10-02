@@ -36,7 +36,10 @@ def _db_paths(args: list[str]) -> list[Path]:
     if args:
         return [Path(a) for a in args]
     found = sorted(glob.glob(str(ROOT / "data" / "farm" / "*" / "*.db")))
-    return [Path(p) for p in found]
+    # Skip daily backups (data/farm/backup/*.db) — same schema as the live DB
+    # (it's a copy), so _is_farm_db alone can't tell them apart; reading them
+    # would double-count or resurrect stale variants in the table.
+    return [Path(p) for p in found if Path(p).parent.name != "backup"]
 
 
 def _max_dd(equity: list[float]) -> float:

@@ -35,10 +35,14 @@ FARM_MODE_ENV = [
     "TRADING_PHASE=trade",          # no collector — feed comes from CSV
     "DRY_RUN=1",                    # paper: insert_live_trade only, never send_order
     "TRENDING_HARD_BLOCK=1",        # mr-bet MR-only mode (process-global).
-                                    # NOTE: NO RANGING_HARD_BLOCK here — that is
-                                    # Real-A's gate. MR trades ARE ranging trades;
-                                    # setting both closes every regime (38h / 0
-                                    # trades, tests/test_farm_env_bcd_contract_causal.py)
+    "RANGING_HARD_BLOCK=0",         # PINNED OFF — Real-A's gate, not BCD's.
+                                    # The image carries a Real-A-era /app/.env
+                                    # (COPY . .) with RANGING_HARD_BLOCK=1 and
+                                    # load_dotenv() fills unset keys at boot;
+                                    # an explicit =0 in the process env beats
+                                    # it. MR trades ARE ranging trades —
+                                    # 38h / 0 trades proved both-blocks = no
+                                    # trade window ever (ISSUE-099).
     "SESSION_CONFIDENCE_MULT_DISABLED=1",  # BCD contract: MR conf cap 0.65 x
                                     # ASIAN 0.70 = 0.455 < 0.55 locks out golden
                                     # hours UTC 0/1/6 (docker-compose.vps.yml)
@@ -50,7 +54,8 @@ FARM_MODE_ENV = [
     "TRADE_INTERVAL=300",
     "ML_FILTER_ENABLED=0",
     "MT5_AUTO_LOGIN=0",             # no mt5 service in this compose — skip boot retries
-    "MT5_BRIDGE_MAX_RETRIES=1",     # fail fast: no bridge to wait for
+    "MT5_BRIDGE_MAX_RETRIES=0",     # brokerless: bridge intentionally OFF —
+                                    # no connect attempt, no ERROR spam per cycle
     "MT5_BRIDGE_RETRY_DELAY=0",
     "MAX_CANDLE_AGE_SECONDS=1800",  # stale-feed guard (GC=F delay ~10-15 min;
                                     # 30 min trips only on a real outage)
@@ -62,6 +67,11 @@ FARM_MODE_ENV = [
 
 FEED_HOST_DIR = "./data/paper-feed"
 DATA_HOST_DIR = "./data/farm"
+
+# The image bakes the repo's Real-A-era .env (COPY . .) — 70 stale keys plus
+# MT5 credentials. Every farm service strips it before starting so
+# load_dotenv() has nothing to load; per-service env above is the only source.
+_STRIP_ENV_CMD = 'sh -c "rm -f /app/.env && exec {entrypoint}"'
 
 
 def _variant_env(cfg: dict, name: str) -> list[str]:
@@ -79,8 +89,8 @@ def build_compose(cfg: dict) -> dict:
         "paper-fetcher": {
             "build": {"context": ".", "dockerfile": "Dockerfile"},
             "container_name": "paper-fetcher",
-            "command": (
-                "python3 scripts/paper_feed_fetcher.py --feed-dir /app/feed"
+            "command": _STRIP_ENV_CMD.format(
+                entrypoint="python3 scripts/paper_feed_fetcher.py --feed-dir /app/feed"
             ),
             "volumes": [f"{FEED_HOST_DIR}:/app/feed"],
             "restart": "unless-stopped",
@@ -101,6 +111,9 @@ def build_compose(cfg: dict) -> dict:
             "build": {"context": ".", "dockerfile": "Dockerfile"},
             "container_name": f"oracle-engine-{group['name']}",
             "environment": env,
+            "command": _STRIP_ENV_CMD.format(
+                entrypoint="python3 scripts/oracle_runner.py"
+            ),
             # feed read-only (fetcher owns writes); DB dir per group on host
             "volumes": [
                 f"{FEED_HOST_DIR}:/app/feed:ro",

@@ -6,7 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: paper-fetcher
-    command: python3 scripts/paper_feed_fetcher.py --feed-dir /app/feed
+    command: sh -c "rm -f /app/.env && exec python3 scripts/paper_feed_fetcher.py
+      --feed-dir /app/feed"
     volumes:
     - ./data/paper-feed:/app/feed
     restart: unless-stopped
@@ -22,6 +23,7 @@ services:
     - TRADING_PHASE=trade
     - DRY_RUN=1
     - TRENDING_HARD_BLOCK=1
+    - RANGING_HARD_BLOCK=0
     - SESSION_CONFIDENCE_MULT_DISABLED=1
     - H4_USE_CLOSED_BAR_ONLY=1
     - M5_SCALP_ENABLED=0
@@ -31,7 +33,7 @@ services:
     - TRADE_INTERVAL=300
     - ML_FILTER_ENABLED=0
     - MT5_AUTO_LOGIN=0
-    - MT5_BRIDGE_MAX_RETRIES=1
+    - MT5_BRIDGE_MAX_RETRIES=0
     - MT5_BRIDGE_RETRY_DELAY=0
     - MAX_CANDLE_AGE_SECONDS=1800
     - DAILY_SUMMARY_DISABLED=1
@@ -268,6 +270,7 @@ services:
     - BLOCKED_HOURS_P20=
     - RR_RATIO_P20=1.20
     - MR_BOLL_THRESHOLD_P20=0.85
+    command: sh -c "rm -f /app/.env && exec python3 scripts/oracle_runner.py"
     volumes:
     - ./data/paper-feed:/app/feed:ro
     - ./data/farm/farm1:/app/data
