@@ -87,7 +87,12 @@ RANGING_ADX_THRESHOLD = 20
 # Ranging market: reduce confidence heavily — ranging BUY WR=33% loses money
 # Volatile market: skip entirely — volatile regime lost -$94 in backtest
 REGIME_RANGING_CONFIDENCE_MULT = 1.0    # Disabled: good era had no regime penalty (was 0.3)
-REGIME_VOLATILE_SKIP = False            # Disabled: good era had no regime filter
+# Env-driven since 2026-10-02 (ISSUE-100): was hardcoded False, which made the
+# compose REGIME_VOLATILE_SKIP=1 on oracle-engine-train a silent no-op. Mirrors
+# RANGING_HARD_BLOCK below — default "0" preserves legacy off everywhere the
+# env is not pinned; docker-compose.vps.yml train block sets :-1 to activate.
+# Backtest basis: volatile regime loses money (-$94, WR=30.2%).
+REGIME_VOLATILE_SKIP = os.environ.get("REGIME_VOLATILE_SKIP", "0") in ("1", "true", "True")
 
 # Ranging hard-block (2026-07-09, Real-A): per CLAUDE.md "Ranging = พัก".
 # When True, regime=ranging returns HOLD immediately at the generator level
@@ -1014,7 +1019,9 @@ def generate_signal(
     # ── Volatile regime filter: skip signals entirely ──
     # Backtest shows volatile regime loses money (-$94, WR=30.2%).
     # The risk of whipsaw in volatile conditions outweighs potential gains.
-    if REGIME_VOLATILE_SKIP and regime == MarketRegime.VOLATILE.value:
+    # Env-driven since 2026-10-02 (ISSUE-100). learning_mode bypasses, mirroring
+    # the RANGING_HARD_BLOCK sibling above, so ML outcome data keeps flowing.
+    if REGIME_VOLATILE_SKIP and regime == MarketRegime.VOLATILE.value and not learning_mode:
         return Signal(
             symbol="XAUUSD", signal_type=SignalType.HOLD, confidence=0.0,
             price=current_price, timestamp=timestamp, timeframe=timeframe,

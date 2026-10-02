@@ -112,7 +112,9 @@ def get_trend_at(trend_series, timestamp):
     return None
 
 
-# Regime filters (matching generator.py constants)
+# Regime filters (backtest parity: REGIME_VOLATILE_SKIP=True matches the live
+# oracle-engine-train, which reads the env via compose default :-1 since the
+# 2026-10-02 ISSUE-100 fix — the generator default is off, train is on)
 REGIME_RANGING_CONFIDENCE_MULT = 0.3   # Reduce confidence by 70% in ranging
 REGIME_VOLATILE_SKIP = True             # Skip signals entirely in volatile regime
 COUNTER_TREND_CONFIDENCE_MULT = 0.5    # Reduce confidence by 50% for counter-trend
