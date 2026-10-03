@@ -4,6 +4,9 @@ description: MT5 is source of truth for position state, not DB. Ghost trades (is
 metadata:
   type: lesson
   date: 2026-06-19
+superseded_by: 2026-06-22_ghost-trade-prevention.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # MT5 as Source of Truth for Position State

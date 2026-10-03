@@ -3,6 +3,9 @@ name: win-config-analysis
 description: Winning V4 configuration analysis — good era vs broken era, key parameters, and recommendations
 metadata:
   type: project
+superseded_by: 2026-06-28_good-era-config-restore.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # Win Config Analysis — V4 Good Era vs Broken Era

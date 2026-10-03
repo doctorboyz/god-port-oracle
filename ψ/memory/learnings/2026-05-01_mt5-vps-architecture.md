@@ -2,6 +2,9 @@
 name: MT5 Bridge on VPS
 description: Deploying MT5 Docker containers on x86_64 VPS, connecting from macOS via RPyC
 type: project
+superseded_by: 2026-05-04_vps-mt5-bridge-status.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # MT5 Bridge on x86_64 VPS

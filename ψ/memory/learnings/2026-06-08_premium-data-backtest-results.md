@@ -4,6 +4,9 @@ description: Backtest results on premium M5 data (2024-01 to 2026-04) — revers
 metadata:
   type: project
   created: 2026-06-08
+superseded_by: 2026-07-01_e2e-backtest-entry-trailing-block.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # Premium Data Backtest Results

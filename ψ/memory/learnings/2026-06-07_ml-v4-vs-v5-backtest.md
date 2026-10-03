@@ -3,6 +3,9 @@ name: ml-v4-vs-v5-backtest
 description: v4 outperforms v5 at all thresholds; partial TP enabled on Account C; VPS switched to v4 model
 metadata:
   type: learning
+superseded_by: 2026-06-28_v4-still-wins-threshold-tuning-modest.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # ML v4 vs v5 Backtest Results + Config Changes

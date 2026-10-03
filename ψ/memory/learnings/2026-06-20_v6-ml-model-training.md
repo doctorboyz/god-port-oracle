@@ -3,6 +3,9 @@ name: v6-ml-model-training
 description: v6 ML model trained on 98K premium backfill data with ATR-based labeling
 metadata:
   type: project
+superseded_by: 2026-06-28_v4-still-wins-threshold-tuning-modest.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # v6 ML Model Training Results

@@ -1,3 +1,9 @@
+---
+superseded_by: 2026-10-03_pre-deploy-check-context-not-runbook.md
+superseded_at: 2026-10-03
+status: superseded
+---
+
 # Lesson: `up -d --build <service>` อาจ rebuild+recreate ทั้ง dependency chain — deploy ตู้ที่บูตนานต้องแบ่งสองจังหวะ
 
 **Date**: 2026-09-23

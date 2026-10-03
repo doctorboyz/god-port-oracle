@@ -1,3 +1,9 @@
+---
+superseded_by: 2026-05-01_exness-demo-accounts-live.md
+superseded_at: 2026-10-03
+status: superseded
+---
+
 # Exness Account Types — Reference for Demo Account Setup
 
 **Source**: Exness official documentation

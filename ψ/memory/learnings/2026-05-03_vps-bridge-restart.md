@@ -2,6 +2,9 @@
 name: VPS Bridge Restart Architecture
 description: How the MT5 bridge auto-restarts with containers — entrypoint phases, user abc, VNC login
 type: project
+superseded_by: 2026-05-04_vps-mt5-bridge-status.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # VPS Bridge Restart Architecture

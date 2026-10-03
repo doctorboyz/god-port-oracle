@@ -1,3 +1,9 @@
+---
+superseded_by: 2026-05_summary.md
+superseded_at: 2026-10-03
+status: superseded
+---
+
 # April 2026 Learnings Summary
 
 Consolidated from 7 individual dated files (2026-04-28 through 2026-04-30).

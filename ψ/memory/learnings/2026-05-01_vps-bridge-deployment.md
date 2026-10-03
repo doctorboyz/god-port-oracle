@@ -2,6 +2,9 @@
 name: VPS Bridge Deployment
 description: MT5 Bridge on x86_64 VPS working — RPyC over network from macOS
 type: project
+superseded_by: 2026-05-04_vps-mt5-bridge-status.md
+superseded_at: 2026-10-03
+status: superseded
 ---
 
 # VPS Bridge Deployment

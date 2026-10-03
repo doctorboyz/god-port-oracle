@@ -1,3 +1,9 @@
+---
+superseded_by: 2026-06-08_trading-philosophy-trend-following.md
+superseded_at: 2026-10-03
+status: superseded
+---
+
 # Easy Box (EZB) + 1CB Trading Philosophy
 
 > Source: Thai trader "ไอสไตล์อีซี่เทรด" — 4 years, 100+ profitable fund withdrawals, X0,000,000+ THB profit

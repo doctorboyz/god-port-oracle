@@ -1,3 +1,9 @@
+---
+superseded_by: 2026-05-13_ml-data-quality-feature-importance.md
+superseded_at: 2026-10-03
+status: superseded
+---
+
 # ML Data Collection Architecture — Lesson Learned
 
 **Date**: 2026-05-01
