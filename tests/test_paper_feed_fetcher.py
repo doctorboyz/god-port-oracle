@@ -111,3 +111,47 @@ class TestPaperFeedFetcher:
         assert list(out.index) == [pd.Timestamp("2026-09-30 00:00")], (
             "H1 bar opened 01:00 is still forming at 01:00 and must be dropped"
         )
+
+    # --- 2026-10-03 incident: farm blind all weekend (feed stale 40h) ---
+
+    def _weekend_provider(self):
+        """Simulates Yahoo's observed weekend behavior: bars come back only
+        when the requested period window still covers the last (Friday)
+        session; a window that has slid past it returns EMPTY."""
+        friday = _bars("2026-10-02 19:00", n=24, base=4170.0)  # 19:00..20:55 UTC
+        window_days = {"1d": 1, "5d": 5, "10d": 10, "60d": 60, "1y": 365, "2y": 730}
+
+        def provider(tf, period):
+            now = datetime(2026, 10, 4, 13, 0)  # Sunday afternoon
+            if friday.index[0] >= now - pd.Timedelta(days=window_days[period]):
+                return friday
+            return pd.DataFrame()  # Yahoo-observed: empty response
+        return provider
+
+    def test_m5_delta_window_spans_weekend_closure(self, tmp_path, monkeypatch):
+        """The M5 delta window must still cover Friday's session on Sunday,
+        or the provider returns empty and the feed goes stale all weekend."""
+        monkeypatch.setattr(pff, "_now_utc", lambda: datetime(2026, 10, 4, 13, 0))
+        monkeypatch.setattr(pff, "_fetch_with_retry", self._weekend_provider())
+
+        assert pff.update_timeframe(tmp_path, "M5", seed=False) is True, (
+            "delta window no longer covers the last closed session — "
+            "the farm goes blind from Saturday until Sunday reopen"
+        )
+        out = _read(tmp_path)
+        assert out.index[-1] == pd.Timestamp("2026-10-02 20:55"), (
+            "Friday's last closed bar must reach the feed"
+        )
+
+    def test_one_day_window_blinds_farm_over_weekend(self, tmp_path, monkeypatch):
+        """Replays the 2026-10-03 incident: with a 1d delta window, Yahoo
+        returned empty from ~24h after Friday's close and the fetcher
+        (correctly) kept the stale CSV — nobody could fetch anything."""
+        monkeypatch.setattr(pff, "_now_utc", lambda: datetime(2026, 10, 4, 13, 0))
+        monkeypatch.setattr(pff, "_fetch_with_retry", self._weekend_provider())
+        monkeypatch.setitem(pff.DELTA_PERIOD, "M5", "1d")
+
+        assert pff.update_timeframe(tmp_path, "M5", seed=False) is False, (
+            "1d window slid past Friday's session — provider went empty"
+        )
+        assert not (tmp_path / "XAUUSD_M5.csv").exists(), "no bars ever reached the feed"

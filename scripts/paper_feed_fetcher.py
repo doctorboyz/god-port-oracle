@@ -49,7 +49,10 @@ CSV_NAMES = {"M5": "XAUUSD_M5.csv", "H1": "XAUUSD_H1.csv", "D1": "XAUUSD_D1.csv"
 # yfinance seed window per timeframe (M5 intraday capped at 60d by Yahoo).
 SEED_PERIOD = {"M5": "60d", "H1": "1y", "D1": "2y"}
 # Incremental poll window — overlaps the seed to survive clock skew/gaps.
-DELTA_PERIOD = {"M5": "1d", "H1": "5d", "D1": "10d"}
+# M5 window must span the weekend closure (~2.3d): with "1d" Yahoo returned
+# empty from ~24h after Friday's close until Sunday reopen (2026-10-03 incident
+# — farm blind, watchdog alerting "feed stale" all weekend).
+DELTA_PERIOD = {"M5": "5d", "H1": "5d", "D1": "10d"}
 
 FETCH_ATTEMPTS = 3
 FETCH_RETRY_SLEEP = 5
