@@ -633,6 +633,45 @@ class LiveTrader:
         half = spread_points * self.SPREAD_POINT_PRICE / 2.0
         return round(exit_price - half, 2) if direction == "BUY" else round(exit_price + half, 2)
 
+    # Default Friday pre-close cutoff (UTC). Gold closes ~21:00 UTC; the last
+    # Friday M5 bar the farm sees is 20:55 — 20:30 leaves margin for the
+    # engine's 5-minute cycle to flatten everything on closed-bar data.
+    WEEKEND_PRECLOSE_DEFAULT_HHMM = "20:30"
+
+    def _in_weekend_pre_close_window(self, now: Optional[datetime] = None) -> bool:
+        """ISSUE-106: True on Friday at/after the weekend pre-close cutoff (UTC).
+
+        Declared rule for the paper farm: dry-run positions never ride the
+        weekend closure. Every exit check needs M5 bars to advance (SL/TP vs
+        latest close, time_stop counts bars) — the closure produces none, so
+        a Friday-evening position floats over the gap (2026-10-02: 9 BUYs
+        held 20:10→Sunday) and Sunday's gap pnl leaks into league stats the
+        strategy never saw. In-window the monitor force-closes everything
+        ("weekend_pre_close") and run_once holds new entries. Live accounts
+        (dry_run=False) are never gated here. Malformed env falls back to the
+        default: fail-open on timekeeping silently reintroduces the bug, and
+        fail-closed would freeze a whole trading day.
+        """
+        raw = os.environ.get(
+            f"WEEKEND_PRECLOSE_UTC_{self.account}",
+            os.environ.get(
+                "WEEKEND_PRECLOSE_UTC", self.WEEKEND_PRECLOSE_DEFAULT_HHMM,
+            ),
+        )
+        try:
+            hh_s, mm_s = raw.split(":", 1)
+            hh, mm = int(hh_s), int(mm_s)
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                raise ValueError(f"out of range: {raw}")
+        except ValueError:
+            logger.warning(
+                "[%s] WEEKEND_PRECLOSE_UTC malformed: %r — using default %s",
+                self.display_name, raw, self.WEEKEND_PRECLOSE_DEFAULT_HHMM,
+            )
+            hh, mm = 20, 30
+        now = now or datetime.now(timezone.utc)
+        return now.weekday() == 4 and (now.hour, now.minute) >= (hh, mm)
+
     def _get_current_quote(self) -> tuple[float, float] | None:
         """Live (bid, ask) from the MT5 bridge (ISSUE-046). None if unavailable.
 
@@ -1588,6 +1627,10 @@ class LiveTrader:
         current_price = float(m5["close"].iloc[-1])
         now_str = datetime.now(timezone.utc).isoformat()
 
+        # ISSUE-106: declared weekend rule — dry-run positions never ride the
+        # weekend closure (see _in_weekend_pre_close_window).
+        weekend_pre_close = self.dry_run and self._in_weekend_pre_close_window()
+
         for trade in open_trades:
             direction = trade["direction"]
             entry_price = trade["entry_price"]
@@ -1611,10 +1654,14 @@ class LiveTrader:
             self._mfe_mae_state[trade_id] = mfe_mae
 
             # === Partial TP (Option C): detect TP1 hit ===
+            # ISSUE-106: skipped inside the weekend pre-close window — the
+            # scale-in would open a fresh position minutes before the close
+            # only to be pre-closed next cycle (pure spread churn).
             tp_level = trade.get("tp_level", 1) or 1
             tp1_price = trade.get("tp1_price")
             if (
                 self.risk.partial_tp_enabled
+                and not weekend_pre_close
                 and tp_level == 1
                 and tp1_price
                 and tp1_price > 0
@@ -1653,8 +1700,13 @@ class LiveTrader:
                         trough = entry_price - mfe_mae["mfe"]
                         trailing_level = trough * (1 + self.risk.trailing_trail_pct / 100.0)
 
+            # ISSUE-106: weekend pre-close takes precedence — flatten at market
+            # (exit_price stays the current mid; the dry-run exit fill below
+            # pays the spread's closing half like any real market close).
+            if weekend_pre_close:
+                exit_reason = "weekend_pre_close"
             # Check SL/TP + trailing TP (order: SL floor → trailing → Far TP)
-            if direction == "BUY":
+            elif direction == "BUY":
                 if sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
                     exit_price = sl
@@ -2319,6 +2371,20 @@ class LiveTrader:
             return {
                 "action": "hold",
                 "reason": f"portfolio gate: {_pf_reason}",
+                "signal": signal,
+            }
+
+        # 4a1d. ISSUE-106: weekend pre-close window — no new farm entries on
+        # Friday evening. The monitor flattens everything at the cutoff, so
+        # a fresh position opened inside the window would ride the weekend
+        # gap the strategy never modeled. Live accounts keep their own policy.
+        if self.dry_run and self._in_weekend_pre_close_window():
+            self._record_rejection(
+                signal, "weekend_pre_close_window", session, d1_trend, candles,
+            )
+            return {
+                "action": "hold",
+                "reason": "weekend pre-close window (Friday pre-close — no new entries)",
                 "signal": signal,
             }
 
