@@ -5,6 +5,18 @@
 
 ---
 
+## ⚠️ อัปเดตใหญ่ 2026-10-06: แผนหลัก 3 เฟส (คุณหมอสั่งผ่าน Hermes) — งาน active คือปิด issue Phase 1
+
+**แผนเต็ม: `ψ/goals/active/three-phase-plan-2026-10.md`** — อ่านก่อนทำงานต่อ
+
+- **Phase 1 เครื่องมือสมบูรณ์**: ปิด issue ค้าง 098 → 106 → lot floor → correlation → 104 → 107 → 105 → 092 (เรียงตามผลกระทบข้อมูล farm)
+- **Phase 2 วิเคราะห์**: Hermes เป็น Marks เสาร์ 09:30 — เราเก็บข้อมูลให้สมบูรณ์, กติกา ≥20 ไม้/variant ก่อนตัดสิน
+- **Phase 3 ใช้จริง**: winner ผ่าน out-of-sample → สร้าง broker adapter จริง ไม่ port ตัว paper ตรงๆ
+- **ขอบเขต**: farm Mac mini อย่างเดียว — **ห้ามแตะ Real-A/VPS จนกว่าจะได้รับอนุมัติ** (105/092 เขียน code+ทดสอบได้, deploy VPS ต้องขอ)
+- ทั้ง 3 เฟสทำควบคู่กัน พิสูจน์ด้วยการรันจริงเสมอ
+
+---
+
 ## ⚠️ อัปเดตใหญ่ 2026-09-23: งาน active ตอนนี้คือ mr-bet (ไม่ใช่ P1-P3)
 
 คุณหมอสั่งรื้อแนวเทรดเก่าทั้งหมดบน demo B/C/D แล้วมาทดสอบ **mr-bet framework** (high-WR mean reversion) — branch `mr-bet-bcd` deploy เรียบร้อย (ดู plan เดิม `~/.claude/plans/sequential-honking-whisper.md` + retro `ψ/memory/retrospectives/2026-09/23/`)
