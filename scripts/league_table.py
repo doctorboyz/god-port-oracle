@@ -30,6 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTBOX = ROOT / "ψ" / "outbox"
 SEED_EQUITY = 100.0  # matches INITIAL_EQUITY in farm_variants.yml common
+# ISSUE-098: from this date farm fills cross the spread (half per leg, priced
+# from spread_at_entry). Rows opened before it were mid-fill / cost-free.
+COST_FIX_DATE = "2026-10-06"
 
 
 def _db_paths(args: list[str]) -> list[Path]:
@@ -152,6 +155,9 @@ def render(stats: dict[str, dict], sources: list[Path]) -> str:
         "- trades < 20 → อย่าตัดสิน kill/promote จากตัวเลขชุดนี้ (noise ยังเยอะ)",
         "- กฎ out-of-sample: variant ที่ชนะ selection window ต้องผ่านข้อมูลช่วงใหม่ก่อนเลื่อนขั้น",
         "- เสนอ variant ใหม่/แก้ knob: แก้ farm_variants.yml แล้วรัน scripts/paper_farm_apply.py --up",
+        f"- ISSUE-098 (แก่ {COST_FIX_DATE}): ไม้ที่เปิดตั้งแต่ {COST_FIX_DATE} ถูกจำลองค่า spread "
+        "(ครึ่ง spread ต่อขาเข้า + ครึ่งต่อขาปิด ตาม spread_at_entry ของไม้นั้น) — "
+        "ไม้ก่อนหน้านี้เป็น mid-fill ไร้ค่า spread → pnl ช่วงเก่าหวานกว่าจริงเล็กน้อย อย่าเทียบข้ามช่วงตรงๆ",
         "",
     ]
     return "\n".join(lines)

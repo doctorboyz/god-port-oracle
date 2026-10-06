@@ -596,6 +596,43 @@ class LiveTrader:
             logger.debug("[%s] Spread fetch failed: %s", self.display_name, e)
         return None
 
+    # XAUUSD point = 0.01: 20 spread points = $0.20 (same conversion the
+    # entry flow uses for _ml_spread_price / spread_price).
+    SPREAD_POINT_PRICE = 0.01
+
+    def _simulated_entry_fill(
+        self, direction: str, mid: float, spread_points: Optional[float],
+    ) -> float:
+        """ISSUE-098: dry-run entry fills cross the spread like a live broker.
+
+        Live BUY fills at ask (mid + half spread), SELL at bid (mid - half).
+        The brokerless farm filled both legs at mid, so every round trip was
+        friction-free and league pnl flattered each variant by ~1 spread per
+        trade vs live. Half spread per leg = one full spread per round trip,
+        priced from the same source the spread gate already uses
+        (MOCK_SPREAD_POINTS on the farm, real bridge spread elsewhere).
+        Live mode (dry_run=False) and rows without a recorded spread are
+        untouched.
+        """
+        if not self.dry_run or not spread_points or spread_points <= 0:
+            return mid
+        half = spread_points * self.SPREAD_POINT_PRICE / 2.0
+        return round(mid + half, 2) if direction == "BUY" else round(mid - half, 2)
+
+    def _simulated_exit_fill(
+        self, direction: str, exit_price: float, spread_points: Optional[float],
+    ) -> float:
+        """ISSUE-098: the closing leg crosses the spread the other way.
+
+        Closing a BUY sells at bid (fill below the trigger level); closing
+        a SELL buys back at ask (fill above it). Together with the entry
+        fill this costs exactly one spread per round trip.
+        """
+        if not self.dry_run or not spread_points or spread_points <= 0:
+            return exit_price
+        half = spread_points * self.SPREAD_POINT_PRICE / 2.0
+        return round(exit_price - half, 2) if direction == "BUY" else round(exit_price + half, 2)
+
     def _get_current_quote(self) -> tuple[float, float] | None:
         """Live (bid, ask) from the MT5 bridge (ISSUE-046). None if unavailable.
 
@@ -1689,6 +1726,14 @@ class LiveTrader:
                     # leave open, retry the vanish check next cycle
 
             if exit_reason:
+                # ISSUE-098: dry-run close fills cross the spread's other half
+                # (BUY sells at bid, SELL buys at ask) — priced from the spread
+                # recorded at entry, so legacy rows without one are untouched.
+                if self.dry_run:
+                    exit_price = self._simulated_exit_fill(
+                        direction, exit_price, trade.get("spread_at_entry"),
+                    )
+
                 # Calculate PnL
                 if direction == "BUY":
                     pnl = (exit_price - entry_price) * lot_size * CONTRACT_SIZE
@@ -1839,6 +1884,11 @@ class LiveTrader:
 
         # 1. Close position 1 at TP1
         exit_price = tp1_price
+        # ISSUE-098: dry-run TP1 close fills cross the spread (BUY=bid, SELL=ask)
+        if self.dry_run:
+            exit_price = self._simulated_exit_fill(
+                direction, exit_price, trade.get("spread_at_entry"),
+            )
         if direction == "BUY":
             pnl = (exit_price - entry_price) * lot_size * CONTRACT_SIZE
             pnl_pct = (exit_price - entry_price) / entry_price * 100
@@ -1965,6 +2015,12 @@ class LiveTrader:
         # Use same lot size (Exness minimum = 0.01)
         new_lots = lot_size
         current_price = tp1_price  # Approximate entry for scale-in
+        # ISSUE-098: dry-run scale-in entry fills cross the spread too, and the
+        # spread is carried onto the new row so position 2's own exits price it.
+        scale_in_spread_at_entry = trade.get("spread_at_entry") if self.dry_run else None
+        current_price = self._simulated_entry_fill(
+            direction, current_price, scale_in_spread_at_entry,
+        )
 
         # ISSUE H5: previously scale-in bypassed ALL risk gates (DP/CB/TradeBlocker/ML).
         # Position 1 already closed at TP1 (taking profit is safe), but the scale-in is a
@@ -2088,6 +2144,7 @@ class LiveTrader:
             tp1_price=tp1_price,
             tp_level=2,
             parent_trade_id=trade_id,
+            spread_at_entry=scale_in_spread_at_entry,
             atr_multiplier=self.risk.atr_multiplier,
             rr_ratio=self.risk.risk_reward_ratio,
             min_confidence_threshold=self.risk.min_confidence,
@@ -2561,11 +2618,14 @@ class LiveTrader:
         ref_signal_id = get_latest_signal_id(self.account_id, self.db_path)
 
         if self.dry_run:
+            # ISSUE-098: paper entry fills cross the spread (BUY=ask, SELL=bid)
+            # so farm pnl stops being friction-free vs live.
+            entry_fill = self._simulated_entry_fill(direction, price, _live_spread)
             trade_id = insert_live_trade(
                 account_id=self.account_id,
                 timestamp=ts_str,
                 direction=direction,
-                entry_price=price,
+                entry_price=entry_fill,
                 stop_loss=sl,
                 take_profit=tp,
                 lot_size=lots,
@@ -2595,7 +2655,7 @@ class LiveTrader:
                 db_path=self.db_path,
             )
             log_trade(logger, "OPENED", account=self.account, direction=direction,
-                     price=price, lots=lots, sl=sl, tp=tp, tp1=tp1_price,
+                     price=entry_fill, lots=lots, sl=sl, tp=tp, tp1=tp1_price,
                      confidence=signal.confidence, reason=signal.reason)
             # ISSUE-059: count trade OPEN for anti-churn (was counted on close only).
             self._drawdown_protector.record_trade_open()
