@@ -38,3 +38,5 @@ models/*.bin
 
 # Graphify knowledge graph (generated — rebuild via graphify.watch)
 graphify-out/
+data/farm/
+data/paper-feed/
