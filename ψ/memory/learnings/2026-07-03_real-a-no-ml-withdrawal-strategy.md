@@ -103,3 +103,13 @@ Deploy no-ML config ไปยัง Real-A (oracle-engine) ตามคำขอ
 - Kill switch: daily 5% / weekly 10% / account 20% / cooldown 4h (good-era)
 - Expected: WR ~90% PF ~4 (per backtest premium no-ML), MaxDD ~30-40% on $400
 - Next: สังเกตผล 1-2 สัปดาห์ — ถ้า MaxDD ใกล้ 20% → pause และพิจารณาเปิด ML กลับ (v4 @0.55)
+
+## ⚠️ Addendum (2026-09-23, ISSUE-081): เอกสารนี้เลิกใช้แล้ว — อ่านเพื่อประวัติเท่านั้น
+
+Decision ข้างบนถูก**ยกเลิกแล้ว** และเอกสารไม่ได้ถูกอัปเดตตาม จนกลายเป็น doc rot (เจอใน retro 2026-07-09):
+
+- **2026-07-09**: คุณหมออนุมัติ deploy ML v4 ขึ้น Real-A (oracle-engine) ตามการวิเคราะห์ equity mismatch — สถานะ "no-ML AEGIS-only" ข้างบนจบลงตั้งแต่วันนั้น
+- **ปัจจุบัน (2026-09)**: Real-A รัน v4 single-model ML filter @ conf 0.45; ML **เปิด**บน A ตามการอนุมัตินั้น และ ML **ensemble** บน A = IRON LAW ห้าม (ต่างจาก single-model ที่อนุมัติแล้ว) — อย่าอ่าน decision rule "$400+ → no-ML" ข้างบนเป็นคำสั่งใช้
+- **ยอดบช.**: ถอนออกหมด ~14 ก.ค. (deal history แสดง $296.70) — Real-A ยอด $0, engine ยังวิเคราะห์อยู่แต่เทรดจริงไม่ได้จนกว่าจะฝากเงินกลับ + เคลียร์ drawdown block ค้างใน DB (ดู HANDOFF 2026-09-21 §4)
+
+**บทเรียนสาขาใหม่ที่ได้จากเรื่องนี้**: decision กลับทางต้องกลับมาอัปเดต learning ต้นทางพร้อม addendum ทันทีที่กลับ — ไม่งั้นเอกสารกลายเป็นกับดักสำหรับ session ถัดไปที่เปิดมาอ่านแล้วเชื่อผิด
