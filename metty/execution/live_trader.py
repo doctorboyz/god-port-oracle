@@ -29,7 +29,7 @@ from broky.indicators.atr import calculate_atr
 from broky.risk.circuit_breaker import CircuitBreaker
 from broky.risk.drawdown_protection import DrawdownProtector, get_drawdown_config, get_buy_min_confidence
 from broky.risk.trade_blocker import TradeBlocker, BlockInput
-from metty.core.account_registry import get_display_name, get_account_config, get_bridge_config
+from metty.core.account_registry import get_account_leverage, get_display_name, get_account_config, get_bridge_config
 from metty.core.portfolio_gate import entry_hour_gate, portfolio_gate
 from broky.risk.position_sizing import (
     calculate_position_size,
@@ -2100,7 +2100,9 @@ class LiveTrader:
                     else:
                         # TradeBlocker gate for scale-in
                         new_sl_dist_pct = abs(current_price - new_sl) / current_price * 100.0
-                        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+                        # ISSUE-100 fix: LEVERAGE_<NAME> (registry/compose name) —
+                        # was MT5_LEVERAGE_<NAME>, a silent no-op pinned at 1:100.
+                        leverage = get_account_leverage(self.account)
                         margin_req = new_lots * 100 * current_price / max(leverage, 1)
                         # ISSUE-060: use real MT5 free_margin for scale-in too.
                         mt5_fm = self._get_free_margin()
@@ -2611,8 +2613,11 @@ class LiveTrader:
         # could pass DP+CB. Now enforce: hard_max_lots, risk_pct_sanity, sl_too_tight,
         # sl_too_wide, margin_safety, daily/weekly trade count.
         sl_distance_pct = abs(price - sl) / price * 100.0
-        # Rough margin estimate — Exness 1:100 default; env override for 1:500 etc.
-        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+        # Rough margin estimate — leverage from LEVERAGE_<NAME> (registry/compose
+        # env name; default 1:100 legacy). Was MT5_LEVERAGE_<NAME> which nothing
+        # sets → silent 1:100 → margin_safety blocked ~306 real farm signals
+        # (2026-10-06..09). See tests/test_leverage_env_farm_causal.py.
+        leverage = get_account_leverage(self.account)
         contract_size = 100  # XAUUSD: 1 lot = 100 oz
         margin_required = lots * contract_size * price / max(leverage, 1)
         # ISSUE-060: use real MT5 free_margin (accounts for used margin of open positions).

@@ -88,6 +88,29 @@ def get_active_accounts() -> list[str]:
     return [a.strip().upper() for a in raw.split(",") if a.strip()]
 
 
+def get_account_leverage(name: str, default: int = 100) -> int:
+    """Account leverage from the ONE env name compose + this registry already use.
+
+    ISSUE-100 class fix (2026-10-10): docker-compose.paper-farm.yml sets
+    LEVERAGE_P11..P20=2000 and docker-compose.vps.yml sets LEVERAGE_D=500,
+    but the margin estimates in live_trader.py / m5_scalp_trader.py read
+    MT5_LEVERAGE_{account} — a name nothing anywhere sets, so every margin
+    check silently priced at the 1:100 default. At $4220 gold a 0.01-lot
+    trade "required" $42.20 vs ~$47.80 free margin → trade_blocker:margin_safety
+    blocked ~306 real farm signals (2026-10-06..09) that passed every other
+    gate. One env name, one reader, no silent no-op heads.
+    """
+    raw = os.environ.get(f"LEVERAGE_{name}")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("LEVERAGE_%s=%r is not an int — using default %d", name, raw, default)
+        return default
+    return max(value, 1)
+
+
 def get_display_name(account: str) -> str:
     """Return human-readable label for an account: 'Real-A', 'Demo-B', 'Cent-P1'.
 
@@ -296,7 +319,7 @@ def _build_account_info(name: str, index: int) -> AccountConfigInfo:
             f"INITIAL_BALANCE_{name}",
             os.environ.get("INITIAL_BALANCE", "500"),
         )),
-        leverage=int(os.environ.get(f"LEVERAGE_{name}", "500")),
+        leverage=get_account_leverage(name, default=500),
         signal_group=signal_group,
         symbol=symbol,
         risk_per_trade=risk_per_trade,

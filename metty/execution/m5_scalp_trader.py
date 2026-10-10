@@ -36,7 +36,7 @@ from broky.signals.m5_scalp_generator import (
     M5_SCALP_SPREAD_MAX,
 )
 from metty.bridge.client import MT5Bridge
-from metty.core.account_registry import get_display_name, get_account_config
+from metty.core.account_registry import get_account_leverage, get_display_name, get_account_config
 from metty.core.db import (
     close_live_trade,
     get_latest_signal_id,
@@ -1142,7 +1142,9 @@ class M5ScalpTrader:
         # daily/weekly trade count. Closes the gap where DP+CB pass but misconfigured
         # SL/lots/risk could still reach the broker.
         sl_distance_pct = abs(signal.price - stop_loss) / signal.price * 100.0
-        leverage = int(os.environ.get(f"MT5_LEVERAGE_{self.account}", os.environ.get("MT5_LEVERAGE", "100")))
+        # ISSUE-100 fix: LEVERAGE_<NAME> (registry/compose name) — was
+        # MT5_LEVERAGE_<NAME>, a silent no-op pinned at 1:100.
+        leverage = get_account_leverage(self.account)
         margin_required = lot_size * CONTRACT_SIZE * signal.price / max(leverage, 1)
         mt5_free_margin = self._get_free_margin()
         if mt5_free_margin is not None:

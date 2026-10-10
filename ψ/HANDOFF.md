@@ -9,6 +9,8 @@
 
 **แผนเต็ม: `ψ/goals/active/three-phase-plan-2026-10.md`** — อ่านก่อนทำงานต่อ
 
+**Investment config ทางการ (คุณหมอสั่ง 2026-10-10): `ψ/memory/learnings/investment-config.md`** — ประเภทบัญชี (farm P11-P20 + demo B/C/D, Cent P1-P3 พังไม่ใช้) · $100/variant · leverage 1:2000 · margin_safety 0.80 + EQUITY_PER_POSITION 200 คงไว้
+
 - **Phase 1 เครื่องมือสมบูรณ์**: ปิด issue ค้าง 098 → 106 → lot floor → correlation → 104 → 107 → 105 → 092 (เรียงตามผลกระทบข้อมูล farm)
 - **Phase 2 วิเคราะห์**: Hermes เป็น Marks เสาร์ 09:30 — เราเก็บข้อมูลให้สมบูรณ์, กติกา ≥20 ไม้/variant ก่อนตัดสิน
 - **Phase 3 ใช้จริง**: winner ผ่าน out-of-sample → สร้าง broker adapter จริง ไม่ port ตัว paper ตรงๆ
