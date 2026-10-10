@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -59,6 +60,17 @@ def _force_adx(monkeypatch, adx: float):
 
 class TestTrendingHardBlockCausal:
     """Causal proof: TRENDING_HARD_BLOCK gates the ADX switch itself."""
+
+    @pytest.fixture(autouse=True)
+    def _pin_ranging_gate_off(self, monkeypatch):
+        """Hermetic: this class tests the TRENDING gate in isolation, so the
+        RANGING sibling must be pinned off — not merely left absent. The host
+        shell (and the Real-A .env at line 80) can export RANGING_HARD_BLOCK=1,
+        which generator.py bakes into the module constant at import time; with
+        it on, the ranging block fires first at ADX 20-25 and the ADX=22 test
+        sees 'ranging_hard_block' instead. Same pin-and-not-absent rule as
+        test_farm_env_bcd_contract_causal.py applies to the farm compose."""
+        monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", False)
 
     def test_flag_on_adx30_blocks(self, monkeypatch):
         monkeypatch.setattr(gen_mod, "TRENDING_HARD_BLOCK", True)

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,6 +32,17 @@ sys.path.insert(0, str(ROOT))
 from shared.models import SignalType  # noqa: E402
 from broky.signals import generator as gen_mod  # noqa: E402
 from broky.signals.generator import generate_signal  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _pin_ranging_gate_off(monkeypatch):
+    """Hermetic: pin the RANGING sibling off — not merely absent. The host
+    shell (and the Real-A .env at line 80) can export RANGING_HARD_BLOCK=1,
+    which generator.py bakes into the module constant at import time; with it
+    on, every MR signal under test gets hard-blocked before this file's
+    threshold/exemption/session logic is ever reached. Same
+    pin-and-not-absent rule as the farm compose (test_farm_env_bcd_contract)."""
+    monkeypatch.setattr(gen_mod, "RANGING_HARD_BLOCK", False)
 
 
 class _FixedBoll:
