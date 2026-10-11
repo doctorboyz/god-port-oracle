@@ -33,12 +33,19 @@ def _write_m5(path: Path, last_bar_utc: datetime, n: int = 5) -> None:
     path.write_text("\n".join(reversed(lines)) + "\n")
 
 
+# Pinned market-open instant (Wed 2026-10-07 12:00 UTC): the feed-age tests
+# below exercise the AGE logic, not the calendar — a real datetime.now()
+# would skip the whole check whenever the suite runs on a closed market
+# (ISSUE-104 gate in check_feed) and the tests would pass/fail by launch day.
+_MARKET_OPEN_NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+
+
 class TestWatchdogFeedCausal:
     """Stale feed must produce an alert; fresh feed must stay silent."""
 
     def test_stale_feed_flagged(self, monkeypatch, tmp_path):
         feed = tmp_path / "XAUUSD_M5.csv"
-        now = datetime.now(timezone.utc)
+        now = _MARKET_OPEN_NOW
         _write_m5(feed, last_bar_utc=now.replace(tzinfo=None) - timedelta(hours=3))
         monkeypatch.setattr(wd, "FEED_M5", feed)
 
@@ -51,7 +58,7 @@ class TestWatchdogFeedCausal:
     def test_fresh_feed_healthy(self, monkeypatch, tmp_path):
         # Control: 5-min delay is normal for GC=F — must NOT alert
         feed = tmp_path / "XAUUSD_M5.csv"
-        now = datetime.now(timezone.utc)
+        now = _MARKET_OPEN_NOW
         _write_m5(feed, last_bar_utc=now.replace(tzinfo=None) - timedelta(minutes=5))
         monkeypatch.setattr(wd, "FEED_M5", feed)
 
@@ -59,7 +66,7 @@ class TestWatchdogFeedCausal:
 
     def test_missing_feed_flagged(self, monkeypatch, tmp_path):
         monkeypatch.setattr(wd, "FEED_M5", tmp_path / "does_not_exist.csv")
-        now = datetime.now(timezone.utc)
+        now = _MARKET_OPEN_NOW
 
         problem = wd.check_feed(max_age_min=30.0, now=now)
         assert problem is not None, "missing feed must be flagged, not ignored"

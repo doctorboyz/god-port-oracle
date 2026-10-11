@@ -14,17 +14,25 @@ survives reboots, needs no agent session. Checks:
   1. feed age  — newest M5 bar in data/paper-feed/XAUUSD_M5.csv vs
      FARM_WATCHDOG_MAX_FEED_AGE_MIN (default 30, same ceiling as
      MAX_CANDLE_AGE_SECONDS; GC=F delay is ~10-15 min)
+     ONLY while the market is open (shared/market_calendar.py, ISSUE-104:
+     gold prints no bars on weekends / during the daily break — 300+ stale
+     alerts were pure calendar noise before this gate)
   2. containers — paper-fetcher + oracle-engine-farm1 must be Up
   3. regression — 'spread unavailable' / 'ranging_hard_block' must not
      reappear in the engine log since the last watchdog pass
 
-On any problem: append one alert file per day to ψ/outbox (Hermes reads
+Tooling failures (docker CLI unavailable/slow) are SELF-ERRORs, not farm
+problems (ISSUE-104): they go to watchdog.log only — never to the alert
+channel, which must stay trustworthy. A self-error also refuses to advance
+the regression-scan state, so the missed window is rescanned next pass.
+
+On a farm problem: append one alert file per day to ψ/outbox (Hermes reads
 outbox on its own schedule) + a macOS notification (visible on the Mac
 mini desktop) + one line to data/farm/watchdog.log. All-clear passes log
 one line only — no alert spam when healthy.
 
-Exit code: 0 healthy, 1 problems found (launchd ignores it; the alert
-channels are the point).
+Exit code: 0 healthy, 1 farm problems, 2 self-errors only (launchd ignores
+it; the log channel is the point).
 """
 
 from __future__ import annotations
@@ -38,6 +46,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from shared.market_calendar import market_open  # noqa: E402
+
 FEED_M5 = ROOT / "data" / "paper-feed" / "XAUUSD_M5.csv"
 OUTBOX = ROOT / "ψ" / "outbox"
 LOG = ROOT / "data" / "farm" / "watchdog.log"
@@ -46,6 +58,7 @@ STATE_FILE = ROOT / "data" / "farm" / ".watchdog_since"
 CONTAINERS = ["paper-fetcher", "oracle-engine-farm1"]
 REGRESSION_PATTERNS = ["spread unavailable", "ranging_hard_block"]
 DEFAULT_MAX_AGE_MIN = 30.0
+SELF_ERROR_PREFIX = "SELF-ERROR: "
 
 
 def _docker_bin() -> str:
@@ -77,7 +90,15 @@ def _newest_bar_age_minutes(feed_csv: Path, now: datetime) -> float | None:
 
 
 def check_feed(max_age_min: float, now: datetime) -> str | None:
-    """Return a problem description, or None when the feed is fresh."""
+    """Return a problem description, or None when the feed is fine.
+
+    ISSUE-104 gate: while the market is closed (weekend + daily break, see
+    shared/market_calendar.py) gold prints no bars by design — a "stale" feed
+    then is the calendar talking, not the farm. Skip the age check entirely;
+    the last market-open pass owns the feed's health.
+    """
+    if not market_open(now):
+        return None
     age = _newest_bar_age_minutes(FEED_M5, now)
     if age is None:
         return "feed unreadable/empty — fetcher may have never written a bar"
@@ -90,14 +111,19 @@ def check_feed(max_age_min: float, now: datetime) -> str | None:
 
 
 def check_containers() -> str | None:
-    """All farm containers must report Up in docker ps."""
+    """All farm containers must report Up in docker ps.
+
+    A docker CLI failure is SELF-ERROR (ISSUE-104): the watchdog's own
+    tooling broke — a farm problem can be neither confirmed nor excluded,
+    and writing it to the alert channel trains readers to distrust alerts.
+    """
     try:
         out = subprocess.run(
             [_docker_bin(), "ps", "--format", "{{.Names}}: {{.Status}}"],
             capture_output=True, text=True, timeout=30,
         ).stdout
     except (subprocess.TimeoutExpired, OSError) as e:
-        return f"docker ps failed: {e}"
+        return f"{SELF_ERROR_PREFIX}docker ps failed: {e}"
     for name in CONTAINERS:
         line = next((l for l in out.splitlines() if l.startswith(name + ":")), None)
         if line is None:
@@ -113,6 +139,8 @@ def check_regression(since: datetime) -> str | None:
     STATE_FILE records the last healthy pass — first run after a gap scans
     from the file's saved time so a regression during downtime is still
     caught. Missing state (first ever run) scans the last 15 minutes only.
+    A docker CLI failure is SELF-ERROR (ISSUE-104) — log-only, and the
+    caller must not advance the state past the unscanned window.
     """
     try:
         out = subprocess.run(
@@ -121,7 +149,7 @@ def check_regression(since: datetime) -> str | None:
             capture_output=True, text=True, timeout=60,
         ).stdout
     except (subprocess.TimeoutExpired, OSError) as e:
-        return f"docker logs failed: {e}"
+        return f"{SELF_ERROR_PREFIX}docker logs failed: {e}"
     for pattern in REGRESSION_PATTERNS:
         if pattern in out:
             # context line for the alert
@@ -181,22 +209,38 @@ def main() -> int:
     if since.tzinfo is not None:
         since = since.replace(tzinfo=None)
 
-    problems: list[str] = []
+    farm_problems: list[str] = []
+    self_errors: list[str] = []
     for check in (lambda: check_feed(max_age, now),
                   check_containers,
                   lambda: check_regression(since)):
         problem = check()
-        if problem:
-            problems.append(problem)
+        if problem is None:
+            continue
+        if problem.startswith(SELF_ERROR_PREFIX):
+            self_errors.append(problem)
+        else:
+            farm_problems.append(problem)
 
-    if problems:
-        alert_path = _write_alert(problems)
-        for p in problems:
+    if farm_problems:
+        alert_path = _write_alert(farm_problems)
+        for p in farm_problems:
             _notify_macos(p[:200])
-        _log(f"ALERT ({len(problems)}): {' | '.join(problems)} → {alert_path.name}")
+        if self_errors:
+            for p in self_errors:
+                _log(f"SELF-ERROR (tooling, not farm): {p[len(SELF_ERROR_PREFIX):]}")
+        _log(f"ALERT ({len(farm_problems)}): {' | '.join(farm_problems)} → {alert_path.name}")
         return 1
+    if self_errors:
+        # ISSUE-104: tooling failures never touch the alert channel; the
+        # regression scan never ran, so the state must not advance either.
+        for p in self_errors:
+            _log(f"SELF-ERROR (tooling, not farm): {p[len(SELF_ERROR_PREFIX):]}")
+        return 2
     STATE_FILE.write_text(now.isoformat())
-    _log("OK — feed fresh, containers up, no regressions")
+    feed_note = (
+        "feed fresh" if market_open(now) else "market closed (feed check skipped)")
+    _log(f"OK — {feed_note}, containers up, no regressions")
     return 0
 
 
