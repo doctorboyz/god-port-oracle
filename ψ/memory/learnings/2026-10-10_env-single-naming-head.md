@@ -35,8 +35,9 @@ compose ตั้ง `LEVERAGE_P11..P20=2000` (ชื่อที่ registry �
 
 **การนำไปใช้**: ทุกครั้งเพิ่ม env knob ใหม่ → รัน
 `tests/test_env_coverage_guard.py` (มันจะ FAIL จนกว่าจะ set จริงหรือ allowlist
-พร้อมเหตุผล) · คลาสเดียวกันที่ยังค้าง: [[ISSUE-108]] portfolio_manager
-TELEGRAM_* vs compose TG_* (รอคำตัดสินคุณหมอ)
+พร้อมเหตุผล) · คลาสเดียวกันที่เคยค้าง [[ISSUE-108]] (portfolio_manager
+TELEGRAM_* vs compose TG_*) ปิดแล้ว 2026-10-11 ตาม pattern pf_monitor
+(TG_* ก่อน fallback TELEGRAM_* + causal test)
 
 **เชื่อมโยง**: [[paper-farm-must-mirror-live-frictions]] (margin ก็เป็น friction
 ที่ต้อง mirror ให้ตรงจริง) · [[investment-config]] (leverage 1:2000 ทางการ)

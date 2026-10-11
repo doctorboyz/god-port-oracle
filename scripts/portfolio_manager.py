@@ -244,8 +244,12 @@ def _send_alerts(text: str) -> None:
     if not _reporting_enabled():
         logger.info("[PM] reporting disabled — alert skipped:\n%s", text)
         return
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    # ISSUE-108 (2026-10-11): every compose sets TG_BOT_TOKEN/TG_CHAT_ID —
+    # reading only TELEGRAM_* made this a silent no-op on configured hosts.
+    # Same reader contract as scripts/pf_monitor.py: TG_* first, legacy
+    # TELEGRAM_* as fallback for old local setups.
+    token = os.environ.get("TG_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TG_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         logger.info("[PM] Telegram not configured — alert skipped:\n%s", text)
         return
