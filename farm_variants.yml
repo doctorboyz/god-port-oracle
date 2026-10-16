@@ -41,7 +41,7 @@ common:
 groups:
   - name: farm1
     # ก้อนละ ≤25 variants — RAM ~500MB base + ~10-30MB/variant (วัดจริงก่อนขยาย)
-    variants: [P11, P12, P13, P14, P15, P16, P17, P18, P19, P20]
+    variants: [P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22]
     db_path: /app/data/farm1.db
 
 variants:
@@ -112,3 +112,25 @@ variants:
       MR_BOLL_THRESHOLD: "0.85"
       ENTRY_HOURS: ""
       BLOCKED_HOURS: ""
+
+  # ── รอบ 16/10: สมมติฐาน exit — Marks เจอไม้ชนะโดน time stop 12 bars
+  #    หั่นกลางทาง (max_holding 81 ไม้ จบ -86.8$ เฉลี่ย -1.07/ไม้ ขณะที่
+  #    TP จบเฉลี่ย +8.17/ไม้, SL แค่ 6 ครั้ง) → ปล่อยไม้วิ่งนานขึ้น/เปิด
+  #    trailing TP น่าจะดีกว่า. P20 (baseline ดีสุด: +22.03$ / PF 1.66 /
+  #    WR 56%) เป็นฐานทั้งคู่ ──
+  P21:
+    note: "P20+TS24 — ยืด time stop 12→24 bars (2 ชม.): ไม้ชนะถูกหั่น -1.07/ไม้ ที่ 12 bars ทั้งที่ TP เฉลี่ย +8.17 — ให้เวลาวิ่งถึง TP มากขึ้น"
+    env:
+      RR_RATIO: "1.20"
+      MR_BOLL_THRESHOLD: "0.85"
+      ENTRY_HOURS: ""
+      BLOCKED_HOURS: ""
+      TIME_STOP_BARS: "24"
+  P22:
+    note: "P20+trail — เปิด TRAILING_TP (time stop 12 คงเดิม): ปล่อยกำไรวิ่งต่อหลัง TP zone แทนตายที่ระดับคงที่"
+    env:
+      RR_RATIO: "1.20"
+      MR_BOLL_THRESHOLD: "0.85"
+      ENTRY_HOURS: ""
+      BLOCKED_HOURS: ""
+      TRAILING_TP_ENABLED: "1"
