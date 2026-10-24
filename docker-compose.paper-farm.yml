@@ -17,7 +17,7 @@ services:
       dockerfile: Dockerfile
     container_name: oracle-engine-farm1
     environment:
-    - ACCOUNTS=P11,P12,P13,P14,P15,P16,P17,P18,P19,P20,P21,P22
+    - ACCOUNTS=P11,P12,P13,P14,P15,P16,P17,P18,P19,P20,P21,P22,P23
     - DB_PATH=/app/data/farm1.db
     - DATA_DIR=/app/feed
     - TRADING_PHASE=trade
@@ -318,8 +318,133 @@ services:
     - BLOCKED_HOURS_P22=
     - RR_RATIO_P22=1.20
     - MR_BOLL_THRESHOLD_P22=0.85
+    - STRATEGY_ID_P23=s-P23
+    - INITIAL_BALANCE_P23=100
+    - INITIAL_EQUITY_P23=100
+    - LEVERAGE_P23=2000
+    - ACCOUNT_TYPE_P23=demo
+    - SIGNAL_GROUP_P23=portfolio
+    - RISK_PER_TRADE_P23=0.005
+    - MAX_POSITIONS_P23=1
+    - MAX_POSITIONS_CAP_P23=1
+    - MIN_POSITIONS_P23=1
+    - ATR_MULTIPLIER_P23=2.0
+    - MIN_CONFIDENCE_P23=0.55
+    - BUY_MIN_CONFIDENCE_P23=0.55
+    - SWING_MAX_SPREAD_P23=30
+    - MR_COST_MULT_P23=3.0
+    - SL_CAP_P23=12.0
+    - TIME_STOP_BARS_P23=24
+    - TRAILING_TP_ENABLED_P23=1
+    - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P23=1440
+    - ENTRY_HOURS_P23=
+    - BLOCKED_HOURS_P23=
+    - RR_RATIO_P23=1.20
+    - MR_BOLL_THRESHOLD_P23=0.85
     command: sh -c "rm -f /app/.env && exec python3 scripts/oracle_runner.py"
     volumes:
     - ./data/paper-feed:/app/feed:ro
     - ./data/farm/farm1:/app/data
+    restart: unless-stopped
+  oracle-engine-farm2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oracle-engine-farm2
+    environment:
+    - ACCOUNTS=P31,P32,P33
+    - DB_PATH=/app/data/farm2.db
+    - DATA_DIR=/app/feed
+    - TRADING_PHASE=trade
+    - DRY_RUN=1
+    - TRENDING_HARD_BLOCK=0
+    - RANGING_HARD_BLOCK=0
+    - SESSION_CONFIDENCE_MULT_DISABLED=1
+    - H4_USE_CLOSED_BAR_ONLY=1
+    - M5_SCALP_ENABLED=0
+    - SCALP_ENABLED=0
+    - LEARNING_MODE=0
+    - COLLECT_INTERVAL=300
+    - TRADE_INTERVAL=300
+    - ML_FILTER_ENABLED=0
+    - MT5_AUTO_LOGIN=0
+    - SEED_DEFAULT_ACCOUNTS=0
+    - MT5_BRIDGE_MAX_RETRIES=0
+    - MT5_BRIDGE_RETRY_DELAY=0
+    - MOCK_SPREAD_POINTS=20
+    - MAX_CANDLE_AGE_SECONDS=1800
+    - DAILY_SUMMARY_DISABLED=1
+    - BRIDGE_STATUS_DISABLED=1
+    - TG_BOT_TOKEN=
+    - TG_CHAT_ID=
+    - STRATEGY_ID_P31=s-P31
+    - INITIAL_BALANCE_P31=100
+    - INITIAL_EQUITY_P31=100
+    - LEVERAGE_P31=2000
+    - ACCOUNT_TYPE_P31=demo
+    - SIGNAL_GROUP_P31=portfolio
+    - RISK_PER_TRADE_P31=0.005
+    - MAX_POSITIONS_P31=1
+    - MAX_POSITIONS_CAP_P31=1
+    - MIN_POSITIONS_P31=1
+    - ATR_MULTIPLIER_P31=2.0
+    - MIN_CONFIDENCE_P31=0.55
+    - BUY_MIN_CONFIDENCE_P31=0.55
+    - SWING_MAX_SPREAD_P31=30
+    - MR_COST_MULT_P31=3.0
+    - SL_CAP_P31=12.0
+    - TIME_STOP_BARS_P31=48
+    - TRAILING_TP_ENABLED_P31=0
+    - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P31=1440
+    - ENTRY_HOURS_P31=6,8,18,19,20
+    - BLOCKED_HOURS_P31=3,4,5,9,14
+    - RR_RATIO_P31=2.5
+    - STRATEGY_ID_P32=s-P32
+    - INITIAL_BALANCE_P32=100
+    - INITIAL_EQUITY_P32=100
+    - LEVERAGE_P32=2000
+    - ACCOUNT_TYPE_P32=demo
+    - SIGNAL_GROUP_P32=portfolio
+    - RISK_PER_TRADE_P32=0.005
+    - MAX_POSITIONS_P32=1
+    - MAX_POSITIONS_CAP_P32=1
+    - MIN_POSITIONS_P32=1
+    - ATR_MULTIPLIER_P32=2.0
+    - MIN_CONFIDENCE_P32=0.55
+    - BUY_MIN_CONFIDENCE_P32=0.55
+    - SWING_MAX_SPREAD_P32=30
+    - MR_COST_MULT_P32=3.0
+    - SL_CAP_P32=12.0
+    - TIME_STOP_BARS_P32=96
+    - TRAILING_TP_ENABLED_P32=0
+    - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P32=1440
+    - ENTRY_HOURS_P32=6,8,18,19,20
+    - BLOCKED_HOURS_P32=3,4,5,9,14
+    - RR_RATIO_P32=3.0
+    - STRATEGY_ID_P33=s-P33
+    - INITIAL_BALANCE_P33=100
+    - INITIAL_EQUITY_P33=100
+    - LEVERAGE_P33=2000
+    - ACCOUNT_TYPE_P33=demo
+    - SIGNAL_GROUP_P33=portfolio
+    - RISK_PER_TRADE_P33=0.005
+    - MAX_POSITIONS_P33=1
+    - MAX_POSITIONS_CAP_P33=1
+    - MIN_POSITIONS_P33=1
+    - ATR_MULTIPLIER_P33=2.0
+    - MIN_CONFIDENCE_P33=0.55
+    - BUY_MIN_CONFIDENCE_P33=0.55
+    - SWING_MAX_SPREAD_P33=30
+    - MR_COST_MULT_P33=3.0
+    - SL_CAP_P33=12.0
+    - TIME_STOP_BARS_P33=48
+    - TRAILING_TP_ENABLED_P33=1
+    - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P33=1440
+    - ENTRY_HOURS_P33=6,8,18,19,20
+    - BLOCKED_HOURS_P33=3,4,5,9,14
+    - RR_RATIO_P33=2.5
+    command: sh -c "rm -f /app/.env && exec python3 scripts/oracle_runner.py"
+    volumes:
+    - ./data/paper-feed:/app/feed:ro
+    - ./data/farm/farm2:/app/data
     restart: unless-stopped

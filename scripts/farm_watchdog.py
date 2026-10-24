@@ -17,7 +17,8 @@ survives reboots, needs no agent session. Checks:
      ONLY while the market is open (shared/market_calendar.py, ISSUE-104:
      gold prints no bars on weekends / during the daily break — 300+ stale
      alerts were pure calendar noise before this gate)
-  2. containers — paper-fetcher + oracle-engine-farm1 must be Up
+  2. containers — paper-fetcher + every oracle-engine-* group container
+     (derived from docker-compose.paper-farm.yml) must be Up
   3. regression — 'spread unavailable' / 'ranging_hard_block' must not
      reappear in the engine log since the last watchdog pass
 
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -54,11 +56,33 @@ FEED_M5 = ROOT / "data" / "paper-feed" / "XAUUSD_M5.csv"
 OUTBOX = ROOT / "ψ" / "outbox"
 LOG = ROOT / "data" / "farm" / "watchdog.log"
 STATE_FILE = ROOT / "data" / "farm" / ".watchdog_since"
+COMPOSE_FILE = ROOT / "docker-compose.paper-farm.yml"
 
-CONTAINERS = ["paper-fetcher", "oracle-engine-farm1"]
 REGRESSION_PATTERNS = ["spread unavailable", "ranging_hard_block"]
 DEFAULT_MAX_AGE_MIN = 30.0
 SELF_ERROR_PREFIX = "SELF-ERROR: "
+
+# The watchlist is DERIVED from the generated compose (itself built from
+# farm_variants.yml), not hand-maintained: axis2 added oracle-engine-farm2
+# (2026-10-24) and the next group must be watchdogged the moment it appears
+# in the compose — a second list to forget is how farm2 would have gone
+# unwatched in the first place.
+_ENGINE_NAME_RE = re.compile(r"container_name:\s*(oracle-engine-[\w-]+)")
+_FALLBACK_ENGINES = ["oracle-engine-farm1"]
+
+
+def _engine_containers() -> list[str]:
+    """Every oracle-engine-* container the compose declares.
+
+    Unreadable compose (half-deployed box) falls back to farm1 — fail-open
+    to the known container, never to "check nothing".
+    """
+    try:
+        text = COMPOSE_FILE.read_text()
+    except OSError:
+        return list(_FALLBACK_ENGINES)
+    names = _ENGINE_NAME_RE.findall(text)
+    return names or list(_FALLBACK_ENGINES)
 
 
 def _docker_bin() -> str:
@@ -124,7 +148,7 @@ def check_containers() -> str | None:
         ).stdout
     except (subprocess.TimeoutExpired, OSError) as e:
         return f"{SELF_ERROR_PREFIX}docker ps failed: {e}"
-    for name in CONTAINERS:
+    for name in ["paper-fetcher", *_engine_containers()]:
         line = next((l for l in out.splitlines() if l.startswith(name + ":")), None)
         if line is None:
             return f"container {name} NOT RUNNING (docker ps has no entry)"
@@ -134,7 +158,7 @@ def check_containers() -> str | None:
 
 
 def check_regression(since: datetime) -> str | None:
-    """Fixed-bug signatures must not reappear in the engine log since `since`.
+    """Fixed-bug signatures must not reappear in any engine log since `since`.
 
     STATE_FILE records the last healthy pass — first run after a gap scans
     from the file's saved time so a regression during downtime is still
@@ -142,19 +166,23 @@ def check_regression(since: datetime) -> str | None:
     A docker CLI failure is SELF-ERROR (ISSUE-104) — log-only, and the
     caller must not advance the state past the unscanned window.
     """
-    try:
-        out = subprocess.run(
-            [_docker_bin(), "logs", "oracle-engine-farm1", "--since",
-             since.strftime("%Y-%m-%dT%H:%M:%S")],
-            capture_output=True, text=True, timeout=60,
-        ).stdout
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return f"{SELF_ERROR_PREFIX}docker logs failed: {e}"
-    for pattern in REGRESSION_PATTERNS:
-        if pattern in out:
-            # context line for the alert
-            line = next((l for l in out.splitlines() if pattern in l), "")
-            return f"REGRESSION: '{pattern}' reappeared in engine log: {line[-200:]}"
+    for engine in _engine_containers():
+        try:
+            out = subprocess.run(
+                [_docker_bin(), "logs", engine, "--since",
+                 since.strftime("%Y-%m-%dT%H:%M:%S")],
+                capture_output=True, text=True, timeout=60,
+            ).stdout
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return f"{SELF_ERROR_PREFIX}docker logs failed: {e}"
+        for pattern in REGRESSION_PATTERNS:
+            if pattern in out:
+                # context line for the alert
+                line = next((l for l in out.splitlines() if pattern in l), "")
+                return (
+                    f"REGRESSION: '{pattern}' reappeared in {engine} log: "
+                    f"{line[-200:]}"
+                )
     return None
 
 

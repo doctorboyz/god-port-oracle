@@ -56,6 +56,19 @@ def _max_dd(equity: list[float]) -> float:
     return max_dd
 
 
+def _blank_stats(strategy_id: str = "", first: str | None = None) -> dict:
+    """Zero-trade stats entry — freshly seeded variants must stay visible
+    (axis2, 2026-10-24): without this, a deployed-but-quiet P31-P33 is
+    indistinguishable from a variant that was never deployed."""
+    return {
+        "strategy_id": strategy_id,
+        "trades": 0, "wins": 0, "pnl_sum": 0.0,
+        "gross_win": 0.0, "gross_loss": 0.0,
+        "equity": [SEED_EQUITY],
+        "first": first, "last": None,
+    }
+
+
 def collect(db_path: Path) -> dict[str, dict]:
     """Per (account, strategy_id) stats from one farm DB."""
     conn = sqlite3.connect(str(db_path))
@@ -82,21 +95,24 @@ def collect(db_path: Path) -> dict[str, dict]:
             "WHERE t.is_open = 1 GROUP BY a.name, t.strategy_id"
         ).fetchall()
         open_counts = {r["account"]: r["n"] for r in open_rows}
+        account_rows = conn.execute(
+            "SELECT name FROM accounts ORDER BY name"
+        ).fetchall()
     finally:
         conn.close()
 
     stats: dict[str, dict] = {}
 
-    # Variants holding only open trades must stay visible (they exist, they
-    # just haven't closed anything yet).
+    # Every seeded account starts with a zero-trade row — visibility of the
+    # variant itself must not depend on it having traded already.
+    for r in account_rows:
+        stats.setdefault(r["name"], _blank_stats())
+
+    # Variants holding only open trades carry their strategy_id this way.
     for r in open_rows:
-        stats.setdefault(r["account"], {
-            "strategy_id": r["strategy_id"] or "",
-            "trades": 0, "wins": 0, "pnl_sum": 0.0,
-            "gross_win": 0.0, "gross_loss": 0.0,
-            "equity": [SEED_EQUITY],
-            "first": None, "last": None,
-        })
+        stats.setdefault(r["account"], _blank_stats(r["strategy_id"] or ""))["strategy_id"] = (
+            r["strategy_id"] or ""
+        )
 
     for r in rows:
         key = r["account"]

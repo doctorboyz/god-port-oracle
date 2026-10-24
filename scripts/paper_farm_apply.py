@@ -96,6 +96,30 @@ def _variant_env(cfg: dict, name: str) -> list[str]:
     return lines
 
 
+def _group_mode_env(group: dict) -> list[str]:
+    """FARM_MODE_ENV with the group's `mode_env:` overrides applied.
+
+    TRENDING_HARD_BLOCK is read at import time in broky.signals.generator
+    (process-global), so a group wanting a different mode MUST live in its
+    own container — this override is how that container's env is built.
+    Keys replace the global entry in place (no duplicate env lines: the
+    winner of duplicates is undefined in docker compose), and brand-new
+    keys not present in the global list are appended.
+    """
+    overrides = {
+        str(k): str(v) for k, v in (group.get("mode_env") or {}).items()
+    }
+    lines: list[str] = []
+    for entry in FARM_MODE_ENV:
+        key = entry.split("=", 1)[0]
+        if key in overrides:
+            lines.append(f"{key}={overrides.pop(key)}")
+        else:
+            lines.append(entry)
+    lines.extend(f"{k}={v}" for k, v in overrides.items())
+    return lines
+
+
 def build_compose(cfg: dict) -> dict:
     services: dict = {
         "paper-fetcher": {
@@ -114,7 +138,7 @@ def build_compose(cfg: dict) -> dict:
             f"ACCOUNTS={accounts}",
             f"DB_PATH={group['db_path']}",
             "DATA_DIR=/app/feed",
-            *FARM_MODE_ENV,
+            *_group_mode_env(group),
         ]
         for name in group["variants"]:
             env.extend(_variant_env(cfg, name))
