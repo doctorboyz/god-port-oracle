@@ -246,61 +246,73 @@ services:
       - SESSION_CONFIDENCE_MULT_DISABLED=${SESSION_CONFIDENCE_MULT_DISABLED:-1}
       # Volatile regime skip เปิด (bug UnboundLocalError แก้แล้ว 2026-09-21)
       - REGIME_VOLATILE_SKIP=${REGIME_VOLATILE_SKIP:-1}
-      # ป้ายสถิติใหม่ แยกจากแถว swing-* เก่าใน oracle_train.db ทันที
-      - STRATEGY_ID_B=${STRATEGY_ID_B:-mr-bet-B}
-      - STRATEGY_ID_C=${STRATEGY_ID_C:-mr-bet-C}
-      - STRATEGY_ID_D=${STRATEGY_ID_D:-mr-bet-D}
-      # กติการ่วม: ATR 2.0 / risk 0.5% / conf 0.55 / spread<=30pts / TP>=3x cost /
-      # SL<=$12 / time stop 1h (12 bars M5) / trailing+partial TP ปิด / แพ้ 3 ติด พัก 24h
-      - ATR_MULTIPLIER_B=${ATR_MULTIPLIER_B:-2.0}
-      - ATR_MULTIPLIER_C=${ATR_MULTIPLIER_C:-2.0}
-      - ATR_MULTIPLIER_D=${ATR_MULTIPLIER_D:-2.0}
-      # RR variants: B ปานกลาง 0.8 / C 1.0 / D แม่นสุด 1.2 (low-RR high-WR bet style)
-      - RR_RATIO_B=${RR_RATIO_B:-0.8}
-      - RR_RATIO_C=${RR_RATIO_C:-1.0}
-      - RR_RATIO_D=${RR_RATIO_D:-1.2}
-      - MIN_CONFIDENCE_B=${MIN_CONFIDENCE_B:-0.55}
-      - MIN_CONFIDENCE_C=${MIN_CONFIDENCE_C:-0.55}
-      - MIN_CONFIDENCE_D=${MIN_CONFIDENCE_D:-0.55}
-      - BUY_MIN_CONFIDENCE_B=${BUY_MIN_CONFIDENCE_B:-0.55}
-      - BUY_MIN_CONFIDENCE_C=${BUY_MIN_CONFIDENCE_C:-0.55}
-      - BUY_MIN_CONFIDENCE_D=${BUY_MIN_CONFIDENCE_D:-0.55}
-      # Bollinger threshold variants: B 0.70 / C 0.80 / D 0.85 (ยิ่งสูงยิ่งเข้าน้อย-แม่น)
-      - MR_BOLL_THRESHOLD_B=${MR_BOLL_THRESHOLD_B:-0.70}
-      - MR_BOLL_THRESHOLD_C=${MR_BOLL_THRESHOLD_C:-0.80}
-      - MR_BOLL_THRESHOLD_D=${MR_BOLL_THRESHOLD_D:-0.85}
+      # 2026-10-27 winner clones (คุณหมออนุมัติ): B/C/D เปลี่ยนจาก mr-bet TS12
+      # (แพ้จริงบน spread จริง รวม -123$) เป็น winner 3 ตัวจาก farm selection รอบแรก —
+      # B=โคลน P21 (+80.83, PF 1.93) · C=โคลน P22 (+62.10, PF 2.15) · D=โคลน P16
+      # (+22.73, PF 1.37). ค่า sync จาก container oracle-engine-farm1 จริง
+      # (docker inspect, 2026-10-27) ไม่ใช่ค่าจากโจทย์/plan memo.
+      # HARD-CODED (ไม่ใช่ ${VAR:-...}) ทั้ง matrix เพราะ host .env มี knob เก่า
+      # ค้าง (RR_RATIO_*=3.0, MIN_CONFIDENCE_*=0.45/0.60, ATR_MULTIPLIER_C/D=2.5)
+      # ซึ่ง interpolation ให้ชนะ default เสมอ — คลาสบทเรียนเดียวกับ ML_FILTER_ENABLED.
+      # NOTE D-ATR: คุณหมอตัดสิน 27/10 ให้ D=ATR 2.5 ตาม spec โจทย์ (บันทึก:
+      # container oracle-engine-farm1 วัด ATR_MULTIPLIER_P16=2.0 — ตอนเทียบผล
+      # paper-vs-real ของ D ให้จำ delta นี้; ATR2.5 ในฟาร์มคือ P15)
+      # ป้ายสถิติใหม่ — ไม้ใหม่ใช้ strategy_id ใหม่ ไม้เก่า mr-bet-B/C/D ไม่โดนแตะ
+      - STRATEGY_ID_B=mr-bet-p21-B
+      - STRATEGY_ID_C=mr-bet-p22-C
+      - STRATEGY_ID_D=mr-bet-p16-D
+      # กติการ่วมตามฟาร์ม: conf 0.55 / spread<=30pts / TP>=3x cost / SL<=$12 /
+      # แพ้ 3 ติด พัก 24h (risk_per_trade ไม่ใช่ knob ของ matrix นี้ — D ยังรัน
+      # 1% จาก host .env ตามสภาพเดิม ค้างตัดสินใจแยก)
+      - ATR_MULTIPLIER_B=2.0
+      - ATR_MULTIPLIER_C=2.0
+      # D=2.5 ตามคำตัดสินของคุณหมอ (ดู NOTE D-ATR ด้านบน)
+      - ATR_MULTIPLIER_D=2.5
+      # RR: B/C ตาม P21/P22 (1.20) · D ตาม P16 (0.80)
+      - RR_RATIO_B=1.20
+      - RR_RATIO_C=1.20
+      - RR_RATIO_D=0.80
+      - MIN_CONFIDENCE_B=0.55
+      - MIN_CONFIDENCE_C=0.55
+      - MIN_CONFIDENCE_D=0.55
+      - BUY_MIN_CONFIDENCE_B=0.55
+      - BUY_MIN_CONFIDENCE_C=0.55
+      - BUY_MIN_CONFIDENCE_D=0.55
+      # Bollinger threshold: B/C 0.85 (ตาม P21/P22 ที่โคลนจาก P20) · D 0.70 (ฐาน B)
+      - MR_BOLL_THRESHOLD_B=0.85
+      - MR_BOLL_THRESHOLD_C=0.85
+      - MR_BOLL_THRESHOLD_D=0.70
       # Swing-path spread gate (pts, XAUUSD 30pts = $0.30)
       - SWING_MAX_SPREAD_B=${SWING_MAX_SPREAD_B:-30}
       - SWING_MAX_SPREAD_C=${SWING_MAX_SPREAD_C:-30}
       - SWING_MAX_SPREAD_D=${SWING_MAX_SPREAD_D:-30}
       # Cost gate: TP ต้อง >= 3x spread · SL cap $12 (เกิน skip ไม่หด)
-      - MR_COST_MULT_B=${MR_COST_MULT_B:-3.0}
-      - MR_COST_MULT_C=${MR_COST_MULT_C:-3.0}
-      - MR_COST_MULT_D=${MR_COST_MULT_D:-3.0}
-      - SL_CAP_B=${SL_CAP_B:-12.0}
-      - SL_CAP_C=${SL_CAP_C:-12.0}
-      - SL_CAP_D=${SL_CAP_D:-12.0}
-      # Exit: TP ตายตัว + time stop 1h — MR คลี่ตัวเร็ว ค้างเกิน 1h = thesis ตาย
-      - TIME_STOP_BARS_B=${TIME_STOP_BARS_B:-12}
-      - TIME_STOP_BARS_C=${TIME_STOP_BARS_C:-12}
-      - TIME_STOP_BARS_D=${TIME_STOP_BARS_D:-12}
-      - TRAILING_TP_ENABLED_B=${TRAILING_TP_ENABLED_B:-0}
-      - TRAILING_TP_ENABLED_C=${TRAILING_TP_ENABLED_C:-0}
-      - TRAILING_TP_ENABLED_D=${TRAILING_TP_ENABLED_D:-0}
+      - MR_COST_MULT_B=3.0
+      - MR_COST_MULT_C=3.0
+      - MR_COST_MULT_D=3.0
+      - SL_CAP_B=12.0
+      - SL_CAP_C=12.0
+      - SL_CAP_D=12.0
+      # Exit ตาม winner: B/D ยืด time stop 24 bars (2 ชม.) · C คง 12 + trailing TP
+      - TIME_STOP_BARS_B=24
+      - TIME_STOP_BARS_C=12
+      - TIME_STOP_BARS_D=24
+      - TRAILING_TP_ENABLED_B=0
+      - TRAILING_TP_ENABLED_C=1
+      - TRAILING_TP_ENABLED_D=0
       # 3-loss streak → พัก 24h (CB cooldown 1440 min)
       - CIRCUIT_BREAKER_COOLDOWN_MINUTES_B=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_B:-1440}
       - CIRCUIT_BREAKER_COOLDOWN_MINUTES_C=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_C:-1440}
       - CIRCUIT_BREAKER_COOLDOWN_MINUTES_D=${CIRCUIT_BREAKER_COOLDOWN_MINUTES_D:-1440}
-      # 2026-09-18 bet strategy variant mapping — superseded 2026-09-21 by
-      # mr-bet (MR-only mean reversion, ตารางข้างบน). เก็บไว้อ้างอิง rollback.
-      # Entry-hour windows (UTC) — golden hours จาก sweet-spot 2,154 trades
-      # blocked 10-12,16,21 BKK = 3,4,5,9,14 UTC (negative-EV)
-      - ENTRY_HOURS_B=${ENTRY_HOURS_B:-6,8,18,19,20}
-      - BLOCKED_HOURS_B=${BLOCKED_HOURS_B:-3,4,5,9,14}
-      - ENTRY_HOURS_C=${ENTRY_HOURS_C:-0,1,6,8}
-      - BLOCKED_HOURS_C=${BLOCKED_HOURS_C:-3,4,5,9,14}
-      - ENTRY_HOURS_D=${ENTRY_HOURS_D:-0,1,18,19,20}
-      - BLOCKED_HOURS_D=${BLOCKED_HOURS_D:-3,4,5,9,14}
+      # Entry-hour windows (UTC) — B/C ว่าง = gate ปิด ตาม winner จริง (P21/P22
+      # ชนะด้วย occupancy เต็ม ไม่มี hour gate) · D เก็บ base ของ P16:
+      # golden hours 6,8,18,19,20 · blocked 3,4,5,9,14 (negative-EV)
+      - ENTRY_HOURS_B=
+      - BLOCKED_HOURS_B=
+      - ENTRY_HOURS_C=
+      - BLOCKED_HOURS_C=
+      - ENTRY_HOURS_D=6,8,18,19,20
+      - BLOCKED_HOURS_D=3,4,5,9,14
       # Risk per trade: 0.5% flat ทุกใบ (mr-bet 2026-09-21 — D ลดจาก 1.0%)
       - RISK_PER_TRADE_B=${RISK_PER_TRADE_B:-0.005}
       - RISK_PER_TRADE_C=${RISK_PER_TRADE_C:-0.005}
