@@ -20,14 +20,20 @@
 
 # ─── Feed source (paper-fetcher) ──────────────────────────────────────────
 # 2026-10-30 (คุณหมอสั่งตรง): paper farm สลับ feed เป็น Exness XAUUSD realtime
-# ผ่าน bridge mt5b บน VPS (Tailscale) — ราคาเดียวกับ demo B/C/D เป๊ะ เพื่อให้
+# ผ่าน bridge บน VPS (Tailscale) — ราคาเดียวกับ demo B/C/D เป๊ะ เพื่อให้
 # เทียบ per-signal ได้จริง (gap ที่เหลือ = execution costs ล้วน)
+# 2026-10-30 (ชั่วโมงเดียวกัน — race fix): ชี้ mt5q แทน mt5b — fetcher กับ
+# demo engine B เคยใช้ terminal ร่วมกัน: engine shutdown ทุก cycle ทำให้ fetcher
+# ตาบอดเป็นช่วง (heal วน 12 ครั้ง/3 ชม. แท่งหายเป็นพักๆ) — mt5q = ราคาอย่างเดียว
+# login demo B, mt5b คืนให้ engine B · (หมายเหตุ: stream-closed ใน log engine เป็น
+# baseline ของ engine เอง B=C=D เท่ากันเป๊ะ — ไม่ใช่ผลจาก fetcher, ดู retro
+# mt5q-dedicated-bridge)
 # สลับกลับ: source: yfinance (fetcher จะ era-switch history ให้เอง — ห้าม
 # mix สอง feed ใน history เดียว)
 feed:
   source: bridge
-  bridge_host: vpsdeluna      # tailnet MagicDNS ของ VPS (mt5b: 5006→8001)
-  bridge_port: "5006"
+  bridge_host: vpsdeluna      # tailnet MagicDNS ของ VPS (mt5q: 5012→8001)
+  bridge_port: "5012"
   poll_interval: "60"         # วินาที — realtime ต้องเร็วกว่า cycle engine (300s)
 
 common:

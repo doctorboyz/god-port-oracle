@@ -84,6 +84,39 @@ services:
       - mt5-config-d:/config
     restart: unless-stopped
 
+  # ═══ mt5q: market-data-only bridge for the Mac mini paper farm ═══════════
+  # 2026-10-30 race fix (Hermes log evidence 10:22-10:31 UTC): the farm
+  # fetcher and the demo B engine shared mt5b — the engine shuts the shared
+  # terminal down every cycle, blinding the fetcher ~7-8 min at a time
+  # (12 heal-retries/3h, stale bars, on 2026-10-30). mt5q gives the fetcher
+  # its own terminal:
+  #   mt5q = farm fetcher only (read-only market data — no engine inside)
+  #   mt5b = oracle-engine-train demo B, back to exclusive use (untouched)
+  # (Note: the engine-side "stream has been closed" warnings are the engine's
+  # own baseline — identical count on B/C/D, unaffected by the fetcher; see
+  # retro mt5q-dedicated-bridge. The real race harm was the blind farm.)
+  # Login = demo B env (fake-money demo, NEVER Real-A/P1-P3 credentials).
+  # Host bridge port 5012: 5005-5011 are taken (mt5a/b/c/d/p1/p2/p3) — the
+  # task brief suggested 5010 but that is live mt5p2.
+  mt5q:
+    build:
+      context: ./docker/mt5
+      dockerfile: Dockerfile
+    container_name: mt5q
+    environment:
+      # /password included (P-style, same as mt5p1-3) so a FRESH volume
+      # auto-logs-in — mt5b's bare /login works only because mt5-config-b
+      # already caches credentials, which a new volume does not have.
+      - MT5_CMD_OPTIONS=/login:${MT5_LOGIN_B:-} /password:${MT5_PASSWORD_B:-} /server:${MT5_SERVER_B:-Exness-MT5Trial17}
+      - CUSTOM_USER=mt5user
+      - PASSWORD=mt5password
+    ports:
+      - "5907:3000"  # VNC web interface
+      - "5012:8001"  # RPyC bridge
+    volumes:
+      - mt5-config-q:/config
+    restart: unless-stopped
+
   # ═══ Oracle Engine for Real-A only — V4 model, production quality ═══
   # B/C/D moved to oracle-engine-train (V12 mixed model)
   oracle-engine:
@@ -695,6 +728,8 @@ volumes:
   mt5-config-p2:
     driver: local
   mt5-config-p3:
+    driver: local
+  mt5-config-q:
     driver: local
   oracle-data:
     driver: local

@@ -72,11 +72,13 @@ logger = logging.getLogger("paper_feed_fetcher")
 FEED_SOURCE = os.environ.get("FEED_SOURCE", "yfinance").strip().lower()
 SOURCES = ("yfinance", "bridge")
 
-# Bridge endpoint (VPS mt5b: host 5006 → container 8001, reached over the
-# tailnet — MagicDNS name resolves inside OrbStack containers, verified
-# 2026-10-30). Exness XAUUSD, the same symbol the demo engines trade.
+# Bridge endpoint (VPS mt5q — the farm's dedicated PRICE terminal:
+# host 5012 → container 8001, reached over the tailnet — MagicDNS name
+# resolves inside OrbStack containers, verified 2026-10-30). Exness XAUUSD,
+# the same symbol the demo engines trade. mt5q logged into demo B env;
+# mt5b stays exclusive to the demo B engine (race fix 2026-10-30).
 BRIDGE_HOST = os.environ.get("PAPER_BRIDGE_HOST", "vpsdeluna")
-BRIDGE_PORT = int(os.environ.get("PAPER_BRIDGE_PORT", "5006"))
+BRIDGE_PORT = int(os.environ.get("PAPER_BRIDGE_PORT", "5012"))
 
 # Bridge backfill depth in bars — matches/exceeds the yfinance seed windows
 # (M5 60d / H1 1y / D1 2y). Verified against the live bridge 2026-10-30:

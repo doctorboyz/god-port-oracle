@@ -12,7 +12,7 @@ metadata:
 ## ภาพรวม
 
 Paper trade farm รันบน **Mac mini (OrbStack)** — เดิม brokerless ล้วน ตั้งแต่ **30/10/26 เป็น read-only bridge client**:
-- **Feed**: `paper-fetcher` ดึง **Exness XAUUSD realtime จาก bridge mt5b บน VPS ผ่าน Tailscale** (`FEED_SOURCE=bridge`, poll 60s) → CSV M5/H1/D1 (premium format) — ราคาเดียวกับ demo B/C/D เป๊ะ · ยุคเก่า (ถึง 30/10/26 10:00 UTC) = yfinance `GC=F` หน่วง 5-15 นาที
+- **Feed**: `paper-fetcher` ดึง **Exness XAUUSD realtime จาก bridge mt5q บน VPS ผ่าน Tailscale** (`FEED_SOURCE=bridge`, poll 60s) → CSV M5/H1/D1 (premium format) — ราคาเดียวกับ demo B/C/D เป๊ะ · ยุคเก่า (ถึง 30/10/26 10:00 UTC) = yfinance `GC=F` หน่วง 5-15 นาที · ช่วง 10:00→10:45 UTC 30/10 ใช้ mt5b (race กับ engine B — แก้ด้วย mt5q, ดู retro mt5q-dedicated-bridge)
 - **Engines**: ก้อนละ ~25 variants (account `P<digits>`, กฎ mr-bet MR-only `TRENDING_HARD_BLOCK=1`), `DRY_RUN=1`, trade เข้า SQLite จริงใน container
 - **ความหน่วง**: แท่งปิด → CSV ภายในรอบ 60s · fill ฟรีไม่มี spread จริง (ตามแบบ: ชั้น paper = realtime + fill ฟรี, gap paper↔demo ที่เหลือ = execution costs ล้วน) — ดู §7 era
 
@@ -88,9 +88,9 @@ League table regenerate ทุก 30 นาที:
 | Era | ช่วงเวลา | Feed | ราคา |
 |---|---|---|---|
 | **yfinance** | เริ่มฟาร์ม → 30/10/26 10:00 UTC | yfinance `GC=F` futures หน่วง 5-15 นาที | ระดับ futures (ต่างจาก spot หลายดอลลาร์) |
-| **bridge** | 30/10/26 10:00 UTC → ปัจจุบัน | Exness XAUUSD realtime ผ่าน bridge mt5b (Tailscale) | ราคา spot เดียวกับ demo B/C/D เป๊ะ |
+| **bridge** | 30/10/26 10:00 UTC → ปัจจุบัน | Exness XAUUSD realtime ผ่าน bridge (Tailscale) — mt5b ถึง 10:45 UTC แล้ว mt5q ตั้งแต่นั้น | ราคา spot เดียวกับ demo B/C/D เป๊ะ |
 
 - **ห้ามเทียบ paper↔demo ข้าม era** — ราคาต่างกันเป็นสิบๆดอลลาร์ + timing คนละจังหวะ ผลเทียบเป็นเท็จโดยสร้าง (สถิติ league ก่อน 30/10 = era yfinance เท่านั้น)
 - Fetcher บริหาร era เอง: marker `XAUUSD_<TF>.csv.era` ใน feed dir — สลับ source = **replace history ทั้งชุด** ไม่ merge (spot กับ futures ต่อกัน = gap เทียม พัง indicator ทั้งฟาร์ม) · bridge ล่ม = retry เท่านั้น **ไม่ fallback ไป yfinance**
 - watchdog อ่าน marker นี้เพื่อเลือกปฏิทิน (CME ↔ Exness — halt ต่างชั่วโมงกันหลัง DST สหรัฐฯ 1/11/26): `scripts/farm_watchdog.py` + `shared/market_calendar.py` (feed=exness)
-- สัญญา read-only ของ fetcher ต่อ bridge: initialize / symbol_select / symbol_info / copy_rates_from_pos_json เท่านั้น — ห้าม order/position methods (mt5b คือ terminal ของ demo B ที่เทรดจริงอยู่) · อย่าเรียก shutdown เอง (demo engine ใช้ pattern connect→shutdown ต่อ cycle — handle MT5 ระดับ process ตายร่วมกัน ตัว fetcher จึง re-initialize เมื่อได้ payload ว่าง ดู test TestBridgeSharedTerminalCausal)
+- สัญญา read-only ของ fetcher ต่อ bridge: initialize / symbol_select / symbol_info / copy_rates_from_pos_json เท่านั้น — ห้าม order/position methods · อย่าเรียก shutdown เอง · **mt5q เป็น terminal ของ fetcher อย่างเดียว (30/10/26 12:51 UTC เป็นต้นไป — ไม่มี engine ใช้ร่วม)**: ก่อนหน้านั้นแชร์ mt5b กับ demo engine B แล้วเกิด race ฝั่งเดียว (engine shutdown ทุก cycle ↔ fetcher heal กลับ — ฟาร์มตาบอดเป็นช่วง bar age >10 นาที · ส่วน stream-closed ที่เห็นใน log engine เป็น baseline ของ engine เอง B=C=D เท่ากันเป๊ะ ไม่ใช่ผลจาก fetcher — ดู retro mt5q-dedicated-bridge) บทเรียน: **terminal MT5 = ทรัพยากร process-global แชร์ข้ามเจ้าของ lifecycle ไม่ได้ ต้องแยกคนละ container** · ยังรักษา heal re-initialize ไว้ (ป้องกัน shutdown จาก client อื่นที่อาจบุกในอนาคต) ดู test TestBridgeSharedTerminalCausal

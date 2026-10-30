@@ -9,7 +9,7 @@ services:
     environment:
     - FEED_SOURCE=bridge
     - PAPER_BRIDGE_HOST=vpsdeluna
-    - PAPER_BRIDGE_PORT=5006
+    - PAPER_BRIDGE_PORT=5012
     command: sh -c "rm -f /app/.env && exec python3 scripts/paper_feed_fetcher.py
       --feed-dir /app/feed --interval 60"
     volumes:

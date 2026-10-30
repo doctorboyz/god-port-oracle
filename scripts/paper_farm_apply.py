@@ -83,16 +83,20 @@ FEED_HOST_DIR = "./data/paper-feed"
 DATA_HOST_DIR = "./data/farm"
 
 # Feed source for the fetcher — farm_variants.yml `feed:` section overrides.
-# bridge (2026-10-30): Exness XAUUSD realtime from the VPS mt5b bridge over
+# bridge (2026-10-30): Exness XAUUSD realtime from the VPS mt5q bridge over
 # Tailscale — the SAME prices the demo B/C/D engines trade on, so paper↔demo
 # signal timing lines up (คุณหมอ: "แก้ feed timing ใช้ realtime อันเดียว").
+# mt5q is the farm's DEDICATED price terminal (login demo B env, port 5012):
+# the first cut pointed the fetcher at mt5b, which the demo B engine also
+# uses — the engine's per-cycle shutdown blinded the fetcher (heal loop,
+# stale farm). Race fix 2026-10-30: one terminal per owner.
 # yfinance (legacy): GC=F futures, delayed 5-15 min — kept selectable for
 # rollback. The fetcher era-switches history on its own (never merges the
 # two feeds — spot vs futures differ by dollars of basis).
 FEED_DEFAULTS = {
     "source": "yfinance",
     "bridge_host": "vpsdeluna",   # tailnet MagicDNS name of the VPS
-    "bridge_port": "5006",        # VPS host port → mt5b container 8001
+    "bridge_port": "5012",        # VPS host port → mt5q container 8001
     "poll_interval": "300",       # M5 poll seconds (bridge runs at 60)
 }
 
