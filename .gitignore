@@ -40,3 +40,5 @@ models/*.bin
 graphify-out/
 data/farm/
 data/paper-feed/
+# era-switch backups (yfinance history snapshot 30/10/26 etc.)
+data/paper-feed.bak-*/

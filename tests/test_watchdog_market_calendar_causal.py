@@ -247,3 +247,118 @@ class TestSelfErrorRoutingCausal:
 
         assert wd.main() == 0
         assert wd.STATE_FILE.exists(), "all-healthy pass must advance the state"
+
+# ─── Exness calendar + era-aware gate (feed switch 2026-10-30) ─────────────
+
+
+def _set_era(monkeypatch, tmp_path, era: str) -> None:
+    """Point the watchdog at an era marker with the given content."""
+    marker = tmp_path / "XAUUSD_M5.csv.era"
+    if era is None:
+        marker.unlink(missing_ok=True)
+    else:
+        marker.write_text(era + "\n")
+    monkeypatch.setattr(wd, "FEED_ERA", marker)
+
+
+class TestExnessCalendar:
+    """market_open(feed="exness") boundaries — evidence: 3 months of real
+    bridge M5 bars grouped by day (2026-08-31..10-30, see module docstring).
+    Gap labels in the evidence are the first bar AFTER the silence: the
+    22:00 weekday bar follows a 65-min diff from 20:55 → halt is
+    21:00-22:00 UTC, NOT 22:05-23:05 (the diff-label direction is easy to
+    misread — that misreading is why this class pins the exact minutes)."""
+
+    def test_thursday_daily_halt_boundaries(self):
+        # Real bars Thu 2026-10-29: 20:55 last before the halt, 22:00 first after
+        assert market_open(datetime(2026, 10, 29, 20, 59, tzinfo=UTC), feed="exness") is True
+        assert market_open(datetime(2026, 10, 29, 21, 0, tzinfo=UTC), feed="exness") is False
+        assert market_open(datetime(2026, 10, 29, 21, 59, tzinfo=UTC), feed="exness") is False
+        assert market_open(datetime(2026, 10, 29, 22, 0, tzinfo=UTC), feed="exness") is True
+
+    def test_friday_closes_21_utc(self):
+        # Real bars Fri 2026-10-16: last bar opens 20:55, weekend from 21:00
+        assert market_open(datetime(2026, 10, 16, 20, 59, tzinfo=UTC), feed="exness") is True
+        assert market_open(datetime(2026, 10, 16, 21, 0, tzinfo=UTC), feed="exness") is False
+        # …and Friday 22:00 has NO bar on Exness either
+        assert market_open(datetime(2026, 10, 16, 22, 0, tzinfo=UTC), feed="exness") is False
+
+    def test_sunday_opens_22_utc_no_evening_halt(self):
+        # Real bars Sun 2026-10-18: first bar 22:00, continuous to 23:55
+        assert market_open(datetime(2026, 10, 18, 21, 59, tzinfo=UTC), feed="exness") is False
+        assert market_open(datetime(2026, 10, 18, 22, 0, tzinfo=UTC), feed="exness") is True
+        assert market_open(datetime(2026, 10, 18, 22, 30, tzinfo=UTC), feed="exness") is True, (
+            "Sunday evening has no daily halt on Exness — 24 continuous bars"
+        )
+
+    def test_saturday_closed_all_day(self):
+        assert market_open(datetime(2026, 10, 17, 12, 0, tzinfo=UTC), feed="exness") is False
+
+    def test_monday_midday_open(self):
+        assert market_open(datetime(2026, 10, 19, 10, 0, tzinfo=UTC), feed="exness") is True
+
+    def test_unknown_feed_value_falls_back_to_cme(self):
+        assert market_open(datetime(2026, 10, 29, 21, 30, tzinfo=UTC), feed="nonsense") is False
+
+
+class TestFeedEraGateCausal:
+    """The watchdog must price the stale gate with the calendar of the feed
+    that OWNED the history (era marker from the fetcher) — bridge era uses
+    Exness hours, legacy/yfinance era keeps CME hours.
+
+    During CDT the two calendars coincide in UTC (both halt 21:00-22:00,
+    both open Sunday 22:00) — the era marker only changes behavior after
+    the 2026-11-01 US DST end, when CME hours shift an hour later in UTC
+    and the GMT+0 Exness hours stay put. The causal pin therefore uses
+    POST-DST dates, where the same instant genuinely flips with the era:
+      Thu 2026-11-05 21:30 UTC — Exness: halted · CME (CST break 22-23): open
+      Thu 2026-11-05 22:30 UTC — Exness: open    · CME (CST break 22-23): halted
+    """
+
+    def _at(self, monkeypatch, tmp_path, now: datetime, era: str | None):
+        _stale_feed(monkeypatch, tmp_path, now=now)
+        _set_era(monkeypatch, tmp_path, era)
+        return wd.check_feed(max_age_min=30.0, now=now)
+
+    def test_exness_halt_not_flagged_bridge_era(self, monkeypatch, tmp_path):
+        # Post-DST Thursday 21:30 UTC: Exness daily halt → skip
+        now = datetime(2026, 11, 5, 21, 30, tzinfo=UTC)
+        assert self._at(monkeypatch, tmp_path, now, era="bridge") is None, (
+            "Exness halt 21:00-22:00 UTC must not alert in bridge era"
+        )
+
+    def test_same_instant_cme_era_still_flags(self, monkeypatch, tmp_path):
+        # Post-DST Thursday 21:30 UTC is OPEN on the CME calendar (CST break
+        # 22:00-23:00) — a yfinance-era feed this stale IS a problem.
+        now = datetime(2026, 11, 5, 21, 30, tzinfo=UTC)
+        problem = self._at(monkeypatch, tmp_path, now, era="yfinance")
+        assert problem is not None and "stale" in problem
+
+    def test_cme_break_open_on_exness_bridge_era(self, monkeypatch, tmp_path):
+        # Post-DST Thursday 22:30 UTC: CME break, but Exness is OPEN —
+        # bridge era must still detect a stale feed.
+        now = datetime(2026, 11, 5, 22, 30, tzinfo=UTC)
+        problem = self._at(monkeypatch, tmp_path, now, era="bridge")
+        assert problem is not None and "stale" in problem, (
+            "Exness is open at 22:30 UTC Thursday post-DST — stale must alert"
+        )
+
+    def test_cme_break_not_flagged_yfinance_era(self, monkeypatch, tmp_path):
+        # Control: same instant, yfinance era → CME break → skip
+        now = datetime(2026, 11, 5, 22, 30, tzinfo=UTC)
+        assert self._at(monkeypatch, tmp_path, now, era="yfinance") is None
+
+    def test_missing_marker_defaults_to_cme(self, monkeypatch, tmp_path):
+        # No marker file (legacy history) → CME calendar: post-DST 21:30
+        # Thursday is CME-open → a stale feed must alert.
+        now = datetime(2026, 11, 5, 21, 30, tzinfo=UTC)
+        problem = self._at(monkeypatch, tmp_path, now, era=None)
+        assert problem is not None and "stale" in problem
+
+    def test_open_market_stale_still_flagged_bridge_era(self, monkeypatch, tmp_path):
+        # The required control (task T3): bars SHOULD exist but don't → ALERT
+        now = datetime(2026, 10, 30, 10, 0, tzinfo=UTC)  # Friday, open
+        problem = self._at(monkeypatch, tmp_path, now, era="bridge")
+        assert problem is not None and "stale" in problem, (
+            "market open + no fresh bars is the watchdog's whole purpose"
+        )

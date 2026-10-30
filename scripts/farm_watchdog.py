@@ -53,6 +53,11 @@ sys.path.insert(0, str(ROOT))
 from shared.market_calendar import market_open  # noqa: E402
 
 FEED_M5 = ROOT / "data" / "paper-feed" / "XAUUSD_M5.csv"
+# Era marker written by scripts/paper_feed_fetcher.py — which feed wrote the
+# history (missing = legacy yfinance). The stale gate must be priced with the
+# calendar of the feed that OWNS the bars: CME futures (yfinance GC=F) and
+# Exness spot (bridge XAUUSD) halt at different hours (feed switch 2026-10-30).
+FEED_ERA = ROOT / "data" / "paper-feed" / "XAUUSD_M5.csv.era"
 OUTBOX = ROOT / "ψ" / "outbox"
 LOG = ROOT / "data" / "farm" / "watchdog.log"
 STATE_FILE = ROOT / "data" / "farm" / ".watchdog_since"
@@ -113,15 +118,30 @@ def _newest_bar_age_minutes(feed_csv: Path, now: datetime) -> float | None:
     return None
 
 
+def _calendar_feed() -> str:
+    """Calendar to price the feed gate with, from the fetcher's era marker.
+
+    bridge era → Exness XAUUSD hours · otherwise CME GC=F hours (default,
+    also the fallback for an unreadable marker — the legacy feed).
+    """
+    try:
+        era = FEED_ERA.read_text().strip()
+    except OSError:
+        return "cme"
+    return "exness" if era == "bridge" else "cme"
+
+
 def check_feed(max_age_min: float, now: datetime) -> str | None:
     """Return a problem description, or None when the feed is fine.
 
     ISSUE-104 gate: while the market is closed (weekend + daily break, see
     shared/market_calendar.py) gold prints no bars by design — a "stale" feed
     then is the calendar talking, not the farm. Skip the age check entirely;
-    the last market-open pass owns the feed's health.
+    the last market-open pass owns the feed's health. The calendar follows
+    the feed era: Exness (bridge) halts 22:05-23:05 UTC + weekends, CME
+    (yfinance) halts on Chicago hours.
     """
-    if not market_open(now):
+    if not market_open(now, feed=_calendar_feed()):
         return None
     age = _newest_bar_age_minutes(FEED_M5, now)
     if age is None:
@@ -129,7 +149,7 @@ def check_feed(max_age_min: float, now: datetime) -> str | None:
     if age > max_age_min:
         return (
             f"feed stale: newest M5 bar {age:.0f} min old "
-            f"(limit {max_age_min:.0f} min) — Yahoo rate-limit or fetcher down?"
+            f"(limit {max_age_min:.0f} min) — fetcher down or feed source unreachable?"
         )
     return None
 
@@ -267,7 +287,8 @@ def main() -> int:
         return 2
     STATE_FILE.write_text(now.isoformat())
     feed_note = (
-        "feed fresh" if market_open(now) else "market closed (feed check skipped)")
+        "feed fresh" if market_open(now, feed=_calendar_feed())
+        else "market closed (feed check skipped)")
     _log(f"OK — {feed_note}, containers up, no regressions")
     return 0
 

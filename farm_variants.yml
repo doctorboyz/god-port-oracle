@@ -18,6 +18,18 @@
 # (ดู _group_mode_env ใน paper_farm_apply.py) — ใช้เมื่อกลุ่มต้องการ process mode
 # คนละแบบ ซึ่งต้องเป็น container แยกเพราะ flag อ่านตอน import
 
+# ─── Feed source (paper-fetcher) ──────────────────────────────────────────
+# 2026-10-30 (คุณหมอสั่งตรง): paper farm สลับ feed เป็น Exness XAUUSD realtime
+# ผ่าน bridge mt5b บน VPS (Tailscale) — ราคาเดียวกับ demo B/C/D เป๊ะ เพื่อให้
+# เทียบ per-signal ได้จริง (gap ที่เหลือ = execution costs ล้วน)
+# สลับกลับ: source: yfinance (fetcher จะ era-switch history ให้เอง — ห้าม
+# mix สอง feed ใน history เดียว)
+feed:
+  source: bridge
+  bridge_host: vpsdeluna      # tailnet MagicDNS ของ VPS (mt5b: 5006→8001)
+  bridge_port: "5006"
+  poll_interval: "60"         # วินาที — realtime ต้องเร็วกว่า cycle engine (300s)
+
 common:
   # applied to every variant unless overridden in variants.<name>.env
   INITIAL_BALANCE: "100"

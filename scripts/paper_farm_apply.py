@@ -12,8 +12,10 @@ Contract (see ψ/memory/learnings/hermes-paper-farm-protocol.md):
   overrides, each emitted as `<KNOB>_<ACCOUNT>` env var.
 - Existing DBs are kept across redeploys (bind dir data/farm/) — new
   accounts auto-seed via oracle_runner._seed_portfolio_accounts.
-- Feed is brokerless: paper-fetcher polls yfinance GC=F into
-  data/paper-feed/, engines mount it read-only at /app/feed (DATA_DIR).
+- Feed: paper-fetcher writes data/paper-feed/ from the `feed:` source
+  (bridge = Exness XAUUSD realtime via the VPS mt5b bridge over Tailscale,
+  since 2026-10-30; yfinance = legacy GC=F), engines mount it read-only
+  at /app/feed (DATA_DIR).
 """
 
 from __future__ import annotations
@@ -80,6 +82,46 @@ FARM_MODE_ENV = [
 FEED_HOST_DIR = "./data/paper-feed"
 DATA_HOST_DIR = "./data/farm"
 
+# Feed source for the fetcher — farm_variants.yml `feed:` section overrides.
+# bridge (2026-10-30): Exness XAUUSD realtime from the VPS mt5b bridge over
+# Tailscale — the SAME prices the demo B/C/D engines trade on, so paper↔demo
+# signal timing lines up (คุณหมอ: "แก้ feed timing ใช้ realtime อันเดียว").
+# yfinance (legacy): GC=F futures, delayed 5-15 min — kept selectable for
+# rollback. The fetcher era-switches history on its own (never merges the
+# two feeds — spot vs futures differ by dollars of basis).
+FEED_DEFAULTS = {
+    "source": "yfinance",
+    "bridge_host": "vpsdeluna",   # tailnet MagicDNS name of the VPS
+    "bridge_port": "5006",        # VPS host port → mt5b container 8001
+    "poll_interval": "300",       # M5 poll seconds (bridge runs at 60)
+}
+
+
+def _fetcher_service(cfg: dict) -> dict:
+    """paper-fetcher service — the ONLY service allowed to write the feed."""
+    feed = {**FEED_DEFAULTS, **(cfg.get("feed") or {})}
+    source = str(feed["source"]).strip().lower()
+    env = [f"FEED_SOURCE={source}"]
+    if source == "bridge":
+        env += [
+            f"PAPER_BRIDGE_HOST={feed['bridge_host']}",
+            f"PAPER_BRIDGE_PORT={feed['bridge_port']}",
+        ]
+        if int(feed["poll_interval"]) > 60:
+            feed["poll_interval"] = "60"  # realtime — keep bar age << 6 min
+    entrypoint = (
+        f"python3 scripts/paper_feed_fetcher.py --feed-dir /app/feed "
+        f"--interval {feed['poll_interval']}"
+    )
+    return {
+        "build": {"context": ".", "dockerfile": "Dockerfile"},
+        "container_name": "paper-fetcher",
+        "environment": env,
+        "command": _STRIP_ENV_CMD.format(entrypoint=entrypoint),
+        "volumes": [f"{FEED_HOST_DIR}:/app/feed"],
+        "restart": "unless-stopped",
+    }
+
 # The image bakes the repo's Real-A-era .env (COPY . .) — 70 stale keys plus
 # MT5 credentials. Every farm service strips it before starting so
 # load_dotenv() has nothing to load; per-service env above is the only source.
@@ -121,17 +163,7 @@ def _group_mode_env(group: dict) -> list[str]:
 
 
 def build_compose(cfg: dict) -> dict:
-    services: dict = {
-        "paper-fetcher": {
-            "build": {"context": ".", "dockerfile": "Dockerfile"},
-            "container_name": "paper-fetcher",
-            "command": _STRIP_ENV_CMD.format(
-                entrypoint="python3 scripts/paper_feed_fetcher.py --feed-dir /app/feed"
-            ),
-            "volumes": [f"{FEED_HOST_DIR}:/app/feed"],
-            "restart": "unless-stopped",
-        }
-    }
+    services: dict = {"paper-fetcher": _fetcher_service(cfg)}
     for group in cfg.get("groups", []):
         accounts = ",".join(group["variants"])
         env = [
