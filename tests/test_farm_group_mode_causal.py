@@ -126,8 +126,9 @@ class TestPortfolioAxis2Contract:
             "farm2 must be its own container — TRENDING_HARD_BLOCK is "
             "process-global, an account inside farm1 can never open the trend path"
         )
-        assert _knob(svc["environment"], "ACCOUNTS") == "P31,P32,P33", (
-            "farm2 must run exactly the three approved trend variants"
+        assert _knob(svc["environment"], "ACCOUNTS") == "P31,P32,P33,P34,P35", (
+            "farm2 must run exactly the five approved trend variants "
+            "(P34/P35 added 2026-11-07: gate-round1, คุณหมออนุมัติ)"
         )
         assert _knob(svc["environment"], "DB_PATH") == "/app/data/farm2.db", (
             "farm2 must have its own DB file (data/farm/farm2/farm2.db on host)"
@@ -136,9 +137,9 @@ class TestPortfolioAxis2Contract:
     def test_farm1_has_p23_with_exact_knobs(self):
         env = _env(_services(), "farm1")
         assert _knob(env, "ACCOUNTS") == (
-            "P11,P12,P13,P14,P15,P16,P17,P18,P19,P20,P21,P22,P23"), (
-            "P23 must join farm1 as the 13th variant — P21's exit-hypothesis "
-            "winner combined with P22's trailing"
+            "P11,P12,P13,P14,P15,P16,P17,P18,P19,P20,P21,P22,P23,P24"), (
+            "P23 + P24 (2026-11-07: P22 clone at RR 1.00) — the approved "
+            "farm1 MR axis"
         )
         assert _knob(env, "RR_RATIO_P23") == "1.20"
         assert _knob(env, "MR_BOLL_THRESHOLD_P23") == "0.85"
@@ -147,6 +148,13 @@ class TestPortfolioAxis2Contract:
         assert _knob(env, "TRAILING_TP_ENABLED_P23") == "1", (
             "P23 = P21 + trailing TP — both winning exit knobs in one variant"
         )
+        # P24 (2026-11-07, gate-round1): P22's trailing at a LOWER RR —
+        # exactly one knob away from its parent
+        assert _knob(env, "RR_RATIO_P24") == "1.00"
+        assert _knob(env, "MR_BOLL_THRESHOLD_P24") == "0.85"
+        assert _knob(env, "ENTRY_HOURS_P24") == ""
+        assert _knob(env, "BLOCKED_HOURS_P24") == ""
+        assert _knob(env, "TRAILING_TP_ENABLED_P24") == "1"
 
     def test_farm2_variants_exact_knobs(self):
         env = _env(_services(), "farm2")
@@ -163,6 +171,15 @@ class TestPortfolioAxis2Contract:
         assert _knob(env, "RR_RATIO_P33") == "2.5"
         assert _knob(env, "TIME_STOP_BARS_P33") == "48"
         assert _knob(env, "TRAILING_TP_ENABLED_P33") == "1"
+        # P34 (2026-11-07, gate-round1): P31 clone, TS 48→24 — P31's whole
+        # profit ended via max_holding, so try exiting earlier
+        assert _knob(env, "RR_RATIO_P34") == "2.5"
+        assert _knob(env, "TIME_STOP_BARS_P34") == "24"
+        assert _knob(env, "TRAILING_TP_ENABLED_P34") == "0"
+        # P35: P31 clone, RR 2.5→1.5 — completes the RR ladder 1.5/2.5/3.0
+        assert _knob(env, "RR_RATIO_P35") == "1.5"
+        assert _knob(env, "TIME_STOP_BARS_P35") == "48"
+        assert _knob(env, "TRAILING_TP_ENABLED_P35") == "0"
 
     def test_farm2_names_do_not_collide_with_farm1(self):
         # league_table merges by account NAME across DBs — a collision would

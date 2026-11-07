@@ -64,14 +64,14 @@ groups:
   - name: farm1
     # แกนที่ 1: MR-only (mr-bet BCD) — TRENDING_HARD_BLOCK=1 process-global
     # ก้อนละ ≤25 variants — RAM ~500MB base + ~10-30MB/variant (วัดจริงก่อนขยาย)
-    variants: [P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23]
+    variants: [P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, P23, P24]
     db_path: /app/data/farm1.db
   - name: farm2
     # แกนที่ 2: trend-following (2026-10-24, axis2) — TRENDING_HARD_BLOCK=0
     # เปิด trend path ของ generator: trending จะมีสัญญาณ swing ตามโค้ดเดิมก่อน
     # mr-bet กฎ counter-trend/trend filter ทำงานตามโค้ดเดิมทั้งหมด (flag อ่านตอน
     # import → ต้องเป็น container แยก = oracle-engine-farm2)
-    variants: [P31, P32, P33]
+    variants: [P31, P32, P33, P34, P35]
     db_path: /app/data/farm2.db
     mode_env:
       TRENDING_HARD_BLOCK: "0"
@@ -180,6 +180,19 @@ variants:
       TIME_STOP_BARS: "24"
       TRAILING_TP_ENABLED: "1"
 
+  # ── รอบ 7/11 (gate-round1, คุณหมออนุมัติ): P24 = โคลน P22 ลด RR 1.20→1.00
+  #    ตัวแทนทางการ (trailing TP) ของแกน MR ยังไม่เคยลอง RR ต่ำกว่า 1.20 —
+  #    วัดว่า MR-trailing ที่ RR 1.00 เข้าบ่อยขึ้นจะดีกว่าไหม (สมมติฐาน
+  #    trailing lock กำไรได้ก็พอ ไม่ต้องรอ RR สูง) ──
+  P24:
+    note: "P22-RR1.0 — โคลน P22 (MR-trailing) แก้เฉพาะ RR 1.20→1.00: trailing ที่ RR ต่ำกว่า เข้าบ่อยขึ้น lock เร็วขึ้น"
+    env:
+      RR_RATIO: "1.00"
+      MR_BOLL_THRESHOLD: "0.85"
+      ENTRY_HOURS: ""
+      BLOCKED_HOURS: ""
+      TRAILING_TP_ENABLED: "1"
+
   # ── รอบ 24/10 (axis2): แกน trend-following กลุ่ม farm2 —
   #    Marks ออกแบบ 3 ตัววัดมิติที่ farm1 วัดไม่ได้ (ทั้งก้อน MR-only:
   #    ตลาด trending = เงียบพร้อมกัน corr ต่ำสุด 0.61) · TRENDING_HARD_BLOCK=0
@@ -203,3 +216,20 @@ variants:
       RR_RATIO: "2.5"
       TIME_STOP_BARS: "48"
       TRAILING_TP_ENABLED: "1"
+
+  # ── รอบ 7/11 (gate-round1, คุณหมออนุมัติ): 2 ตัวบนแกน trend (farm2)
+  #    สมมติฐานจากผลฟาร์มรอบแรก — P31 กำไรทั้งหมดจบทาง max_holding (ไม่ถึง
+  #    TP/SL เลย) → P34 ลองจบเร็วขึ้น (TS 48→24) · วาดบันได RR ให้ครบ
+  #    1.5/2.5/3.0 (P32 ล้มที่ 3.0) → P35 ลงมาที่ 1.5 ──
+  P34:
+    note: "P31-TS24 — โคลน P31 แก้เฉพาะ TS 48→24: กำไร P31 จบทาง max_holding ทั้งหมด → ลองจบเร็วขึ้นเผื่อ edge อยู่ที่ช่วงต้น"
+    env:
+      RR_RATIO: "2.5"
+      TIME_STOP_BARS: "24"
+      TRAILING_TP_ENABLED: "0"
+  P35:
+    note: "P31-RR1.5 — โคลน P31 แก้เฉพาะ RR 2.5→1.5: วาดบันได RR 1.5/2.5/3.0 บนแกน trend (P32 ล้มที่ 3.0 — เช็คว่าต่ำกว่า 2.5 ดีกว่าไหม)"
+    env:
+      RR_RATIO: "1.5"
+      TIME_STOP_BARS: "48"
+      TRAILING_TP_ENABLED: "0"

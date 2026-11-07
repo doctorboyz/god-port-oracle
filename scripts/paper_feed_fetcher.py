@@ -348,6 +348,57 @@ def _commit(feed_dir: Path, tf: str, fetched: pd.DataFrame, source: str,
     return True
 
 
+def _backfill_stale_gap(feed_dir: Path, tf: str,
+                        fetched: pd.DataFrame | None,
+                        now: datetime) -> pd.DataFrame | None:
+    """Deep re-fetch when the delta window did not reach the stored tail.
+
+    2026-11-07: a fetcher outage LONGER than BRIDGE_DELTA_COUNT bars (~25
+    trading hours for M5) plants a PERMANENT hole — every later poll looks
+    only at the newest window, so bars older than the window that the
+    bridge still has are never merged (until a fetcher restart re-seeds).
+    Compare the store's last bar with the fetched window's first bar: when
+    the window does not reach back to the tail, ask the SAME bridge (read-
+    only, same era — never yfinance, never a mix) for enough bars to cover
+    [store tail → now] and merge in time order. _commit dedupes by
+    timestamp, so overlapping frames can never double-write.
+
+    False-positive free: the delta window overlaps the stored tail in every
+    normal situation (fresh tail, daily halt, weekend — the window reaches
+    ~25 trading hours back, past the Friday session into Thursday), so the
+    deep fetch fires only for a real beyond-window hole. A market closure
+    the bridge genuinely has no bars for (e.g. the 22:00-22:55 UTC daily
+    halt post-DST) cannot be healed by ANY fetch — that is a closure, not
+    missing data (verified live 2026-11-07: the bridge holds zero bars
+    there, every trading day shows the identical pattern).
+    """
+    if fetched is None or fetched.empty:
+        return fetched
+    if _read_era(feed_dir, tf) != "bridge":
+        return fetched  # cross-era writes are refused by _commit anyway
+    existing = _load_existing(feed_dir, tf)
+    if existing.empty:
+        return fetched
+    interval = BAR_CLOSE_SECONDS[tf]
+    store_last = existing.index[-1]
+    fetched_first = fetched.index[0]
+    if fetched_first <= store_last + pd.Timedelta(seconds=interval):
+        return fetched  # window reached the tail — contiguous, nothing to heal
+    needed = int((now - store_last).total_seconds() // interval) + BRIDGE_DELTA_COUNT[tf]
+    count = min(BRIDGE_SEED_COUNT[tf], max(needed, BRIDGE_DELTA_COUNT[tf]))
+    logger.info("%s: delta window starts at %s but the store tail is %s — "
+                "backfilling %d bars from the same bridge",
+                tf, fetched_first, store_last, count)
+    deep = _fetch_bridge_with_retry(tf, count)
+    if deep is None or deep.empty:
+        logger.warning("%s: backfill fetch failed — hole remains until next poll", tf)
+        return fetched
+    deep = _drop_unclosed(deep, tf, now)
+    if deep.empty:
+        return fetched
+    return pd.concat([fetched, deep])
+
+
 def update_timeframe(feed_dir: Path, tf: str, seed: bool = False,
                      source: str | None = None) -> bool:
     """Fetch + commit one timeframe into its CSV. True when the file changed.
@@ -364,6 +415,8 @@ def update_timeframe(feed_dir: Path, tf: str, seed: bool = False,
     if source == "bridge":
         count = BRIDGE_SEED_COUNT[tf] if seed else BRIDGE_DELTA_COUNT[tf]
         fetched = _fetch_bridge_with_retry(tf, count)
+        if not seed:
+            fetched = _backfill_stale_gap(feed_dir, tf, fetched, now)
     else:
         fetched = _fetch_with_retry(tf, SEED_PERIOD[tf] if seed else DELTA_PERIOD[tf])
 

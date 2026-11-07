@@ -368,3 +368,98 @@ class TestBridgeSharedTerminalCausal:
         root.initialize = lambda: False  # terminal unreachable
         assert feed.fetch("M5", 5) is None
         assert feed._conn is None, "a dead terminal must drop the connection"
+
+
+class TestBridgeBackfillCausal:
+    """Causal proof (2026-11-07): a fetcher outage LONGER than the delta
+    window leaves a PERMANENT hole. Polls only look BRIDGE_DELTA_COUNT bars
+    back (~25 trading hours for M5); bars older than the window that the
+    bridge still has are never merged, so a stale period > window size
+    plants a gap that survives every later poll (only a fetcher restart
+    heals it, via the boot seed).
+
+    Hypothesis: update_timeframe must, on every bridge poll, compare the
+    store's last bar with the fetched window's first bar. When the window
+    does not reach back to the stored tail, re-fetch deep enough to cover
+    [store tail → now] from the SAME bridge (read-only, same era — no
+    yfinance, no mix) and merge in time order, deduped by timestamp.
+    """
+
+    NOW = datetime(2026, 11, 6, 12, 0)  # all bars below are closed by now
+
+    def _seed_store(self, tmp_path, store: pd.DataFrame) -> None:
+        """Bridge-era history on disk whose tail is far behind NOW."""
+        pff._write_atomic(tmp_path, "M5", store)
+        pff._write_era(tmp_path, "M5", "bridge")
+
+    def _gap_provider(self, full: pd.DataFrame, delta_first: int):
+        """Bridge stand-in with deep history: a normal delta poll returns
+        only the newest window (missing bars the window slid past); a deep
+        (count > delta) request returns the full truth."""
+        delta = full.iloc[delta_first:]
+        calls: list[int] = []
+
+        def _fetch(tf, count):
+            calls.append(count)
+            return delta if count <= pff.BRIDGE_DELTA_COUNT["M5"] else full
+
+        return _fetch, calls
+
+    def test_gap_after_stale_is_backfilled_in_order(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pff, "_now_utc", lambda: self.NOW)
+        store = _bars("2026-11-06 00:00", n=60)          # tail 04:55
+        self._seed_store(tmp_path, store)
+        full = _bars("2026-11-06 00:00", n=144)          # truth: 00:00..11:55
+        _fetch, calls = self._gap_provider(full, delta_first=84)  # 07:00..11:55
+
+        monkeypatch.setattr(pff, "_bridge_fetch", _fetch)
+        assert pff.update_timeframe(tmp_path, "M5", seed=False, source="bridge") is True
+
+        out = _read(tmp_path)
+        assert list(out.index) == list(full.index), (
+            "RED before the fix: bars 05:00-06:55 sit beyond the delta window "
+            "and the hole would survive every poll — the store must be "
+            "backfilled from the bridge and kept in time order"
+        )
+        assert out.index.duplicated().sum() == 0
+        assert len(calls) == 2, "exactly one deep backfill fetch on top of the delta"
+        assert calls[0] == pff.BRIDGE_DELTA_COUNT["M5"]
+        assert calls[1] > pff.BRIDGE_DELTA_COUNT["M5"], "backfill must look deeper than the window"
+
+    def test_no_gap_no_deep_fetch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pff, "_now_utc", lambda: self.NOW)
+        store = _bars("2026-11-06 00:00", n=60)          # tail 04:55
+        self._seed_store(tmp_path, store)
+        # Delta window overlaps the tail (04:00..05:05) — contiguous, and 2 new bars
+        fetched = _bars("2026-11-06 04:00", n=14)
+        calls: list[int] = []
+
+        def _fetch(tf, count):
+            calls.append(count)
+            return fetched
+
+        monkeypatch.setattr(pff, "_bridge_fetch", _fetch)
+        assert pff.update_timeframe(tmp_path, "M5", seed=False, source="bridge") is True
+        assert calls == [pff.BRIDGE_DELTA_COUNT["M5"]], (
+            "a contiguous fetch must NOT trigger an extra deep fetch"
+        )
+        out = _read(tmp_path)
+        assert len(out) == 62, "2 new bars on top of the 60 stored"
+        assert out.index.is_monotonic_increasing
+
+    def test_backfill_duplicate_guard(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pff, "_now_utc", lambda: self.NOW)
+        store = _bars("2026-11-06 00:00", n=60, base=4200.0)   # tail 04:55
+        self._seed_store(tmp_path, store)
+        # Bridge truth re-sends the SAME timestamps with corrected values —
+        # merge must dedupe (last write wins), never double-write rows.
+        full = _bars("2026-11-06 00:00", n=144, base=4210.0)
+        _fetch, calls = self._gap_provider(full, delta_first=84)
+
+        monkeypatch.setattr(pff, "_bridge_fetch", _fetch)
+        assert pff.update_timeframe(tmp_path, "M5", seed=False, source="bridge") is True
+
+        out = _read(tmp_path)
+        assert out.index.duplicated().sum() == 0, "duplicate timestamps corrupt the feed"
+        assert len(out) == len(full)
+        assert out["close"].iloc[0] == 4210.0, "bridge values win over stale store values"
