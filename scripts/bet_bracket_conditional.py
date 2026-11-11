@@ -150,15 +150,17 @@ def ledger_stats(rows: list[dict]) -> dict:
     }
 
 
-def run_conditional(df: pd.DataFrame,
-                    states: dict[str, list]) -> tuple[dict, dict, int]:
+def run_conditional(df: pd.DataFrame, states: dict[str, list],
+                    geometries: tuple = GEOMETRIES) -> tuple[dict, dict, int]:
     """Resolve every event once; split ledgers by (detector, state).
 
     Returns (conditional[(det, ev, side, tp, sl, state)] -> stats,
              overall[(ev, side, tp, sl)] -> stats, n_warmup_excluded).
     The state tagged to a bet firing on bar i is the state known at the
     entry moment — bar i's close — exactly what htf.align_state_to_m5
-    returns per bar (causal-tested).
+    returns per bar (causal-tested). `geometries` defaults to the
+    original four-cell grid (regression-checked); the playbook grid
+    passes the seven-geometry tuple.
     """
     high = df["high"].to_numpy(float)
     low = df["low"].to_numpy(float)
@@ -176,7 +178,7 @@ def run_conditional(df: pd.DataFrame,
                  for i in range(WARMUP_BARS, len(df))
                  if polarity.iloc[i] in ("BUY", "SELL")]
         logger.info("%s: %d fires", ev, len(fires))
-        for geo in GEOMETRIES:
+        for geo in geometries:
             per_side: dict[str, list[dict]] = {"BUY": [], "SELL": []}
             for bar_idx, pol in fires:
                 res = resolve_bracket_on_bars(
