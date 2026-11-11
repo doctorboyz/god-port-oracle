@@ -166,9 +166,83 @@ def _group_mode_env(group: dict) -> list[str]:
     return lines
 
 
+# ─── True-bet farm group (engine: bet) — 2026-11-07 ────────────────────────
+# A bet group runs its OWN engine (scripts/bet_engine.py), not LiveTrader:
+# cells are contract bets (fixed TP/SL held to the end), one bet at a time,
+# seeded $1,000 each. It shares the paper feed read-only and reads ticks
+# from the same bridge (read-only market-data methods only — the T0 probe
+# 2026-11-11 confirmed copy_ticks_from works with flags=1).
+BET_BRIDGE_DEFAULTS = {"bridge_host": "vpsdeluna", "bridge_port": "5012"}
+
+
+def _bet_cell_env(cfg: dict, group: dict, name: str) -> list[str]:
+    """Per-cell env lines for a bet group: group `common:` + variant env.
+
+    The GROUP's common (not the global one) is the base — the global common
+    belongs to the LiveTrader variants (INITIAL_BALANCE=100 etc.) and would
+    give bet cells the wrong seed/risk.
+
+    Env KEY sanitization (live proof 2026-11-11): the container runtime
+    silently DROPS env entries whose key contains '-' from the PID-1
+    environment (docker inspect / docker exec still show them — the boot
+    seed wrote every cell as default A/6:SL12 until we caught it). The
+    farm's own P<digits> account names never hit this. Cell ids stay
+    BET-A6 (task-required); only the env KEY is sanitized: BET-A6 → BET_A6.
+    A contract test locks every emitted key to ^[A-Z0-9_]+$.
+    """
+    merged: dict[str, str] = {
+        str(k): str(v) for k, v in (group.get("common") or {}).items()
+    }
+    merged.update(cfg["variants"][name].get("env") or {})
+    safe = name.replace("-", "_")
+    return [f"{knob}_{safe}={value}" for knob, value in merged.items()]
+
+
+def _bet_service_name(group: dict) -> str:
+    """Docker service name — `service:` overrides the group name so the
+    container can be oracle-engine-farmbet while its host data dir stays
+    data/farm/bet (task T1 names both explicitly)."""
+    return f"oracle-engine-{group.get('service') or group['name']}"
+
+
+def _bet_service(cfg: dict, group: dict) -> dict:
+    """oracle-engine-<group> running the bet engine — additive, brokerless."""
+    feed = {**BET_BRIDGE_DEFAULTS, **(cfg.get("feed") or {})}
+    env = [
+        f"ACCOUNTS={','.join(group['variants'])}",
+        f"DB_PATH={group['db_path']}",
+        "DATA_DIR=/app/feed",                  # shared paper feed, read-only
+        "BET_POLL_INTERVAL=60",                # ticks decide; poll fast
+        f"BET_BRIDGE_HOST={feed['bridge_host']}",
+        f"BET_BRIDGE_PORT={feed['bridge_port']}",
+        "MT5_AUTO_LOGIN=0",                    # brokerless: ticks only, no login
+        "SEED_DEFAULT_ACCOUNTS=0",
+        "DAILY_SUMMARY_DISABLED=1",
+        "BRIDGE_STATUS_DISABLED=1",
+    ]
+    for name in group["variants"]:
+        env.extend(_bet_cell_env(cfg, group, name))
+    return {
+        "build": {"context": ".", "dockerfile": "Dockerfile"},
+        "container_name": _bet_service_name(group),
+        "environment": env,
+        "command": _STRIP_ENV_CMD.format(
+            entrypoint="python3 scripts/bet_engine.py"
+        ),
+        "volumes": [
+            f"{FEED_HOST_DIR}:/app/feed:ro",
+            f"{DATA_HOST_DIR}/{group['name']}:/app/data",
+        ],
+        "restart": "unless-stopped",
+    }
+
+
 def build_compose(cfg: dict) -> dict:
     services: dict = {"paper-fetcher": _fetcher_service(cfg)}
     for group in cfg.get("groups", []):
+        if group.get("engine") == "bet":
+            services[_bet_service_name(group)] = _bet_service(cfg, group)
+            continue
         accounts = ",".join(group["variants"])
         env = [
             f"ACCOUNTS={accounts}",

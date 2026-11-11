@@ -75,6 +75,22 @@ groups:
     db_path: /app/data/farm2.db
     mode_env:
       TRENDING_HARD_BLOCK: "0"
+  - name: bet
+    # แกนที่ 3: true-bet farm (คุณหมออนุมัติ 7/11) — วัด edge ของ "จุดเข้า"
+    # แยกจาก "สัญญาออก": เข้าแล้วตั้ง TP/SL ตายตัวตาม geometry ของ cell
+    # ถือจนจบเสมอ ไม่มี trailing/TS/hour-gate/CB มาตัดสินแทน
+    # engine: bet = container แยก (oracle-engine-farmbet) รัน scripts/bet_engine.py
+    # ไม่ใช่ LiveTrader — 9 cells × seed $1,000, feed ร่วมเดิม (read-only)
+    # resolution สดด้วย tick จาก bridge (copy_ticks_from flags=1 — probe 7/11),
+    # backtest ใช้ bar-conservative 2 ขอบ (ดู ψ/outbox/bet_backtest_2026-11-07.md)
+    engine: bet
+    service: farmbet             # docker service/container: oracle-engine-farmbet
+    variants: [BET-A6, BET-A10, BET-A8, BET-B6, BET-B10, BET-B8, BET-C6, BET-C10, BET-C8]
+    db_path: /app/data/bet.db
+    common:
+      INITIAL_BALANCE: "1000"             # $1,000/cell — รวม $9,000 เสมือน
+      BET_RISK_FRACTION: "0.015"          # bet = $15 (1.5% — โปรไฟล์ Cent 1.2-2%)
+      BET_SPREAD_COST_PER_OZ: "0.20"      # round-trip $/oz (farm parity 20 points)
 
 variants:
   # ── Base clones: B/C/D ตัวจริงบน VPS (มาตรฐานเทียบ) ──
@@ -233,3 +249,69 @@ variants:
       RR_RATIO: "1.5"
       TIME_STOP_BARS: "48"
       TRAILING_TP_ENABLED: "0"
+
+  # ── รอบ 7/11 (true-bet farm, คุณหมออนุมัติ): 9 cells วัด edge ของจุดเข้า
+  #    อย่างเดียว — จุดเข้า 3 ครอบครัว × สัญญาออกตายตัว 3 geometry
+  #    · A = MR-Boll extreme (ADX<20 + Boll pos ≤0.15/≥0.85 — core เดียวกับ
+  #      MR path ของ P22 แต่ตัด conf/hour gates ออก, ดู retro true-bet-farm)
+  #    · B = breakout 20 แท่งปิด (close ทะลุ high/low ย้อนหลัง 20)
+  #    · C = momentum-pullback (EMA50 กำหนดทิศ + แตะ EMA10 แล้วเด้ง)
+  #    · geometry: 6=TP6:SL12 · 10=TP10:SL20 · 8=TP8:SL8 (ดอลลาร์)
+  #    ชื่อ cell = BET-<family><geometry-digit> ──
+  BET-A6:
+    note: "A6 — MR-Boll extreme × TP6:SL12 (breakeven WR 66.7%)"
+    env:
+      BET_FAMILY: "A"
+      BET_TP_DIST: "6.0"
+      BET_SL_DIST: "12.0"
+      BET_BOLL_THRESHOLD: "0.85"
+  BET-A10:
+    note: "A10 — MR-Boll extreme × TP10:SL20 (breakeven WR 66.7%)"
+    env:
+      BET_FAMILY: "A"
+      BET_TP_DIST: "10.0"
+      BET_SL_DIST: "20.0"
+      BET_BOLL_THRESHOLD: "0.85"
+  BET-A8:
+    note: "A8 — MR-Boll extreme × TP8:SL8 (breakeven WR 50%)"
+    env:
+      BET_FAMILY: "A"
+      BET_TP_DIST: "8.0"
+      BET_SL_DIST: "8.0"
+      BET_BOLL_THRESHOLD: "0.85"
+  BET-B6:
+    note: "B6 — breakout 20-bar × TP6:SL12"
+    env:
+      BET_FAMILY: "B"
+      BET_TP_DIST: "6.0"
+      BET_SL_DIST: "12.0"
+  BET-B10:
+    note: "B10 — breakout 20-bar × TP10:SL20"
+    env:
+      BET_FAMILY: "B"
+      BET_TP_DIST: "10.0"
+      BET_SL_DIST: "20.0"
+  BET-B8:
+    note: "B8 — breakout 20-bar × TP8:SL8"
+    env:
+      BET_FAMILY: "B"
+      BET_TP_DIST: "8.0"
+      BET_SL_DIST: "8.0"
+  BET-C6:
+    note: "C6 — momentum-pullback EMA50/EMA10 × TP6:SL12"
+    env:
+      BET_FAMILY: "C"
+      BET_TP_DIST: "6.0"
+      BET_SL_DIST: "12.0"
+  BET-C10:
+    note: "C10 — momentum-pullback EMA50/EMA10 × TP10:SL20"
+    env:
+      BET_FAMILY: "C"
+      BET_TP_DIST: "10.0"
+      BET_SL_DIST: "20.0"
+  BET-C8:
+    note: "C8 — momentum-pullback EMA50/EMA10 × TP8:SL8"
+    env:
+      BET_FAMILY: "C"
+      BET_TP_DIST: "8.0"
+      BET_SL_DIST: "8.0"

@@ -85,7 +85,11 @@ def _env_sources() -> dict[str, set[str]]:
 
 _KEY_LIST_RE = re.compile(r"^\s+-\s+([A-Z][A-Z0-9_]+)\s*(?:=|$)", re.M)
 _KEY_MAP_RE = re.compile(r"^\s+([A-Z][A-Z0-9_]+):\s", re.M)
-_ACCT_SUFFIX_RE = re.compile(r"_P\d+$")
+# Per-account / per-cell suffix families a compose key can carry and still be
+# read via a template: _P11 (P-account variants) and _BET_A6-style (true-bet
+# cells — scripts/bet_engine.py reads them as f"BET_FAMILY_{safe}" with the
+# dash sanitized to an underscore). Anything else dangles unread.
+_ACCT_SUFFIX_RE = re.compile(r"(?:_P\d+|_BET_[A-Z]\d+)$")
 
 
 def _farm_compose_keys() -> dict[str, set[str]]:

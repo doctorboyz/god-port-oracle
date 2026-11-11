@@ -519,3 +519,81 @@ services:
     - ./data/paper-feed:/app/feed:ro
     - ./data/farm/farm2:/app/data
     restart: unless-stopped
+  oracle-engine-farmbet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oracle-engine-farmbet
+    environment:
+    - ACCOUNTS=BET-A6,BET-A10,BET-A8,BET-B6,BET-B10,BET-B8,BET-C6,BET-C10,BET-C8
+    - DB_PATH=/app/data/bet.db
+    - DATA_DIR=/app/feed
+    - BET_POLL_INTERVAL=60
+    - BET_BRIDGE_HOST=vpsdeluna
+    - BET_BRIDGE_PORT=5012
+    - MT5_AUTO_LOGIN=0
+    - SEED_DEFAULT_ACCOUNTS=0
+    - DAILY_SUMMARY_DISABLED=1
+    - BRIDGE_STATUS_DISABLED=1
+    - INITIAL_BALANCE_BET_A6=1000
+    - BET_RISK_FRACTION_BET_A6=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_A6=0.20
+    - BET_FAMILY_BET_A6=A
+    - BET_TP_DIST_BET_A6=6.0
+    - BET_SL_DIST_BET_A6=12.0
+    - BET_BOLL_THRESHOLD_BET_A6=0.85
+    - INITIAL_BALANCE_BET_A10=1000
+    - BET_RISK_FRACTION_BET_A10=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_A10=0.20
+    - BET_FAMILY_BET_A10=A
+    - BET_TP_DIST_BET_A10=10.0
+    - BET_SL_DIST_BET_A10=20.0
+    - BET_BOLL_THRESHOLD_BET_A10=0.85
+    - INITIAL_BALANCE_BET_A8=1000
+    - BET_RISK_FRACTION_BET_A8=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_A8=0.20
+    - BET_FAMILY_BET_A8=A
+    - BET_TP_DIST_BET_A8=8.0
+    - BET_SL_DIST_BET_A8=8.0
+    - BET_BOLL_THRESHOLD_BET_A8=0.85
+    - INITIAL_BALANCE_BET_B6=1000
+    - BET_RISK_FRACTION_BET_B6=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_B6=0.20
+    - BET_FAMILY_BET_B6=B
+    - BET_TP_DIST_BET_B6=6.0
+    - BET_SL_DIST_BET_B6=12.0
+    - INITIAL_BALANCE_BET_B10=1000
+    - BET_RISK_FRACTION_BET_B10=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_B10=0.20
+    - BET_FAMILY_BET_B10=B
+    - BET_TP_DIST_BET_B10=10.0
+    - BET_SL_DIST_BET_B10=20.0
+    - INITIAL_BALANCE_BET_B8=1000
+    - BET_RISK_FRACTION_BET_B8=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_B8=0.20
+    - BET_FAMILY_BET_B8=B
+    - BET_TP_DIST_BET_B8=8.0
+    - BET_SL_DIST_BET_B8=8.0
+    - INITIAL_BALANCE_BET_C6=1000
+    - BET_RISK_FRACTION_BET_C6=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_C6=0.20
+    - BET_FAMILY_BET_C6=C
+    - BET_TP_DIST_BET_C6=6.0
+    - BET_SL_DIST_BET_C6=12.0
+    - INITIAL_BALANCE_BET_C10=1000
+    - BET_RISK_FRACTION_BET_C10=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_C10=0.20
+    - BET_FAMILY_BET_C10=C
+    - BET_TP_DIST_BET_C10=10.0
+    - BET_SL_DIST_BET_C10=20.0
+    - INITIAL_BALANCE_BET_C8=1000
+    - BET_RISK_FRACTION_BET_C8=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_C8=0.20
+    - BET_FAMILY_BET_C8=C
+    - BET_TP_DIST_BET_C8=8.0
+    - BET_SL_DIST_BET_C8=8.0
+    command: sh -c "rm -f /app/.env && exec python3 scripts/bet_engine.py"
+    volumes:
+    - ./data/paper-feed:/app/feed:ro
+    - ./data/farm/bet:/app/data
+    restart: unless-stopped
