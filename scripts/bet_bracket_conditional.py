@@ -354,9 +354,10 @@ def detector_quality(df: pd.DataFrame) -> dict:
     return quality
 
 
-def state_shares(df: pd.DataFrame) -> dict:
+def state_shares(df: pd.DataFrame, detectors=None) -> dict:
     """T1 reporting: per-detector share of M5 bars per state + run lengths."""
-    states = build_detector_states(df)
+    states = build_detector_states(df, detectors) if detectors is not None \
+        else build_detector_states(df)
     out = {}
     for det, series in states.items():
         s = pd.Series([x if x is not None else "WARMUP" for x in series])
