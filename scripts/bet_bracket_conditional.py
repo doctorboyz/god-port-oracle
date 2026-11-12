@@ -405,6 +405,8 @@ def build_payload(conditional: dict, overall: dict, quality: dict,
             "wr_pes": round(stats["wr_pes"], 4) if stats["wr_pes"] is not None else None,
             "wr_opt": round(stats["wr_opt"], 4) if stats["wr_opt"] is not None else None,
             "e_pes": round(stats["e_pes"], 4) if stats["e_pes"] is not None else None,
+            "avg_bars": (round(stats["avg_bars"], 1)
+                          if stats["avg_bars"] is not None else None),
             "n_cont": stats["n_cont"], "n_rev": stats["n_rev"],
             "win_streak": stats["win_streak"], "loss_streak": stats["loss_streak"],
             "quarterly": {q: {"n": d["n"],
