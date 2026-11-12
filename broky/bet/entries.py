@@ -44,7 +44,19 @@ from broky.indicators.adx import calculate_adx
 FAMILY_MR_BOLL = "A"
 FAMILY_BREAKOUT = "B"
 FAMILY_PULLBACK = "C"
-FAMILIES = (FAMILY_MR_BOLL, FAMILY_BREAKOUT, FAMILY_PULLBACK)
+# Conditional champions (คุณหมอ 13/11, playbook FLAT แชมป์): event-driven
+# ledgers from the theory-free bracket — SELL fired at EVERY event of the
+# indicator, BOTH polarities (a cross up through 30 fires SELL exactly like
+# a cross down through 70). The polarity the indicator hints at is
+# deliberately NOT a filter: that is the result that won the conditional
+# grid (RSIRev-SELL-TP12:SL6 E +19.92, StochRev-SELL-TP12:SL12 E +17.95 —
+# ψ/outbox/bet_regime_playbook_2026-11-13.md). Do not add theory back in.
+FAMILY_RSI_REV_SELL = "R"
+FAMILY_STOCH_REV_SELL = "S"
+FAMILIES = (
+    FAMILY_MR_BOLL, FAMILY_BREAKOUT, FAMILY_PULLBACK,
+    FAMILY_RSI_REV_SELL, FAMILY_STOCH_REV_SELL,
+)
 
 # ── Family A knobs (mirror the farm MR path) ───────────────────────────────
 MR_ADX_MAX = 20.0              # generate_signal: `if latest_adx < 20` → MR branch
@@ -141,6 +153,39 @@ def pullback_signal_series(
     return out
 
 
+def rsi_rev_sell_series(close: pd.Series) -> pd.Series:
+    """Family R — SELL at EVERY rsi_reversal event, both polarities.
+
+    Reuses ``broky.betbracket.events.rsi_reversal_series`` (the exact
+    machinery the conditional grid/backtest used) and flattens its
+    BUY/SELL polarity tags into a single SELL fire per event — the
+    SELL ledger of the bracket, which is the champion that won FLAT.
+    No direction enters from the event itself (theory-free by design).
+    """
+    from broky.betbracket.events import rsi_reversal_series
+
+    polarity = rsi_reversal_series(close)
+    out = pd.Series("", index=close.index, dtype=object)
+    out[(polarity == BUY) | (polarity == SELL)] = SELL
+    return out
+
+
+def stoch_rev_sell_series(high: pd.Series, low: pd.Series,
+                          close: pd.Series) -> pd.Series:
+    """Family S — SELL at EVERY stoch_reversal event, both polarities.
+
+    Same construction as family R on the stochastic detector: the SELL
+    ledger of the theory-free bracket, fired at every event regardless
+    of the %K cross direction.
+    """
+    from broky.betbracket.events import stoch_reversal_series
+
+    polarity = stoch_reversal_series(high, low, close)
+    out = pd.Series("", index=close.index, dtype=object)
+    out[(polarity == BUY) | (polarity == SELL)] = SELL
+    return out
+
+
 def family_signal_series(
     family: str,
     df: pd.DataFrame,
@@ -158,6 +203,10 @@ def family_signal_series(
         return breakout_signal_series(close, high, low)
     if family == FAMILY_PULLBACK:
         return pullback_signal_series(close, high, low)
+    if family == FAMILY_RSI_REV_SELL:
+        return rsi_rev_sell_series(close)
+    if family == FAMILY_STOCH_REV_SELL:
+        return stoch_rev_sell_series(high, low, close)
     raise ValueError(f"unknown bet family {family!r} — expected one of {FAMILIES}")
 
 

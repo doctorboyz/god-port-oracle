@@ -525,7 +525,7 @@ services:
       dockerfile: Dockerfile
     container_name: oracle-engine-farmbet
     environment:
-    - ACCOUNTS=BET-A6,BET-A10,BET-A8,BET-B6,BET-B10,BET-B8,BET-C6,BET-C10,BET-C8
+    - ACCOUNTS=BET-A6,BET-A10,BET-A8,BET-B6,BET-B10,BET-B8,BET-C6,BET-C10,BET-C8,BET-RF,BET-SF
     - DB_PATH=/app/data/bet.db
     - DATA_DIR=/app/feed
     - BET_POLL_INTERVAL=60
@@ -592,6 +592,22 @@ services:
     - BET_FAMILY_BET_C8=C
     - BET_TP_DIST_BET_C8=8.0
     - BET_SL_DIST_BET_C8=8.0
+    - INITIAL_BALANCE_BET_RF=1000
+    - BET_RISK_FRACTION_BET_RF=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_RF=0.20
+    - BET_FAMILY_BET_RF=R
+    - BET_TP_DIST_BET_RF=12.0
+    - BET_SL_DIST_BET_RF=6.0
+    - BET_GATE_DETECTOR_BET_RF=h4_ema
+    - BET_GATE_STATE_BET_RF=FLAT
+    - INITIAL_BALANCE_BET_SF=1000
+    - BET_RISK_FRACTION_BET_SF=0.015
+    - BET_SPREAD_COST_PER_OZ_BET_SF=0.20
+    - BET_FAMILY_BET_SF=S
+    - BET_TP_DIST_BET_SF=12.0
+    - BET_SL_DIST_BET_SF=12.0
+    - BET_GATE_DETECTOR_BET_SF=h4_ema
+    - BET_GATE_STATE_BET_SF=FLAT
     command: sh -c "rm -f /app/.env && exec python3 scripts/bet_engine.py"
     volumes:
     - ./data/paper-feed:/app/feed:ro

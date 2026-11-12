@@ -23,17 +23,27 @@ Group schema (see farm_variants.yml):
           BET_TP_DIST: "6.0"
           BET_SL_DIST: "12.0"
           BET_BOLL_THRESHOLD: "0.85"   # family A only
+
+Conditional cells (BET-RF / BET-SF, คุณหมอ 13/11) additionally declare
+their entry condition as flat gate knobs:
+
+      BET_GATE_DETECTOR: "h4_ema"      # closed-H4 EMA50 slope detector only
+      BET_GATE_STATE: "FLAT"           # required state at the signal moment
+
+Cells without the gate knobs are unconditional (gate=None) — the original
+9 cells read exactly as before.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
 from broky.bet.contract import BetGeometry
 from broky.bet.engine import CellSpec
+from broky.bet import entries, gates
 
 ROOT = Path(__file__).resolve().parents[2]
 VARIANTS_FILE = ROOT / "farm_variants.yml"
@@ -45,6 +55,9 @@ GEOMETRIES = {
     "6": BetGeometry(tp_dist=6.0, sl_dist=12.0),   # TP6:SL12
     "10": BetGeometry(tp_dist=10.0, sl_dist=20.0),  # TP10:SL20
     "8": BetGeometry(tp_dist=8.0, sl_dist=8.0),     # TP8:SL8
+    # Conditional champions (คุณหมอ 13/11, playbook FLAT แชมป์):
+    "TP12:SL6": BetGeometry(tp_dist=12.0, sl_dist=6.0),    # BET-RF
+    "TP12:SL12": BetGeometry(tp_dist=12.0, sl_dist=12.0),  # BET-SF
 }
 
 SEED_BALANCE_DEFAULT = 1000.0   # $1,000 per cell (9 cells = $9,000 เสมือน)
@@ -87,6 +100,12 @@ def _spec_from_env(cell_id: str, env: dict[str, Any]) -> CellSpec:
             f"bet cell {cell_id}: geometry TP{geometry.tp_dist}:SL{geometry.sl_dist} "
             f"is not one of the approved axis {sorted(GEOMETRIES)}"
         )
+    if family not in entries.FAMILIES:
+        raise ValueError(
+            f"bet cell {cell_id}: family {family!r} is not one of the "
+            f"entry families {entries.FAMILIES}"
+        )
+    gate = _gate_from_env(cell_id, env)
     return CellSpec(
         cell_id=cell_id,
         family=family,
@@ -96,4 +115,34 @@ def _spec_from_env(cell_id: str, env: dict[str, Any]) -> CellSpec:
         boll_threshold=float(env.get("BET_BOLL_THRESHOLD", 0.85)),
         spread_cost_per_oz=float(
             env.get("BET_SPREAD_COST_PER_OZ", SPREAD_COST_DEFAULT)),
+        gate=gate,
     )
+
+
+def _gate_from_env(cell_id: str, env: dict[str, Any]) -> Optional[gates.GateSpec]:
+    """Parse `gate: {detector: h4_ema, state: FLAT}` from flat env knobs.
+
+    Reads BET_GATE_DETECTOR / BET_GATE_STATE (both or neither — a cell
+    declaring only one is a config error, not a silent half-gate).
+    Cells without the knobs stay unconditional (gate=None).
+    """
+    detector = str(env.get("BET_GATE_DETECTOR", "")).strip().lower()
+    state = str(env.get("BET_GATE_STATE", "")).strip().upper()
+    if not detector and not state:
+        return None
+    if not detector or not state:
+        raise ValueError(
+            f"bet cell {cell_id}: gate needs BOTH BET_GATE_DETECTOR and "
+            f"BET_GATE_STATE (got detector={detector!r} state={state!r})"
+        )
+    if detector not in gates.GATE_DETECTORS:
+        raise ValueError(
+            f"bet cell {cell_id}: gate detector {detector!r} is not one of "
+            f"{gates.GATE_DETECTORS} — the champions were only measured on h4_ema"
+        )
+    if state not in gates.GATE_STATES:
+        raise ValueError(
+            f"bet cell {cell_id}: gate state {state!r} is not one of "
+            f"{gates.GATE_STATES}"
+        )
+    return gates.GateSpec(detector=detector, state=state)

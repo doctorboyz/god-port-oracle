@@ -83,12 +83,16 @@ groups:
     # ไม่ใช่ LiveTrader — 9 cells × seed $1,000, feed ร่วมเดิม (read-only)
     # resolution สดด้วย tick จาก bridge (copy_ticks_from flags=1 — probe 7/11),
     # backtest ใช้ bar-conservative 2 ขอบ (ดู ψ/outbox/bet_backtest_2026-11-07.md)
+    # + 2 conditional cells (คุณหมออนุมัติ 13/11): BET-RF / BET-SF ยิง SELL ที่
+    # ทุก event ของ indicator (ทั้งสอง polarity — theory-free ผลที่ชนะจาก
+    # conditional grid) เฉพาะเมื่อ h4_ema=FLAT (แท่ง H4 ปิดแล้วเท่านั้น)
+    # ผล playbook ψ/outbox/bet_regime_playbook_2026-11-13.md ตาราง FLAT แชมป์
     engine: bet
     service: farmbet             # docker service/container: oracle-engine-farmbet
-    variants: [BET-A6, BET-A10, BET-A8, BET-B6, BET-B10, BET-B8, BET-C6, BET-C10, BET-C8]
+    variants: [BET-A6, BET-A10, BET-A8, BET-B6, BET-B10, BET-B8, BET-C6, BET-C10, BET-C8, BET-RF, BET-SF]
     db_path: /app/data/bet.db
     common:
-      INITIAL_BALANCE: "1000"             # $1,000/cell — รวม $9,000 เสมือน
+      INITIAL_BALANCE: "1000"             # $1,000/cell — รวม $11,000 เสมือน
       BET_RISK_FRACTION: "0.015"          # bet = $15 (1.5% — โปรไฟล์ Cent 1.2-2%)
       BET_SPREAD_COST_PER_OZ: "0.20"      # round-trip $/oz (farm parity 20 points)
 
@@ -315,3 +319,23 @@ variants:
       BET_FAMILY: "C"
       BET_TP_DIST: "8.0"
       BET_SL_DIST: "8.0"
+  # ── Conditional cells (คุณหมออนุมัติ 13/11) — gate h4_ema=FLAT ──
+  # สูตรตรงกับ conditional grid เป๊ะ: ยิง SELL ที่ทุก event ของ indicator
+  # ทั้งสอง polarity (ไม่กรอง overbought — theory-free ผลที่ชนะ)
+  # gate = แท่ง H4 ที่ปิดแล้วเท่านั้น (machinery betbracket/htf.py)
+  BET-RF:
+    note: "RF — RSIRev SELL@ทุก event × TP12:SL6 · gate h4_ema=FLAT (playbook FLAT แชมป์: n=387 WR 41.1% vs BE 33.3% E +19.92$)"
+    env:
+      BET_FAMILY: "R"
+      BET_TP_DIST: "12.0"
+      BET_SL_DIST: "6.0"
+      BET_GATE_DETECTOR: "h4_ema"
+      BET_GATE_STATE: "FLAT"
+  BET-SF:
+    note: "SF — StochRev SELL@ทุก event × TP12:SL12 · gate h4_ema=FLAT (playbook FLAT: n=1152 WR 59.8% vs BE 50.0% E +17.95$)"
+    env:
+      BET_FAMILY: "S"
+      BET_TP_DIST: "12.0"
+      BET_SL_DIST: "12.0"
+      BET_GATE_DETECTOR: "h4_ema"
+      BET_GATE_STATE: "FLAT"

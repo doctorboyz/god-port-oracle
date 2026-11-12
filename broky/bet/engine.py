@@ -29,6 +29,7 @@ from broky.bet import entries
 from broky.bet.contract import (
     BetGeometry, OpenBet, POLICIES, POLICY_SL_FIRST, BetResolver, open_bet,
 )
+from broky.bet.gates import GateSpec
 
 STATUS_OPEN = "open"
 STATUS_RESOLVED = "resolved"
@@ -36,7 +37,14 @@ STATUS_RESOLVED = "resolved"
 
 @dataclass(frozen=True)
 class CellSpec:
-    """One true-bet cell: entry family + fixed contract geometry."""
+    """One true-bet cell: entry family + fixed contract geometry.
+
+    `gate` (optional) is the conditional entry condition of the two
+    conditional cells (BET-RF / BET-SF): the cell only fires when the
+    gate detector reports the required state at the signal moment.
+    None = unconditional (the original 9 cells — unchanged).
+    """
+
     cell_id: str
     family: str
     geometry: BetGeometry
@@ -44,6 +52,7 @@ class CellSpec:
     risk_fraction: float
     boll_threshold: float = entries.MR_BOLL_THRESHOLD_DEFAULT
     spread_cost_per_oz: float = 0.20
+    gate: Optional[GateSpec] = None
 
 
 @dataclass
