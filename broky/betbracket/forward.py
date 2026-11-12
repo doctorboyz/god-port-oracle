@@ -42,6 +42,10 @@ from broky.betbracket.htf import (
 
 HORIZONS_H: tuple[float, ...] = (4.0, 24.0, 72.0)
 
+# close-TF study (คุณหมอ 13/11): TF ใกล้ signal ต้องโดนวัดระยะสั้นด้วย —
+# 1h เข้ามานำหน้า 4/24/72h เดิม
+CLOSE_TF_HORIZONS_H: tuple[float, ...] = (1.0, 4.0, 24.0, 72.0)
+
 M5_MIN = 5.0                    # M5 bar length in minutes
 _ANCHOR_TD = pd.Timedelta(minutes=M5_MIN)
 
@@ -291,26 +295,35 @@ def ensemble_stats(m5: pd.DataFrame,
     return {"horizons_h": list(horizons), "groups": out}
 
 
-def build_forward_package(m5: pd.DataFrame) -> dict:
-    """Convenience: everything T2 needs, states built internally."""
-    states = build_detector_states(m5)
-    from broky.betbracket.htf import (
-        DETECTORS,
-        resample_htf,
-        state_d1_structure,
-        state_h1_adx,
-        state_h4_ema,
-    )
-    state_fns = {"h4_ema": state_h4_ema,
-                 "d1_structure": state_d1_structure,
-                 "h1_adx": state_h1_adx}
+def build_forward_package(m5: pd.DataFrame,
+                          detectors: tuple | None = None,
+                          horizons: tuple[float, ...] = HORIZONS_H,
+                          with_ensemble: bool | None = None) -> dict:
+    """Convenience: everything T2 needs, states built internally.
+
+    Defaults keep the original package byte-identical (3 original
+    detectors, 4/24/72h, ensemble on). The close-TF study passes
+    NEW_DETECTORS + CLOSE_TF_HORIZONS_H explicitly; ensemble is only
+    computed for a 3-detector set (its ×3/×2 labels are defined for
+    exactly three votes) — for any other set size it is skipped.
+    """
+    import broky.betbracket.htf as _htf
+    if detectors is None:
+        detectors = _htf.DETECTORS
+    states = build_detector_states(m5, detectors)
+    state_fns = {det.name: vars(_htf)[det.state_fn]
+                 for det in detectors}
     transitions = {}
-    for det in DETECTORS:
-        htf = resample_htf(m5, det.freq)
+    for det in detectors:
+        htf = _htf.resample_htf(m5, det.freq)
         transitions[det.name] = transition_matrix(state_fns[det.name](htf))
-    return {
-        "forward": forward_stats(m5, states),
-        "persistence": persistence_stats(m5, states),
+    if with_ensemble is None:
+        with_ensemble = len(detectors) == 3
+    out = {
+        "forward": forward_stats(m5, states, horizons),
+        "persistence": persistence_stats(m5, states, horizons),
         "transitions": transitions,
-        "ensemble": ensemble_stats(m5, states),
     }
+    if with_ensemble:
+        out["ensemble"] = ensemble_stats(m5, states, horizons)
+    return out
