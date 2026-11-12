@@ -1,14 +1,16 @@
 """Contract tests — true-bet infra: yml cells → compose service → store.
 
-Locks (Hermes acceptance criteria for T1):
-- farm_variants.yml carries the `engine: bet` group with the EXACT 9 cell
-  names and approved geometries (TP6:SL12 / TP10:SL20 / TP8:SL8 per
-  family A/B/C), seed $1,000
+Locks (Hermes acceptance criteria for T1, updated 13/11 for the 2
+conditional cells):
+- farm_variants.yml carries the `engine: bet` group with the EXACT 9
+  unconditional cells (BET-{A|B|C}{6|10|8}, approved geometries
+  TP6:SL12 / TP10:SL20 / TP8:SL8, seed $1,000) PLUS the 2 conditional
+  cells BET-RF / BET-SF (event families R/S, gate h4_ema=FLAT)
 - build_compose emits oracle-engine-farmbet with the bet engine entrypoint,
   its own DB, the shared feed read-only, and per-cell env knobs
 - farm1/farm2 services are untouched (the pre-existing causal tests lock
   their env; here we assert the bet group adds no env into them)
-- the SQLite store seeds 9 cells idempotently at $1,000 each
+- the SQLite store seeds all cells idempotently at $1,000 each
 - scripts/bet_engine.py's env parser agrees with the yml loader (the
   container and the backtest see the same cells)
 """
@@ -34,6 +36,9 @@ EXPECTED_CELLS = [
     "BET-B6", "BET-B10", "BET-B8",
     "BET-C6", "BET-C10", "BET-C8",
 ]
+# conditional cells (คุณหมอ 13/11) — event families + h4_ema=FLAT gate
+CONDITIONAL_CELLS = ["BET-RF", "BET-SF"]
+ALL_CELLS = EXPECTED_CELLS + CONDITIONAL_CELLS
 GEOMETRY_BY_DIGIT = {
     "6": BetGeometry(6.0, 12.0),
     "10": BetGeometry(10.0, 20.0),
@@ -55,17 +60,38 @@ def _knob(env: list[str], key: str) -> str | None:
 
 
 class TestYmlCells:
-    def test_nine_cells_with_exact_names(self):
+    def test_eleven_cells_with_exact_names(self):
         specs = cells.load_bet_cells()
-        assert sorted(s.cell_id for s in specs) == sorted(EXPECTED_CELLS)
+        assert sorted(s.cell_id for s in specs) == sorted(ALL_CELLS)
 
-    def test_geometry_axis_matches_approval(self):
+    def test_nine_unconditional_cells_unchanged(self):
+        """The original 9 keep their exact family/geometry — the 2 new
+        conditional cells may not move a single old knob."""
         specs = {s.cell_id: s for s in cells.load_bet_cells()}
-        for cell_id, spec in specs.items():
+        assert sorted(specs) == sorted(ALL_CELLS)
+        for cell_id in EXPECTED_CELLS:
+            spec = specs[cell_id]
+            assert spec.gate is None, cell_id
             digit = cell_id.split("-")[1][1:]  # BET-A10 → "10"
             assert spec.geometry == GEOMETRY_BY_DIGIT[digit], cell_id
-            family = cell_id.split("-")[1][0]
-            assert spec.family == family
+            assert spec.family == cell_id.split("-")[1][0]
+            assert spec.seed_balance == 1000.0
+            assert spec.risk_fraction == 0.015
+            assert spec.spread_cost_per_oz == 0.20
+
+    def test_conditional_cells_gate_and_geometry(self):
+        specs = {s.cell_id: s for s in cells.load_bet_cells()}
+        rf, sf = specs["BET-RF"], specs["BET-SF"]
+        assert rf.family == "R" and sf.family == "S"
+        assert rf.geometry == BetGeometry(12.0, 6.0)    # TP12:SL6
+        assert sf.geometry == BetGeometry(12.0, 12.0)   # TP12:SL12
+        for spec in (rf, sf):
+            assert spec.gate is not None, spec.cell_id
+            assert spec.gate.detector == "h4_ema", spec.cell_id
+            assert spec.gate.state == "FLAT", spec.cell_id
+            assert spec.seed_balance == 1000.0, spec.cell_id
+            assert spec.risk_fraction == 0.015, spec.cell_id
+            assert spec.spread_cost_per_oz == 0.20, spec.cell_id
 
     def test_seed_is_1000_per_cell(self):
         for spec in cells.load_bet_cells():
@@ -109,9 +135,11 @@ class TestComposeService:
         assert "./data/paper-feed:/app/feed:ro" in svc["volumes"]
         assert "./data/farm/bet:/app/data" in svc["volumes"]
 
-    def test_accounts_line_lists_nine_cells(self):
+    def test_accounts_line_lists_all_cells(self):
         env = _services()["oracle-engine-farmbet"]["environment"]
-        assert _knob(env, "ACCOUNTS") == ",".join(EXPECTED_CELLS)
+        assert _knob(env, "ACCOUNTS") == ",".join(ALL_CELLS)
+        # the 9 original cells keep their leading positions — append-only
+        assert _knob(env, "ACCOUNTS").startswith(",".join(EXPECTED_CELLS))
 
     def test_per_cell_knobs_emitted(self):
         env = _services()["oracle-engine-farmbet"]["environment"]
@@ -157,15 +185,15 @@ class TestComposeService:
 
 
 class TestStore:
-    def test_seed_nine_cells_idempotent(self, tmp_path):
+    def test_seed_all_cells_idempotent(self, tmp_path):
         conn = store.connect(tmp_path / "bet.db")
         specs = cells.load_bet_cells()
         created = store.seed_cells(conn, specs)
-        assert sorted(created) == sorted(EXPECTED_CELLS)
+        assert sorted(created) == sorted(ALL_CELLS)
         rows = conn.execute(
             "SELECT cell_id, balance, seed_balance FROM bet_cells"
         ).fetchall()
-        assert len(rows) == 9
+        assert len(rows) == 11
         for row in rows:
             assert row["balance"] == 1000.0
             assert row["seed_balance"] == 1000.0
@@ -241,3 +269,4 @@ class TestEnvParserMatchesYml:
             assert env_spec.risk_fraction == yml_spec.risk_fraction, cell_id
             assert env_spec.boll_threshold == yml_spec.boll_threshold, cell_id
             assert env_spec.spread_cost_per_oz == yml_spec.spread_cost_per_oz, cell_id
+            assert env_spec.gate == yml_spec.gate, cell_id
