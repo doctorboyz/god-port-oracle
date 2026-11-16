@@ -16,6 +16,15 @@ Run INSIDE the engine container (it needs the container's env + code):
     docker exec oracle-engine-train python /tmp/verify_deploy.py \
         --accounts B,C,D --preset winners
 
+    # against the P22 cent ladder (2026-11-16, engine-p1/p2/p3 containers —
+    # run INSIDE each engine container, one at a time):
+    docker exec oracle-engine-p1 python /tmp/verify_deploy.py \
+        --accounts P1 --preset p22-cent
+    docker exec oracle-engine-p2 python /tmp/verify_deploy.py \
+        --accounts P2 --preset p22-cent
+    docker exec oracle-engine-p3 python /tmp/verify_deploy.py \
+        --accounts P3 --preset p22-cent
+
 Real-A check (oracle-engine container) uses --accounts A with NO preset —
 it prints values only, so a human confirms against the approved Real-A matrix.
 
@@ -23,7 +32,9 @@ Never trust os.environ alone: see learning 2026-09-23_env-set-does-not-mean-env-
 """
 
 import argparse
+import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
@@ -42,7 +53,25 @@ _FIELDS = [
     ("max_spread_points", "_max_spread_points", int),
     ("ml_filter_enabled", "_ml_enabled", bool),
     ("initial_equity", "_drawdown_protector._state.initial_equity", float),
+    ("equity_per_position", "_equity_per_position", float),
+    ("sl_cap_price", "_trade_blocker.max_sl_distance_price", float),
+    ("tp_cost_mult", "_trade_blocker.tp_cost_mult", float),
+    ("hard_max_lots", "_trade_blocker.hard_max_lots", float),
 ]
+
+# Labels asserted from the container's os.environ (not baked into the
+# LiveTrader object — read at call time or consumed by the runner).
+_ENV_ONLY_FIELDS = {
+    "entry_hours": lambda acct: f"ENTRY_HOURS_{acct}",
+    "blocked_hours": lambda acct: f"BLOCKED_HOURS_{acct}",
+    "dry_run": lambda acct: "DRY_RUN",
+    "mt5_server": lambda acct: f"MT5_SERVER_{acct}",
+    "mt5_symbol": lambda acct: f"MT5_SYMBOL_{acct}",
+    "ranging_hard_block": lambda acct: "RANGING_HARD_BLOCK",
+    "m5_scalp_enabled": lambda acct: "M5_SCALP_ENABLED",
+    "trade_blocker_daily_limit": lambda acct: "TRADE_BLOCKER_DAILY_LIMIT",
+    "trade_blocker_weekly_limit": lambda acct: "TRADE_BLOCKER_WEEKLY_LIMIT",
+}
 
 # Approved mr-bet matrix (2026-09-21, commit d433839 + 5e91619 + b51744d).
 # Only the knobs the matrix pins — everything else is informational.
@@ -94,6 +123,37 @@ _PRESETS = {
     "winners": _WINNERS_EXPECT,
 }
 
+# P22 cent ladder (2026-11-16, คุณหมอสั่งผ่าน Hermes): engine-p1/p2/p3 run
+# the P22 champion on REAL Exness Standard Cent accounts, stage 1 =
+# DRY_RUN (orders computed, never sent). Config mirrors demo C
+# (mr-bet-p22-C). CENT UNITS: the bridge reports balance/equity in USC
+# (1 USD = 100 USC), so every baseline compared against bridge equity
+# (initial_equity → in-engine account-level DD line) is pinned in USC —
+# 5000/2000/1000, NOT the USD deposit amounts (50/20/10). A USD-unit
+# baseline against USC equity is 100x off and the 20% DD line never fires
+# (causal proof: tests/test_p22_cent_deploy_causal.py).
+_P22_CENT_COMMON = {
+    "rr_ratio": 1.2, "min_confidence": 0.55, "atr_multiplier": 2.0,
+    "risk_per_trade": 0.005, "time_stop_bars": 12,
+    "trailing_tp_enabled": True, "partial_tp_enabled": False,
+    "mr_mode": True, "ml_filter_enabled": False, "mr_boll_threshold": 0.85,
+    "max_spread_points": 30, "sl_cap_price": 12.0, "tp_cost_mult": 3.0,
+    "hard_max_lots": 0.05, "equity_per_position": None,  # per-account USC
+    "initial_equity": None,  # per-account USC
+    "entry_hours": "", "blocked_hours": "",
+    "dry_run": "1", "ranging_hard_block": None,  # None = must be UNSET
+    "m5_scalp_enabled": "0",
+    "mt5_server": "Exness-MT5Real25", "mt5_symbol": "XAUUSDc",
+    "trade_blocker_daily_limit": "10", "trade_blocker_weekly_limit": "30",
+}
+for _name, _usc in (("P1", 5000.0), ("P2", 2000.0), ("P3", 1000.0)):
+    _PRESETS.setdefault("p22-cent", {})[_name] = {
+        **_P22_CENT_COMMON,
+        "strategy_id": f"mr-bet-p22-{_name}",
+        "initial_equity": _usc,
+        "equity_per_position": _usc,
+    }
+
 
 def _resolve(obj, chain):
     """Walk a dotted attribute chain; return (ok, value)."""
@@ -116,7 +176,13 @@ def _fmt(label, kind, value):
 def verify_account(account, expect):
     from metty.execution.live_trader import LiveTrader
 
-    trader = LiveTrader(account=account, dry_run=True)
+    # P-accounts resolve account_id from the accounts table, so the trader
+    # must point at THIS container's DB (DB_PATH env, e.g. /app/data/
+    # oracle_p1.db — db.py's module default is data/oracle.db and would be
+    # the WRONG file in a P engine). Legacy A-D resolve statically and
+    # never touch the DB during __init__.
+    db_path = Path(os.environ["DB_PATH"]) if os.environ.get("DB_PATH") else None
+    trader = LiveTrader(account=account, dry_run=True, db_path=db_path)
     rows = []
     failures = []
     for label, chain, kind in _FIELDS:
@@ -158,19 +224,28 @@ def main():
         if args.preset and expect is None:
             print(f"[{account}] ⚠️ no {args.preset} expectations for this account — print only")
         rows, failures = verify_account(account, expect)
-        # Hour gates live in env (read at call time by entry_hour_gate), not in
-        # the LiveTrader object — assert them from the container's environment.
-        if expect is not None and ("entry_hours" in expect or "blocked_hours" in expect):
+        # Env-only knobs (hour gates, DRY_RUN, symbol, scalp path, blocker
+        # limits, RANGING_HARD_BLOCK) live in the container environment,
+        # not in the LiveTrader object — assert them from os.environ.
+        if expect is not None:
             import os
-            for label, env_name in (("entry_hours", f"ENTRY_HOURS_{account}"),
-                                    ("blocked_hours", f"BLOCKED_HOURS_{account}")):
+            for label, env_name_fn in _ENV_ONLY_FIELDS.items():
                 if label not in expect:
                     continue
-                got = os.environ.get(env_name, "")
-                rows.append((label, got or "<empty>"))
-                if got != expect[label]:
-                    failures.append(
-                        f"{label}: got {got!r}, expected {expect[label]!r}")
+                want = expect[label]
+                got = os.environ.get(env_name_fn(account))
+                shown = got if got not in (None, "") else "<empty>"
+                if want is None:
+                    # None = the key must be UNSET (e.g. RANGING_HARD_BLOCK
+                    # on MR accounts — setting it starves every MR entry).
+                    if got not in (None, "", "0"):
+                        failures.append(
+                            f"{label}: got {got!r}, expected UNSET/0")
+                else:
+                    if got != str(want):
+                        failures.append(
+                            f"{label}: got {got!r}, expected {str(want)!r}")
+                rows.append((label, shown))
         print(f"[{account}]")
         for label, shown in rows:
             print(f"    {label:<22} {shown}")

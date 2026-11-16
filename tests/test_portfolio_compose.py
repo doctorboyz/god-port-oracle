@@ -78,27 +78,46 @@ class TestRealAUntouched:
 
 
 class TestVariantEnv:
+    # 2026-11-16 supersede (คุณหมอสั่งผ่าน Hermes): P1-P3 switched from the
+    # retired September paper-round variants to the P22 champion (mirror of
+    # demo C / mr-bet-p22-C). Criteria are PRESERVED — only the pinned
+    # values changed, matching the new compose contract.
+
     def test_entry_hours_match_variant_matrix(self, doc):
-        expected = {"P1": "6,8,18,19,20", "P2": "0,1,6,8", "P3": "0,1,18,19,20"}
-        for name, hours in expected.items():
-            env = doc["services"][f"oracle-engine-{name.lower()}"]["environment"]
-            assert any(e.startswith(f"ENTRY_HOURS_{name}=") and hours in e for e in env)
+        # P22 won with full occupancy — hour gates OPEN on all three
+        # (mirror demo C: ENTRY_HOURS_C= empty).
+        for n in (1, 2, 3):
+            env = doc["services"][f"oracle-engine-p{n}"]["environment"]
+            assert any(e == f"ENTRY_HOURS_P{n}=" for e in env), \
+                f"oracle-engine-p{n}: ENTRY_HOURS_P{n} must be empty (P22: no hour gate)"
 
     def test_blocked_hours_negative_ev_veto_every_engine(self, doc):
+        # Mirror demo C: no blocked-hours veto either.
         for n in (1, 2, 3):
             env = doc["services"][f"oracle-engine-p{n}"]["environment"]
-            assert any(e.startswith(f"BLOCKED_HOURS_P{n}=") and "3,4,5,9,14" in e
-                       for e in env)
+            assert any(e == f"BLOCKED_HOURS_P{n}=" for e in env), \
+                f"oracle-engine-p{n}: BLOCKED_HOURS_P{n} must be empty (P22: no hour gate)"
 
     def test_single_position_per_account(self, doc):
+        # Criterion unchanged: exactly one position per P-account. Now
+        # HARD-CODED (=1, not ${...:-1}) so a stale host .env value can't
+        # raise it — real cent money.
         for n in (1, 2, 3):
             env = doc["services"][f"oracle-engine-p{n}"]["environment"]
-            assert any(e.startswith(f"MAX_POSITIONS_P{n}=") and e.endswith(":-1}") for e in env)
+            assert any(e == f"MAX_POSITIONS_P{n}=1" for e in env), \
+                f"oracle-engine-p{n}: MAX_POSITIONS_P{n} must be hard-coded 1"
+            assert any(e == f"MAX_POSITIONS_CAP_P{n}=1" for e in env), \
+                f"oracle-engine-p{n}: MAX_POSITIONS_CAP_P{n} must be hard-coded 1"
 
     def test_paper_round_is_demo_type(self, doc):
+        # Supersede: accounts are now REAL Exness Standard Cent — the old
+        # "paper round = demo" contract no longer applies. cent_real per
+        # account_registry: "Portfolio cent accounts set ACCOUNT_TYPE_Pn=
+        # cent_real when live".
         for n in (1, 2, 3):
             env = doc["services"][f"oracle-engine-p{n}"]["environment"]
-            assert any(e == f"ACCOUNT_TYPE_P{n}=${{ACCOUNT_TYPE_P{n}:-demo}}" for e in env)
+            assert any(e == f"ACCOUNT_TYPE_P{n}=cent_real" for e in env), \
+                f"oracle-engine-p{n}: ACCOUNT_TYPE_P{n} must be cent_real"
 
     def test_no_credentials_hardcoded(self, doc):
         """ห้ามใส่ credential ใน repo — every login/password must come from .env."""

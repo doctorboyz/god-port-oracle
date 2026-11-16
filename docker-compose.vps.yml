@@ -499,7 +499,24 @@ services:
       - mt5-config-p3:/config
     restart: unless-stopped
 
-  # ── P1-base-ny: ATR 2.0 / RR 3.0 / conf 0.50 / NY golden hours / risk 0.5% ──
+  # ── P1-P3 = P22 champion on Exness Standard Cent (คุณหมอสั่งผ่าน Hermes
+  #    16/11, stage 1 = orders NOT sent). Supersedes the 2026-09 paper-round
+  #    variants (P1-base-ny / P2-tight-sl / P3-more-entry) — those matrices
+  #    are retired; contract tests updated in the same commit.
+  #    Config mirrors demo C (mr-bet-p22-C) — the official P22 winner clone
+  #    (paper PF 1.47 / OOS 1.54 / demo-real-cost PF 1.43).
+  #    CENT ACCOUNT UNITS (the danger point of this deploy): the bridge
+  #    returns balance/equity in the ACCOUNT currency = USC (1 USD = 100 USC,
+  #    P1=5000 / P2=2000 / P3=1000). Sizing is currency-agnostic
+  #    (lots = equity×risk / SL_dist×100, PnL also USC) so lots come out
+  #    correct (0.01–0.05) — but every baseline the engine compares against
+  #    BRIDGE equity must be USC too: INITIAL_EQUITY (in-engine account-level
+  #    DD line) and accounts.baseline_balance (PM equity fallback). USD-unit
+  #    baselines are 100× off → the 20% account DD layer never fires.
+  #    Causal proof: tests/test_p22_cent_deploy_causal.py.
+  #    HARD-CODED (no ${VAR:-...}) on every strategy/safety knob: the host
+  #    .env holds legacy values (ML_FILTER_ENABLED=1, RR_RATIO_*=3.0 …)
+  #    that interpolation lets win — repo lesson (ML_FILTER / RR_RATIO class).
   oracle-engine-p1:
     build:
       context: .
@@ -507,64 +524,87 @@ services:
     container_name: oracle-engine-p1
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
-      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.   # paper = real orders on DEMO account
+      # Stage 1 (16/11): orders are computed but NOT sent. Arming live =
+      # deliberate one-line edit to 0 in stage 2, AFTER the kill switch is
+      # deployed on the VPS and คุณหมอ approves. Hard-coded so a stale
+      # DRY_RUN_PORTFOLIO in the host .env can never silently arm live.
+      - DRY_RUN=1
       - ACCOUNTS=P1
       - DB_PATH=/app/data/oracle_p1.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
-      - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
-      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
-      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
-      - MAX_POSITIONS_P1=${MAX_POSITIONS_P1:-1}
-      - MAX_POSITIONS_CAP_P1=${MAX_POSITIONS_CAP_P1:-1}
-      - MIN_POSITIONS_P1=${MIN_POSITIONS_P1:-1}
+      # P22 = MR swing only (mirror demo C): scalp path off
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      # MR-only generator mode (mirror oracle-engine-train)
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      # NOTE: RANGING_HARD_BLOCK intentionally NOT set (default 0). The old
+      # P1 config set =1 which starves MR entries — P22 enters in ranging.
+      - H4_USE_CLOSED_BAR_ONLY=1
+      # ML veto OFF — mirrors demo C. HARD-CODED: host .env still carries
+      # ML_FILTER_ENABLED=1 (legacy) which interpolation would let win.
+      - ML_FILTER_ENABLED=0
       - LEARNING_MODE=0
-      - ATR_MULTIPLIER_P1=${ATR_MULTIPLIER_P1:-2.0}
-      - RR_RATIO_P1=${RR_RATIO_P1:-3.0}
-      - MIN_CONFIDENCE_P1=${MIN_CONFIDENCE_P1:-0.50}
-      - BUY_MIN_CONFIDENCE_P1=${BUY_MIN_CONFIDENCE_P1:-0.50}
-      - M5_MAX_SPREAD_P1=${M5_MAX_SPREAD_P1:-30}
-      - RISK_PER_TRADE_P1=${RISK_PER_TRADE_P1:-0.005}
-      - TRAILING_ACTIVATION_PCT_P1=${TRAILING_ACTIVATION_PCT_P1:-0.40}
-      - TRAILING_TRAIL_PCT_P1=${TRAILING_TRAIL_PCT_P1:-0.20}
-      # Entry-hour window (P1 golden 01-03/13/15 BKK → UTC) + negative-EV veto
-      - ENTRY_HOURS_P1=${ENTRY_HOURS_P1:-6,8,18,19,20}
-      - BLOCKED_HOURS_P1=${BLOCKED_HOURS_P1:-3,4,5,9,14}
-      - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
-      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
-      # ML ensemble OR @0.50 — Q3 paper baseline (same as Demo-D).
-      # IRON LAW intact: A lives in oracle-engine, never gets ensemble.
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED_P:-1}
-      - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_ENSEMBLE_MODE_P1=${ML_ENSEMBLE_MODE_P1:-or}
-      - ML_ENSEMBLE_THRESH_P1=${ML_ENSEMBLE_THRESH_P1:-0.50}
-      - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
-      - INITIAL_BALANCE_P1=${INITIAL_BALANCE_P1:-100}
-      - INITIAL_EQUITY_P1=${INITIAL_EQUITY_P1:-100}
-      - LEVERAGE_P1=${LEVERAGE_P1:-2000}
-      - ACCOUNT_TYPE_P1=${ACCOUNT_TYPE_P1:-demo}
-      - SIGNAL_GROUP_P1=${SIGNAL_GROUP_P1:-portfolio}
-      # In-engine drawdown: account line = portfolio freeze line (20%)
-      - DRAWDOWN_DAILY_LIMIT_P1=${DRAWDOWN_DAILY_LIMIT_P1:-0.10}
-      - DRAWDOWN_WEEKLY_LIMIT_P1=${DRAWDOWN_WEEKLY_LIMIT_P1:-0.20}
-      - DRAWDOWN_ACCOUNT_LIMIT_P1=${DRAWDOWN_ACCOUNT_LIMIT_P1:-0.20}
-      - DRAWDOWN_COOLDOWN_HOURS_P1=${DRAWDOWN_COOLDOWN_HOURS_P1:-4}
-      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-20}
-      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-80}
-      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.05}
-      # MT5 bridge credentials (VPS .env only — never in repo)
+      # ── P22 champion knobs (mirror mr-bet-p22-C) ──
+      - STRATEGY_ID_P1=mr-bet-p22-P1
+      - ATR_MULTIPLIER_P1=2.0
+      - RR_RATIO_P1=1.20
+      - MIN_CONFIDENCE_P1=0.55
+      - BUY_MIN_CONFIDENCE_P1=0.55
+      - MR_BOLL_THRESHOLD_P1=0.85
+      - TIME_STOP_BARS_P1=12
+      - TRAILING_TP_ENABLED_P1=1
+      # trailing activation/trail deliberately NOT overridden → engine
+      # defaults 0.20/0.10, exactly what farm P22 and demo C ran with.
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P1=1440
+      - RISK_PER_TRADE_P1=0.005
+      - PARTIAL_TP_ENABLED_P1=0
+      - TP1_RATIO_P1=0.5
+      - RR_SCALE_IN_P1=2.5
+      # Hour gates open (mirror demo C: P22 won with full occupancy)
+      - ENTRY_HOURS_P1=
+      - BLOCKED_HOURS_P1=
+      - SWING_MAX_SPREAD_P1=30
+      - MR_COST_MULT_P1=3.0
+      - SL_CAP_P1=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_P1=1
+      - MAX_POSITIONS_CAP_P1=1
+      - MIN_POSITIONS_P1=1
+      # USC (= $50). Provably inert in the swing path while cap=1
+      # (min(1, max(1, floor(eq/epp))) == 1 for ANY equity — causal test);
+      # kept account-currency-correct for the day the cap is raised.
+      - EQUITY_PER_POSITION_P1=5000
+      # ── cent baselines (USC — see service header) ──
+      - INITIAL_BALANCE_P1=5000
+      - INITIAL_EQUITY_P1=5000
+      - LEVERAGE_P1=2000
+      - ACCOUNT_TYPE_P1=cent_real
+      - SIGNAL_GROUP_P1=portfolio
+      # In-engine drawdown lines (unchanged policy; now meaningful in USC)
+      - DRAWDOWN_DAILY_LIMIT_P1=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_P1=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_P1=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_P1=4
+      # TradeBlocker — mirror demo C (10/30) + lot clamp 0.05 hard-coded:
+      # the last line guaranteeing lots can never exceed the approved range
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      # MT5 bridge (credentials from VPS .env only — never in repo)
       - MT5_LOGIN_P1=${MT5_LOGIN_P1:-}
       - MT5_PASSWORD_P1=${MT5_PASSWORD_P1:-}
-      - MT5_SERVER_P1=${MT5_SERVER_P1:-Exness-MT5Trial7}
+      - MT5_SERVER_P1=Exness-MT5Real25
+      # Cent server serves XAUUSDc only — explicit beats alias probing
+      - MT5_SYMBOL_P1=XAUUSDc
       - MT5_BRIDGE_P1_HOST=mt5p1
       - MT5_BRIDGE_P1_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
       # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
       # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
-      # Was applied directly on VPS without commit — committed 2026-09-21.
       - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
       - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
@@ -574,7 +614,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── P2-tight-sl: ATR 1.8 / RR 2.5 / conf 0.50 / London+NY hours / risk 0.5% ──
+  # ── P2 = P22 champion, ladder capital $20 → 2000 USC (see P1 header) ──
   oracle-engine-p2:
     build:
       context: .
@@ -582,59 +622,75 @@ services:
     container_name: oracle-engine-p2
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
-      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.
+      # Stage 1 (16/11): orders NOT sent — see P1 header for the arming rule.
+      - DRY_RUN=1
       - ACCOUNTS=P2
       - DB_PATH=/app/data/oracle_p2.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
-      - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
-      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
-      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
-      - MAX_POSITIONS_P2=${MAX_POSITIONS_P2:-1}
-      - MAX_POSITIONS_CAP_P2=${MAX_POSITIONS_CAP_P2:-1}
-      - MIN_POSITIONS_P2=${MIN_POSITIONS_P2:-1}
+      # P22 = MR swing only (mirror demo C): scalp path off
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      # MR-only generator mode (mirror oracle-engine-train)
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      # RANGING_HARD_BLOCK intentionally NOT set (MR enters in ranging)
+      - H4_USE_CLOSED_BAR_ONLY=1
+      # ML veto OFF — HARD-CODED (host .env legacy ML_FILTER_ENABLED=1)
+      - ML_FILTER_ENABLED=0
       - LEARNING_MODE=0
-      - ATR_MULTIPLIER_P2=${ATR_MULTIPLIER_P2:-1.8}
-      - RR_RATIO_P2=${RR_RATIO_P2:-2.5}
-      - MIN_CONFIDENCE_P2=${MIN_CONFIDENCE_P2:-0.50}
-      - BUY_MIN_CONFIDENCE_P2=${BUY_MIN_CONFIDENCE_P2:-0.50}
-      - M5_MAX_SPREAD_P2=${M5_MAX_SPREAD_P2:-30}
-      - RISK_PER_TRADE_P2=${RISK_PER_TRADE_P2:-0.005}
-      - TRAILING_ACTIVATION_PCT_P2=${TRAILING_ACTIVATION_PCT_P2:-0.40}
-      - TRAILING_TRAIL_PCT_P2=${TRAILING_TRAIL_PCT_P2:-0.20}
-      - ENTRY_HOURS_P2=${ENTRY_HOURS_P2:-0,1,6,8}
-      - BLOCKED_HOURS_P2=${BLOCKED_HOURS_P2:-3,4,5,9,14}
-      - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
-      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED_P:-1}
-      - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_ENSEMBLE_MODE_P2=${ML_ENSEMBLE_MODE_P2:-or}
-      - ML_ENSEMBLE_THRESH_P2=${ML_ENSEMBLE_THRESH_P2:-0.50}
-      - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
-      - INITIAL_BALANCE_P2=${INITIAL_BALANCE_P2:-100}
-      - INITIAL_EQUITY_P2=${INITIAL_EQUITY_P2:-100}
-      - LEVERAGE_P2=${LEVERAGE_P2:-2000}
-      - ACCOUNT_TYPE_P2=${ACCOUNT_TYPE_P2:-demo}
-      - SIGNAL_GROUP_P2=${SIGNAL_GROUP_P2:-portfolio}
-      - DRAWDOWN_DAILY_LIMIT_P2=${DRAWDOWN_DAILY_LIMIT_P2:-0.10}
-      - DRAWDOWN_WEEKLY_LIMIT_P2=${DRAWDOWN_WEEKLY_LIMIT_P2:-0.20}
-      - DRAWDOWN_ACCOUNT_LIMIT_P2=${DRAWDOWN_ACCOUNT_LIMIT_P2:-0.20}
-      - DRAWDOWN_COOLDOWN_HOURS_P2=${DRAWDOWN_COOLDOWN_HOURS_P2:-4}
-      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-20}
-      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-80}
-      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.05}
+      # ── P22 champion knobs (mirror mr-bet-p22-C) ──
+      - STRATEGY_ID_P2=mr-bet-p22-P2
+      - ATR_MULTIPLIER_P2=2.0
+      - RR_RATIO_P2=1.20
+      - MIN_CONFIDENCE_P2=0.55
+      - BUY_MIN_CONFIDENCE_P2=0.55
+      - MR_BOLL_THRESHOLD_P2=0.85
+      - TIME_STOP_BARS_P2=12
+      - TRAILING_TP_ENABLED_P2=1
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P2=1440
+      - RISK_PER_TRADE_P2=0.005
+      - PARTIAL_TP_ENABLED_P2=0
+      - TP1_RATIO_P2=0.5
+      - RR_SCALE_IN_P2=2.5
+      # Hour gates open (mirror demo C)
+      - ENTRY_HOURS_P2=
+      - BLOCKED_HOURS_P2=
+      - SWING_MAX_SPREAD_P2=30
+      - MR_COST_MULT_P2=3.0
+      - SL_CAP_P2=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_P2=1
+      - MAX_POSITIONS_CAP_P2=1
+      - MIN_POSITIONS_P2=1
+      # USC (= $20) — inert while cap=1, kept account-currency-correct
+      - EQUITY_PER_POSITION_P2=2000
+      # ── cent baselines (USC) ──
+      - INITIAL_BALANCE_P2=2000
+      - INITIAL_EQUITY_P2=2000
+      - LEVERAGE_P2=2000
+      - ACCOUNT_TYPE_P2=cent_real
+      - SIGNAL_GROUP_P2=portfolio
+      - DRAWDOWN_DAILY_LIMIT_P2=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_P2=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_P2=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_P2=4
+      # TradeBlocker — mirror demo C + lot clamp 0.05
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      # MT5 bridge (credentials from VPS .env only — never in repo)
       - MT5_LOGIN_P2=${MT5_LOGIN_P2:-}
       - MT5_PASSWORD_P2=${MT5_PASSWORD_P2:-}
-      - MT5_SERVER_P2=${MT5_SERVER_P2:-Exness-MT5Trial7}
+      - MT5_SERVER_P2=Exness-MT5Real25
+      - MT5_SYMBOL_P2=XAUUSDc
       - MT5_BRIDGE_P2_HOST=mt5p2
       - MT5_BRIDGE_P2_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
       # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
       # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
-      # Was applied directly on VPS without commit — committed 2026-09-21.
       - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
       - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
@@ -644,7 +700,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── P3-more-entry: ATR 2.2 / RR 3.0 / conf 0.45 / wide hours / risk 1% ──
+  # ── P3 = P22 champion, ladder capital $10 → 1000 USC (see P1 header) ──
   oracle-engine-p3:
     build:
       context: .
@@ -652,59 +708,78 @@ services:
     container_name: oracle-engine-p3
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN_PORTFOLIO:-1}   # 2026-09-18: P accounts are REAL (Exness-MT5Real25, Standard-vs-Cent unverified). Default dry-run until
-      #   account type confirmed; set DRY_RUN_PORTFOLIO=0 in .env to go live.
+      # Stage 1 (16/11): orders NOT sent — see P1 header for the arming rule.
+      - DRY_RUN=1
       - ACCOUNTS=P3
       - DB_PATH=/app/data/oracle_p3.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
-      - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
-      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
-      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
-      - MAX_POSITIONS_P3=${MAX_POSITIONS_P3:-1}
-      - MAX_POSITIONS_CAP_P3=${MAX_POSITIONS_CAP_P3:-1}
-      - MIN_POSITIONS_P3=${MIN_POSITIONS_P3:-1}
+      # P22 = MR swing only (mirror demo C): scalp path off
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      # MR-only generator mode (mirror oracle-engine-train)
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      # RANGING_HARD_BLOCK intentionally NOT set (MR enters in ranging)
+      - H4_USE_CLOSED_BAR_ONLY=1
+      # ML veto OFF — HARD-CODED (host .env legacy ML_FILTER_ENABLED=1)
+      - ML_FILTER_ENABLED=0
       - LEARNING_MODE=0
-      - ATR_MULTIPLIER_P3=${ATR_MULTIPLIER_P3:-2.2}
-      - RR_RATIO_P3=${RR_RATIO_P3:-3.0}
-      - MIN_CONFIDENCE_P3=${MIN_CONFIDENCE_P3:-0.45}
-      - BUY_MIN_CONFIDENCE_P3=${BUY_MIN_CONFIDENCE_P3:-0.45}
-      - M5_MAX_SPREAD_P3=${M5_MAX_SPREAD_P3:-30}
-      - RISK_PER_TRADE_P3=${RISK_PER_TRADE_P3:-0.01}
-      - TRAILING_ACTIVATION_PCT_P3=${TRAILING_ACTIVATION_PCT_P3:-0.40}
-      - TRAILING_TRAIL_PCT_P3=${TRAILING_TRAIL_PCT_P3:-0.20}
-      - ENTRY_HOURS_P3=${ENTRY_HOURS_P3:-0,1,18,19,20}
-      - BLOCKED_HOURS_P3=${BLOCKED_HOURS_P3:-3,4,5,9,14}
-      - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
-      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED_P:-1}
-      - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_ENSEMBLE_MODE_P3=${ML_ENSEMBLE_MODE_P3:-or}
-      - ML_ENSEMBLE_THRESH_P3=${ML_ENSEMBLE_THRESH_P3:-0.50}
-      - ML_ENSEMBLE_MODEL_DIRS=${ML_ENSEMBLE_MODEL_DIRS:-/app/data/models/trade_outcome_v4:/app/data/models/trade_outcome_v6}
-      - INITIAL_BALANCE_P3=${INITIAL_BALANCE_P3:-100}
-      - INITIAL_EQUITY_P3=${INITIAL_EQUITY_P3:-100}
-      - LEVERAGE_P3=${LEVERAGE_P3:-2000}
-      - ACCOUNT_TYPE_P3=${ACCOUNT_TYPE_P3:-demo}
-      - SIGNAL_GROUP_P3=${SIGNAL_GROUP_P3:-portfolio}
-      - DRAWDOWN_DAILY_LIMIT_P3=${DRAWDOWN_DAILY_LIMIT_P3:-0.10}
-      - DRAWDOWN_WEEKLY_LIMIT_P3=${DRAWDOWN_WEEKLY_LIMIT_P3:-0.20}
-      - DRAWDOWN_ACCOUNT_LIMIT_P3=${DRAWDOWN_ACCOUNT_LIMIT_P3:-0.20}
-      - DRAWDOWN_COOLDOWN_HOURS_P3=${DRAWDOWN_COOLDOWN_HOURS_P3:-4}
-      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-20}
-      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-80}
-      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.05}
+      # ── P22 champion knobs (mirror mr-bet-p22-C) ──
+      - STRATEGY_ID_P3=mr-bet-p22-P3
+      - ATR_MULTIPLIER_P3=2.0
+      - RR_RATIO_P3=1.20
+      - MIN_CONFIDENCE_P3=0.55
+      - BUY_MIN_CONFIDENCE_P3=0.55
+      - MR_BOLL_THRESHOLD_P3=0.85
+      - TIME_STOP_BARS_P3=12
+      - TRAILING_TP_ENABLED_P3=1
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_P3=1440
+      - RISK_PER_TRADE_P3=0.005
+      - PARTIAL_TP_ENABLED_P3=0
+      - TP1_RATIO_P3=0.5
+      - RR_SCALE_IN_P3=2.5
+      # Hour gates open (mirror demo C)
+      - ENTRY_HOURS_P3=
+      - BLOCKED_HOURS_P3=
+      - SWING_MAX_SPREAD_P3=30
+      - MR_COST_MULT_P3=3.0
+      - SL_CAP_P3=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_P3=1
+      - MAX_POSITIONS_CAP_P3=1
+      - MIN_POSITIONS_P3=1
+      # USC (= $10) — inert while cap=1, kept account-currency-correct.
+      # NOTE: floor(1000 USC × 0.005 / (SL×100)) < 0.01 at wide SL — sizing
+      # floors to the 0.01 min lot, i.e. P3 may risk slightly MORE than 0.5%
+      # per trade in USC terms (min-lot floor, same on every broker).
+      - EQUITY_PER_POSITION_P3=1000
+      # ── cent baselines (USC) ──
+      - INITIAL_BALANCE_P3=1000
+      - INITIAL_EQUITY_P3=1000
+      - LEVERAGE_P3=2000
+      - ACCOUNT_TYPE_P3=cent_real
+      - SIGNAL_GROUP_P3=portfolio
+      - DRAWDOWN_DAILY_LIMIT_P3=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_P3=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_P3=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_P3=4
+      # TradeBlocker — mirror demo C + lot clamp 0.05
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      # MT5 bridge (credentials from VPS .env only — never in repo)
       - MT5_LOGIN_P3=${MT5_LOGIN_P3:-}
       - MT5_PASSWORD_P3=${MT5_PASSWORD_P3:-}
-      - MT5_SERVER_P3=${MT5_SERVER_P3:-Exness-MT5Trial7}
+      - MT5_SERVER_P3=Exness-MT5Real25
+      - MT5_SYMBOL_P3=XAUUSDc
       - MT5_BRIDGE_P3_HOST=mt5p3
       - MT5_BRIDGE_P3_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
       # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
       # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
-      # Was applied directly on VPS without commit — committed 2026-09-21.
       - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
       - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
