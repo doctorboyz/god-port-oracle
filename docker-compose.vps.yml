@@ -714,6 +714,105 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ═══ Kill switch supervisor (FIA portfolio-level risk control) ═════════
+  # doctorboyz order 2026-11-16 (via Hermes): independent supervisor ABOVE
+  # the 3 in-engine risk layers (per-trade SL / 3-loss CB / DD-freeze in
+  # live_trader.py). New file only (scripts/kill_switch.py) — metty/,
+  # broky/, shared/, docker/mt5/, Dockerfile are untouched, so the Mac
+  # mini paper farm image is byte-identical (farm1/P22 validation must not
+  # move).
+  #
+  # Bridge safety (repo lesson "one bridge = one terminal handle"):
+  # the supervisor polls equity/ticks over RPyC but NEVER calls the
+  # bridge's initialize/shutdown — those mutate the process-global MT5
+  # handle the engine owns (a cycling client killed fetcher+engine once).
+  # Flatten (one-shot, PM-style) and reads both ride the engine's handle.
+  #
+  # DRY RUN IS THE DEFAULT: alerts + state only, no flatten, no stop.
+  # Arm ONLY after the dry-run period on this VPS, by setting
+  # KILL_SWITCH_DRY_RUN=0 in the host .env (compose interpolation), then
+  # VERIFY the container env with docker inspect (repo lesson:
+  # "env set does not mean env used").
+  #
+  # IRON (Real-A): the REAL group has NO stop path — KILL_ENGINE_CONTAINER
+  # for real accounts is refused at boot, and this service never touches
+  # mt5a/oracle-engine containers. Real policy = bridge flatten + block
+  # state + urgent TG, manual intervention after that.
+  kill-switch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kill-switch
+    command: ["python3", "scripts/kill_switch.py"]
+    environment:
+      # ── arm/disarm + polling ────────────────────────────────────────
+      - KILL_SWITCH_DRY_RUN=${KILL_SWITCH_DRY_RUN:-1}
+      - KILL_POLL_SECONDS=${KILL_POLL_SECONDS:-30}
+      - KILL_STATE_PATH=/ks/state/kill_switch_state.json
+      # ── supervised groups (env-only reconfiguration per order) ─────
+      - KILL_DEMO_ACCOUNTS=${KILL_DEMO_ACCOUNTS:-B,C,D}
+      - KILL_CENT_ACCOUNTS=${KILL_CENT_ACCOUNTS:-P1,P2,P3}
+      - KILL_REAL_ACCOUNTS=${KILL_REAL_ACCOUNTS:-A}
+      # ── trigger thresholds (each independently tunable) ────────────
+      - KILL_DAILY_LOSS_PCT=${KILL_DAILY_LOSS_PCT:-3.0}
+      - KILL_DD_PCT=${KILL_DD_PCT:-10.0}
+      - KILL_ORDER_RATE_PER_HOUR=${KILL_ORDER_RATE_PER_HOUR:-20}
+      - KILL_PRICE_DEV_PCT=${KILL_PRICE_DEV_PCT:-1.0}
+      - KILL_CONNECTIVITY_MINUTES=${KILL_CONNECTIVITY_MINUTES:-10}
+      # ── per-account wiring: engine DB (read-only mount below) ───────
+      # B/C/D share oracle_train.db inside oracle-engine-train's volume;
+      # the supervisor distinguishes them via the accounts table.
+      - KILL_DB_PATH_A=/ksdata/a/oracle.db
+      - KILL_DB_PATH_B=/ksdata/train/oracle_train.db
+      - KILL_DB_PATH_C=/ksdata/train/oracle_train.db
+      - KILL_DB_PATH_D=/ksdata/train/oracle_train.db
+      - KILL_DB_PATH_P1=/ksdata/p1/oracle_p1.db
+      - KILL_DB_PATH_P2=/ksdata/p2/oracle_p2.db
+      - KILL_DB_PATH_P3=/ksdata/p3/oracle_p3.db
+      # ── per-account wiring: engine container to stop (demo/cent only).
+      # NOTE A: deliberately NO KILL_ENGINE_CONTAINER_A — the code also
+      # refuses one if ever set (real money is never auto-stopped).
+      - KILL_ENGINE_CONTAINER_B=oracle-engine-train
+      - KILL_ENGINE_CONTAINER_C=oracle-engine-train
+      - KILL_ENGINE_CONTAINER_D=oracle-engine-train
+      - KILL_ENGINE_CONTAINER_P1=oracle-engine-p1
+      - KILL_ENGINE_CONTAINER_P2=oracle-engine-p2
+      - KILL_ENGINE_CONTAINER_P3=oracle-engine-p3
+      # ── bridge endpoints (same names/ports the engines dial) ────────
+      - MT5_BRIDGE_A_HOST=mt5a
+      - MT5_BRIDGE_A_PORT=8001
+      - MT5_BRIDGE_B_HOST=mt5b
+      - MT5_BRIDGE_B_PORT=8001
+      - MT5_BRIDGE_C_HOST=mt5c
+      - MT5_BRIDGE_C_PORT=8001
+      - MT5_BRIDGE_D_HOST=mt5d
+      - MT5_BRIDGE_D_PORT=8001
+      - MT5_BRIDGE_P1_HOST=mt5p1
+      - MT5_BRIDGE_P1_PORT=8001
+      - MT5_BRIDGE_P2_HOST=mt5p2
+      - MT5_BRIDGE_P2_PORT=8001
+      - MT5_BRIDGE_P3_HOST=mt5p3
+      - MT5_BRIDGE_P3_PORT=8001
+      # ── Telegram (TG_* first, TELEGRAM_* fallback — PM reader contract)
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - TG_CHAT_ID=${TG_CHAT_ID:-}
+    volumes:
+      # kill state survives restarts (trigger dedup across boots)
+      - kill-switch-state:/ks/state
+      # engine DBs, READ-ONLY: WAL readers never block the engine writer,
+      # and the supervisor physically cannot corrupt engine data
+      - oracle-data:/ksdata/a:ro
+      - oracle-train-data:/ksdata/train:ro
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/ksdata/p1:ro
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/ksdata/p2:ro
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/ksdata/p3:ro
+      # docker stop for demo/cent engines (Docker Engine API over the
+      # socket — the image has no docker CLI and the Dockerfile is
+      # untouchable). SECURITY NOTE: docker.sock is root-equivalent on the
+      # host; this service uses it ONLY via the stop endpoint in code.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
 volumes:
   mt5-config-a:
     driver: local
@@ -734,4 +833,6 @@ volumes:
   oracle-data:
     driver: local
   oracle-train-data:
+    driver: local
+  kill-switch-state:
     driver: local
