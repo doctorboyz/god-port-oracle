@@ -124,14 +124,15 @@ _PRESETS = {
 }
 
 # P22 cent ladder (2026-11-16, คุณหมอสั่งผ่าน Hermes): engine-p1/p2/p3 run
-# the P22 champion on REAL Exness Standard Cent accounts, stage 1 =
-# DRY_RUN (orders computed, never sent). Config mirrors demo C
-# (mr-bet-p22-C). CENT UNITS: the bridge reports balance/equity in USC
-# (1 USD = 100 USC), so every baseline compared against bridge equity
-# (initial_equity → in-engine account-level DD line) is pinned in USC —
-# 5000/2000/1000, NOT the USD deposit amounts (50/20/10). A USD-unit
-# baseline against USC equity is 100x off and the 20% DD line never fires
-# (causal proof: tests/test_p22_cent_deploy_causal.py).
+# the P22 champion on REAL Exness Standard Cent accounts. Stage 2 ARMED
+# 17/11: P1 trades live (dry_run=0 — kill switch deployed + sizing proven
+# at runtime + คุณหมอ approved); P2/P3 stay dry (one account at a time).
+# Config mirrors demo C (mr-bet-p22-C). CENT UNITS: the bridge reports
+# balance/equity in USC (1 USD = 100 USC), so every baseline compared
+# against bridge equity (initial_equity → in-engine account-level DD line)
+# is pinned in USC — 5000/2000/1000, NOT the USD deposit amounts (50/20/10).
+# A USD-unit baseline against USC equity is 100x off and the 20% DD line
+# never fires (causal proof: tests/test_p22_cent_deploy_causal.py).
 _P22_CENT_COMMON = {
     "rr_ratio": 1.2, "min_confidence": 0.55, "atr_multiplier": 2.0,
     "risk_per_trade": 0.005, "time_stop_bars": 12,
@@ -141,17 +142,21 @@ _P22_CENT_COMMON = {
     "hard_max_lots": 0.05, "equity_per_position": None,  # per-account USC
     "initial_equity": None,  # per-account USC
     "entry_hours": "", "blocked_hours": "",
-    "dry_run": "1", "ranging_hard_block": None,  # None = must be UNSET
+    "ranging_hard_block": None,  # None = must be UNSET
     "m5_scalp_enabled": "0",
     "mt5_server": "Exness-MT5Real25", "mt5_symbol": "XAUUSDc",
     "trade_blocker_daily_limit": "10", "trade_blocker_weekly_limit": "30",
 }
-for _name, _usc in (("P1", 5000.0), ("P2", 2000.0), ("P3", 1000.0)):
+# dry_run is per-account (stage 2, 17/11): P1 ARMED live, P2/P3 still dry.
+for _name, _usc, _dry in (
+    ("P1", 5000.0, "0"), ("P2", 2000.0, "1"), ("P3", 1000.0, "1"),
+):
     _PRESETS.setdefault("p22-cent", {})[_name] = {
         **_P22_CENT_COMMON,
         "strategy_id": f"mr-bet-p22-{_name}",
         "initial_equity": _usc,
         "equity_per_position": _usc,
+        "dry_run": _dry,
     }
 
 

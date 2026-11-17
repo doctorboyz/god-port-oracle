@@ -1,8 +1,10 @@
 """Causal proof: P22-cent stage-1 deploy (engine-p1/p2/p3, Exness Standard Cent).
 
 คุณหมอสั่งผ่าน Hermes 16/11 — engine-p1/p2/p3 run the P22 champion on REAL
-cent accounts (P1 $50 / P2 $20 / P3 $10 = 5000/2000/1000 USC), stage 1 =
-DRY_RUN (orders computed, never sent). This file proves the three danger
+cent accounts (P1 $50 / P2 $20 / P3 $10 = 5000/2000/1000 USC). Stage 1
+(16/11) was DRY_RUN on all three; stage 2 (17/11) ARMS P1 live
+(DRY_RUN=0) while P2/P3 stay dry — arming state is per-account in
+P22_EXPECT. This file proves the three danger
 points of that deploy from REAL artifacts (compose YAML + LiveTrader /
 DrawdownProtector / TradeBlocker objects), never from echo os.environ:
 
@@ -41,13 +43,15 @@ sys.path.insert(0, str(ROOT))
 
 COMPOSE = ROOT / "docker-compose.vps.yml"
 
-# ── The P22-cent stage-1 contract (single source of truth) ──────────────
+# ── The P22-cent contract (single source of truth) ──────────────────────
 # Values mirror demo C (mr-bet-p22-C) + the cent-account ladder capital.
 # usc = the account-currency balance the bridge reports (1 USD = 100 USC).
+# dry_run: stage 2 ARMED 17/11 — P1 live (kill switch deployed + sizing
+# proven at runtime + คุณหมอ approved), P2/P3 still dry (one at a time).
 P22_EXPECT = {
-    "P1": {"usc": 5000, "strategy_id": "mr-bet-p22-P1"},
-    "P2": {"usc": 2000, "strategy_id": "mr-bet-p22-P2"},
-    "P3": {"usc": 1000, "strategy_id": "mr-bet-p22-P3"},
+    "P1": {"usc": 5000, "strategy_id": "mr-bet-p22-P1", "dry_run": "0"},
+    "P2": {"usc": 2000, "strategy_id": "mr-bet-p22-P2", "dry_run": "1"},
+    "P3": {"usc": 1000, "strategy_id": "mr-bet-p22-P3", "dry_run": "1"},
 }
 
 # Knobs identical on all three engines (mirror mr-bet-p22-C).
@@ -80,8 +84,8 @@ P22_KNOBS = {
 }
 
 # Global (non-suffixed) engine env the P22 mirror requires.
+# DRY_RUN is NOT here — it is per-account (P22_EXPECT dry_run).
 P22_GLOBALS = {
-    "DRY_RUN": "1",
     "SCALP_ENABLED": "0",
     "M5_SCALP_ENABLED": "0",
     "TRENDING_HARD_BLOCK": "1",
@@ -128,6 +132,8 @@ def _expected_env(acct, spec):
     usc = str(spec["usc"])
     env = {
         **{k: v for k, v in P22_GLOBALS.items()},
+        # Per-account arming state (stage 2: P1 live, P2/P3 dry).
+        "DRY_RUN": spec["dry_run"],
         **{k: (usc if v is None else v) for k, v in P22_KNOBS.items()},
         f"STRATEGY_ID_{acct}": spec["strategy_id"],
         f"MT5_SERVER_{acct}": "Exness-MT5Real25",
@@ -145,7 +151,8 @@ def _expected_env(acct, spec):
 
 class TestComposeContract:
     """docker-compose.vps.yml engine-p1/p2/p3 must carry the P22-cent
-    stage-1 env exactly — hard-coded, no interpolation on critical keys."""
+    env exactly (per-account dry_run in P22_EXPECT) — hard-coded, no
+    interpolation on critical keys."""
 
     @pytest.fixture(scope="class")
     def doc(self):
@@ -186,11 +193,15 @@ class TestComposeContract:
                     f"{acct} must not set RANGING_HARD_BLOCK (MR starves)"
                 )
 
-    def test_dry_run_stage1_every_engine(self, doc):
-        for acct in P22_EXPECT:
+    def test_dry_run_state_per_account(self, doc):
+        """Stage 2 (17/11): P1 ARMED (DRY_RUN=0), P2/P3 stay dry (1).
+        The hard-code rule itself (no ${...} on DRY_RUN) is locked by
+        test_critical_keys_hard_coded via _NO_INTERPOLATION_KEYS."""
+        for acct, spec in P22_EXPECT.items():
             env = _service_env(doc, acct[1])
-            assert any(e == "DRY_RUN=1" for e in env), (
-                f"{acct}: stage 1 requires DRY_RUN=1 hard-coded"
+            want = f"DRY_RUN={spec['dry_run']}"
+            assert any(e == want for e in env), (
+                f"{acct}: requires {want} hard-coded"
             )
 
     def test_baseline_in_account_currency(self, doc):
