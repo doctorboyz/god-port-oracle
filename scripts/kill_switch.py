@@ -250,10 +250,29 @@ class HandleSafeBridge:
     # -- reads ----------------------------------------------------------
 
     def account_info(self) -> Optional[dict]:
-        """Local dict of account_info() or None (no terminal/handle)."""
+        """Local dict of account_info() or None (no terminal/handle/bad shape)."""
         try:
             netref = self._connect().root.account_info()
             if netref is None:
+                return None
+            if not hasattr(netref, "keys"):
+                # Production (VPS 2026-11-17, 4× transient: mt5b ×1, mt5c ×1,
+                # mt5p1 ×2): the bridge can answer account_info with a NON-dict
+                # — the server's _to_dict fallthrough (str(obj)) or an error
+                # structure from a failed server-side call. dict() on that
+                # raised "dictionary update sequence element #0 has length 5;
+                # 2 is required", logged as a generic "account_info failed"
+                # that looked like a dead bridge while the socket was fine.
+                # Any non-mapping answer = THIS read failed for THIS bridge:
+                # drop the socket, return None, next cycle retries fresh.
+                # Never let a shape error be anything but a skipped read —
+                # see tests/test_kill_switch.py::TestAccountInfoShapeSafety.
+                logger.warning(
+                    "[KS] bridge %s:%s account_info non-dict response "
+                    "(type=%s) — treating as read-failed",
+                    self.host, self.port, type(netref).__name__,
+                )
+                self.close()
                 return None
             return dict(netref)  # materialize ONCE
         except Exception as exc:

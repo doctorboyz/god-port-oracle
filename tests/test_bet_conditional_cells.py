@@ -82,6 +82,58 @@ def rising_history(n_buckets: int = 56, base: float = 4000.0,
     return make_m5(closes, end=_now() - pd.Timedelta(minutes=5))
 
 
+def _tail_bars(family: str) -> int:
+    """Bars in the event-crafting tail of a family (see docstring below)."""
+    return (15 if family == entries.FAMILY_RSI_REV_SELL
+            else 21 if family == entries.FAMILY_STOCH_REV_SELL else 0)
+
+
+def _anchored_base(base: pd.DataFrame, want_state: str,
+                   tail_bars: int) -> pd.DataFrame:
+    """Extend the base so the tail cannot cross an H4 bucket boundary.
+
+    The gate is FRAME-RELATIVE: a bucket becomes visible once its close time
+    is ≤ the last M5 bar's close. A decline tail that spills across a 4-hour
+    boundary therefore CLOSES the decline bucket and the gate reads DOWN
+    instead of the base's state — the helper used to depend on wall clock
+    (red within ~105 min of every boundary; proven on a clean HEAD worktree
+    2026-11-17 — red at 02:40 UTC, green at 02:05 UTC, same tree). When the
+    natural tail would cross, extend the base IN ITS OWN PATTERN (flat stays
+    flat, rising keeps rising by rising_history's per-bucket step) to end
+    one bar before the next boundary, then start the tail there: every
+    bucket visible to the gate is then pure base. The stale-feed guard
+    still passes — it compares the frame's LAST bar against now, and the
+    frame already extends past now by design.
+    """
+    tail_bars = _tail_bars_guard(tail_bars)
+    tail_first_open = base.index[-1] + pd.Timedelta(minutes=5)
+    # first boundary strictly after the tail's first open (4h grid ⊇ 5min grid)
+    next_boundary = (tail_first_open + pd.Timedelta(minutes=1)).ceil("4h")
+    last_tail_close = tail_first_open + pd.Timedelta(minutes=5 * tail_bars)
+    if next_boundary > last_tail_close:
+        return base  # natural anchor already fits inside the forming bucket
+    extend_bars = int(
+        (next_boundary - pd.Timedelta(minutes=5) - tail_first_open)
+        .total_seconds() // 300
+    ) + 1
+    last_close = float(base["close"].iloc[-1])
+    if want_state == STATE_UP:
+        # rising_history: +step per 48-bar bucket → per-bar continuation
+        step_per_bar = 4.0 / 48.0
+        ext_closes = [last_close + step_per_bar * (k + 1)
+                      for k in range(extend_bars)]
+    else:
+        ext_closes = [last_close] * extend_bars
+    ext = make_m5(ext_closes, start=tail_first_open)
+    return pd.concat([base, ext])
+
+
+def _tail_bars_guard(tail_bars: int) -> int:
+    if tail_bars <= 0:
+        raise ValueError("unknown family — no tail recipe")
+    return tail_bars
+
+
 def frame_with_event_at_last_bar(family: str, want_state: str
                                  ) -> tuple[pd.DataFrame, str]:
     """A frame whose LAST closed bar is a BUY-polarity event of `family`
@@ -93,6 +145,11 @@ def frame_with_event_at_last_bar(family: str, want_state: str
     bucket — invisible to the gate — so the gate state comes purely from
     the base. BUY polarity on purpose: the live bet must still open SELL
     (theory-free, no polarity filter).
+
+    The tail anchor is BUCKET-AWARE (2026-11-17): when the natural tail
+    would cross an H4 boundary, the base is extended to the next bucket
+    first (see _anchored_base) — the gate's answer must never depend on
+    when the test happens to run.
     """
     if want_state == STATE_FLAT:
         base = flat_history(54)
@@ -100,6 +157,7 @@ def frame_with_event_at_last_bar(family: str, want_state: str
         base = rising_history(56)
     else:
         raise ValueError(want_state)
+    base = _anchored_base(base, want_state, _tail_bars(family))
     last_close = float(base["close"].iloc[-1])
     if family == entries.FAMILY_RSI_REV_SELL:
         # decline (RSI → 0) then a pop (RSI jumps ≥ 30): cross 30 upward
@@ -315,6 +373,67 @@ class TestLiveGatePath:
         assert len(msgs) == 2                     # only on CHANGE, not per cycle
         assert "FLAT (armed)" in msgs[0]
         assert "UP" in msgs[1]
+
+
+# ── 3b. the frame anchor must be bucket-aware, never wall-clock lucky ─────
+
+
+class TestTailAnchorBucketAware:
+    """2026-11-17 flake: frame_with_event_at_last_bar depended on WALL CLOCK.
+
+    The gate is frame-relative (a bucket becomes visible once its close time
+    is ≤ the last bar's close), so a decline tail that spills across an H4
+    boundary CLOSES the decline bucket — the gate reads DOWN instead of the
+    base's FLAT and the bet never opens. That happened whenever the test ran
+    within the tail span (~105 min) of a 4-hour boundary: proven on a CLEAN
+    HEAD worktree (zero local changes) — red at 02:40 UTC, green at 02:05 UTC,
+    i.e. this test file was red ~44% of the day by construction.
+
+    These tests pin BOTH wall-clock positions (safe + crossing) so the
+    helper is deterministic around the whole 4-hour cycle.
+    """
+
+    _SAFE_MINUTE = 10        # deep inside a bucket — always worked
+    _CROSSING_MINUTE = 200   # the old fail window: boundary inside the tail
+
+    def _cell(self, cell_id: str) -> tuple[object, object]:
+        specs = {s.cell_id: s for s in cells.load_bet_cells()}
+        return specs[cell_id], store
+
+    def _fake_now(self, minute_into_bucket: int) -> pd.Timestamp:
+        return pd.Timestamp("2026-11-17 04:00") + pd.Timedelta(
+            minutes=minute_into_bucket)
+
+    @pytest.mark.parametrize("minute", [10, 200])
+    def test_flat_gate_opens_bet_at_any_clock(self, monkeypatch, tmp_path,
+                                              minute):
+        fake_now = self._fake_now(minute)
+        monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
+        spec, _ = self._cell("BET-SF")
+        frame, pol = frame_with_event_at_last_bar(spec.family, STATE_FLAT)
+        assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_FLAT, (
+            f"minute {minute}: the gate must read the base's FLAT, not the tail"
+        )
+        assert pol == "BUY"
+        conn = store.connect(tmp_path / "bet.db")
+        store.seed_cells(conn, [spec])
+        bet_engine.try_open_bet(conn, spec, frame, _FakeFeed(mid=4000.0), {})
+        row = store.get_open_bet(conn, "BET-SF")
+        conn.close()
+        assert row is not None, (
+            f"wall clock (minute {minute} of the H4 bucket) changed whether "
+            "the bet opened — the tail anchor is not bucket-aware"
+        )
+
+    @pytest.mark.parametrize("minute", [10, 200])
+    def test_up_gate_state_at_any_clock(self, monkeypatch, minute):
+        fake_now = self._fake_now(minute)
+        monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
+        spec, _ = self._cell("BET-RF")
+        frame, _ = frame_with_event_at_last_bar(spec.family, STATE_UP)
+        assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_UP, (
+            f"minute {minute}: UP base must read UP regardless of wall clock"
+        )
 
 
 # ── 4. config errors fail closed at boot, not silently mid-run ─────────────

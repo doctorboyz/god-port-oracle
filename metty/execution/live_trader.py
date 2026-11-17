@@ -213,6 +213,23 @@ class LiveTrader:
             except Exception:
                 _risk_per_trade = ACCOUNT_RISK.get(self.account, 0.02)
         self.risk = risk_config or RiskConfig(risk_per_trade=_risk_per_trade)
+        # mr-bet bugfix (2026-11-17): RISK_PER_TRADE_{account} env must ALWAYS
+        # win — same bug class as RR_RATIO_* / MIN_CONFIDENCE_* above and
+        # ATR_MULTIPLIER_* below. oracle_runner.py builds its risk_config from
+        # the GENERIC key (RiskConfig(risk_per_trade=float(os.environ.get(
+        # "RISK_PER_TRADE", "0.02")))) and passes it for every engine, so the
+        # `or` above silently discarded the per-account env resolved at the
+        # top of this block — runtime sized at the 2% default. Production
+        # proof (P22 cent stage 1, VPS 2026-11-17, DRY_RUN): P2 equity 2000
+        # USC @ SL 8.66 shipped lots 0.04 = exactly 2%; the intended 0.5%
+        # (RISK_PER_TRADE_P2=0.005) gives 0.01. Invisible for two months
+        # because farm/demo equity always sat under the 0.01 min-lot floor
+        # (2% and 0.5% both floor to 0.01 at $100/$200 equity) — cent P2/P3
+        # are the first accounts whose 0.5% budget clears the floor.
+        # When env is unset, the passed risk_config value stands (legacy
+        # callers). See tests/test_risk_env_override_causal.py.
+        if _env_risk is not None:
+            self.risk.risk_per_trade = float(_env_risk)
         # Per-account strategy overrides via env vars (for testing different configs)
         # ISSUE-069: env default was "2.0" but RiskConfig.atr_multiplier default is 2.5
         # (account_registry default 2.5). When env unset, per_account_atr would override

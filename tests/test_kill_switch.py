@@ -250,6 +250,117 @@ class TestHandleSafety:
         assert root.initialize_calls == 0
 
 
+# ─── account_info shape safety (2026-11-17 production bug 2) ─────────────
+
+
+class ErrorShapeRoot(FakeRoot):
+    """Bridge whose account_info answers with a NON-dict — the production
+    failure mode: the server's _to_dict fallthrough (str(obj)) or an error
+    structure from a failed server-side call, instead of the account dict.
+
+    The shape is chosen so dict() raises the EXACT observed VPS message:
+    "dictionary update sequence element #0 has length 5; 2 is required"
+    (mt5b ×1, mt5c ×1, mt5p1 ×2 — transient, not every poll)."""
+
+    def account_info(self):
+        return [(False, "server-side call failed", None, None, None)]
+
+
+class TestAccountInfoShapeSafety:
+    """A non-dict account_info answer must fail SAFE: this read failed for
+    THIS bridge only (None → data_ok=False → triggers skip one cycle), never
+    a crash mid-cycle, never a touch of the shared MT5 handle. Pre-fix the
+    shape guard, dict() raised inside the generic except — the supervisor
+    survived but logged the misleading "account_info failed: dictionary
+    update sequence..." line, indistinguishable from a dead bridge."""
+
+    def _conn_captured(self, monkeypatch, root):
+        holder = {}
+
+        def fake_connect(host, port, config=None):
+            holder["conn"] = FakeConn(root)
+            return holder["conn"]
+
+        monkeypatch.setattr(ks.rpyc, "connect", fake_connect)
+        return holder
+
+    def test_production_error_message_reproduced(self):
+        """Evidence lock: the observed VPS log line is exactly what dict()
+        does on this shape — proves the mechanism, not a guess."""
+        with pytest.raises(ValueError,
+                           match="element #0 has length 5; 2 is required"):
+            dict([(False, "server-side call failed", None, None, None)])
+
+    def test_error_shape_is_read_failed_not_crash(self, monkeypatch):
+        root = ErrorShapeRoot()
+        holder = self._conn_captured(monkeypatch, root)
+        with HandleSafeBridge("mt5b", 8001) as bridge:
+            assert bridge.account_info() is None
+        # socket dropped so the next cycle reconnects fresh
+        assert holder["conn"].closed is True
+        # the shared MT5 handle is never touched (handle-safety contract)
+        assert root.initialize_calls == 0
+        assert root.shutdown_calls == 0
+
+    def test_shape_guard_classifies_before_materialize(self, monkeypatch, caplog):
+        """Causal RED→GREEN of the fix itself: the guard must classify the
+        bad shape BEFORE dict() — the log must carry the distinct
+        non-dict-response line, not the generic dict() ValueError."""
+        import logging
+        root = ErrorShapeRoot()
+        self._conn_captured(monkeypatch, root)
+        with caplog.at_level(logging.WARNING, logger="scripts.kill_switch"):
+            with HandleSafeBridge("mt5b", 8001) as bridge:
+                assert bridge.account_info() is None
+        joined = caplog.text
+        assert "non-dict response (type=" in joined, (
+            "the shape guard did not fire — the answer went straight to "
+            "dict() materialization again"
+        )
+        assert "dictionary update sequence" not in joined
+
+    def test_string_fallthrough_shape_is_read_failed(self, monkeypatch):
+        """docker/mt5 _to_dict fallthrough returns str(obj) — a plain string
+        answer must also be a read-failure, not a crash."""
+
+        class StringRoot(FakeRoot):
+            def account_info(self):
+                return "<account_info unavailable>"
+
+        root = StringRoot()
+        self._conn_captured(monkeypatch, root)
+        with HandleSafeBridge("mt5b", 8001) as bridge:
+            assert bridge.account_info() is None
+
+    def test_observe_error_shape_skips_account_not_cycle(
+            self, monkeypatch, tmp_path):
+        """Supervisor cycle level: the bad shape costs THIS bridge's data for
+        this cycle (data_ok=False, no equity, no mid) — the cycle itself
+        completes and every trigger that needs data skips cleanly."""
+        config = make_config(monkeypatch, tmp_path)
+        root = ErrorShapeRoot()
+        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
+        install_tcp_probe(monkeypatch)
+        ob = ks._observe(target_by_name(config, "B"))
+        assert ob.tcp_ok is True
+        assert ob.data_ok is False
+        assert ob.equity is None
+        assert ob.mid is None
+        assert root.initialize_calls == 0
+        assert root.shutdown_calls == 0
+
+    def test_healthy_dict_still_passes_through(self, monkeypatch):
+        """Guard must not over-block: a normal account dict (rpyc netref to a
+        server dict exposes .keys exactly like the real bridge) still
+        materializes — read path unchanged for healthy answers."""
+        root = FakeRoot(equity=1000.0, mid=4000.0)
+        self._conn_captured(monkeypatch, root)
+        with HandleSafeBridge("mt5b", 8001) as bridge:
+            info = bridge.account_info()
+        assert info == {"equity": 1000.0, "balance": 1000.0,
+                        "currency": "USD"}
+
+
 # ─── Triggers ────────────────────────────────────────────────────────────
 
 

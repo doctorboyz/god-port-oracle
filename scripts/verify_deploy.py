@@ -174,7 +174,7 @@ def _fmt(label, kind, value):
 
 
 def verify_account(account, expect):
-    from metty.execution.live_trader import LiveTrader
+    from metty.execution.live_trader import LiveTrader, RiskConfig
 
     # P-accounts resolve account_id from the accounts table, so the trader
     # must point at THIS container's DB (DB_PATH env, e.g. /app/data/
@@ -182,7 +182,21 @@ def verify_account(account, expect):
     # the WRONG file in a P engine). Legacy A-D resolve statically and
     # never touch the DB during __init__.
     db_path = Path(os.environ["DB_PATH"]) if os.environ.get("DB_PATH") else None
-    trader = LiveTrader(account=account, dry_run=True, db_path=db_path)
+    # ISSUE-089 follow-up (2026-11-17): construct the trader the way
+    # oracle_runner.run_trader REALLY does — it ALWAYS passes a risk_config
+    # built from the GENERIC key (RISK_PER_TRADE, 2% default). The old bare
+    # construction verified an object the runtime never built: the P22 cent
+    # engines shipped 2% sizing (lots 0.04/0.02) with this script green,
+    # because only the no-risk_config path honored RISK_PER_TRADE_{account}.
+    # Mirroring the runner 1:1 means what this script asserts IS what the
+    # trading loop uses. See tests/test_verify_deploy_risk_causal.py.
+    risk_config = RiskConfig(
+        risk_per_trade=float(os.environ.get("RISK_PER_TRADE", "0.02"))
+    )
+    trader = LiveTrader(
+        account=account, dry_run=True, db_path=db_path,
+        risk_config=risk_config,
+    )
     rows = []
     failures = []
     for label, chain, kind in _FIELDS:
