@@ -527,7 +527,8 @@ services:
       # Stage 2 ARMED (17/11): P1 trades live — kill switch deployed +
       # sizing proven at runtime + คุณหมอ approved. Hard-coded so a stale
       # DRY_RUN_PORTFOLIO in the host .env can never disarm/override.
-      # P2/P3 stay DRY_RUN=1 (one account at a time).
+      # Full ladder live (17/11, คุณหมอ: "P2 and P3 ก็ต้องเทรดจริงด้วยนะ")
+      # — see the P2/P3 service blocks, same arming rule.
       - DRY_RUN=0
       - ACCOUNTS=P1
       - DB_PATH=/app/data/oracle_p1.db
@@ -622,8 +623,11 @@ services:
     container_name: oracle-engine-p2
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      # Stage 1 (16/11): orders NOT sent — see P1 header for the arming rule.
-      - DRY_RUN=1
+      # Stage 2 ARMED (17/11): P2 trades live — kill switch deployed +
+      # sizing proven at runtime (risk 0.005) + คุณหมอ approved the full
+      # ladder ("P2 and P3 ก็ต้องเทรดจริงด้วยนะ"). Hard-coded so a stale
+      # DRY_RUN_PORTFOLIO in the host .env can never disarm/override.
+      - DRY_RUN=0
       - ACCOUNTS=P2
       - DB_PATH=/app/data/oracle_p2.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
@@ -708,8 +712,11 @@ services:
     container_name: oracle-engine-p3
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      # Stage 1 (16/11): orders NOT sent — see P1 header for the arming rule.
-      - DRY_RUN=1
+      # Stage 2 ARMED (17/11): P3 trades live — kill switch deployed +
+      # sizing proven at runtime (risk 0.005) + คุณหมอ approved the full
+      # ladder ("P2 and P3 ก็ต้องเทรดจริงด้วยนะ"). Hard-coded so a stale
+      # DRY_RUN_PORTFOLIO in the host .env can never disarm/override.
+      - DRY_RUN=0
       - ACCOUNTS=P3
       - DB_PATH=/app/data/oracle_p3.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}

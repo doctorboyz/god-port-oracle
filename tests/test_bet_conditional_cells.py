@@ -444,6 +444,18 @@ class TestTailAnchorBucketAware:
                                               minute, sec):
         fake_now = self._fake_now(minute, sec)
         monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
+        # Third wall-clock leak of this family (2026-11-17): pinning the
+        # FRAME clock left the ENGINE's clock live. try_open_bet's stale-
+        # feed guard reads bet_engine._now_utc() (datetime.now, line ~353)
+        # — against REAL time the fixed frame (ends ~05:50 fake) went
+        # stale at 06:25 UTC real and the bet stopped opening, PERMANENTLY
+        # (the fake date is pinned, so this was not a window flake but a
+        # time bomb; proven red on a clean HEAD via git stash at 08:02
+        # UTC). Patch the engine to the SAME fake now so the guard sees a
+        # fresh frame at every parametrize point (age is negative — the
+        # frame extends past fake now by design).
+        monkeypatch.setattr(bet_engine, "_now_utc",
+                            lambda: fake_now.to_pydatetime())
         spec, _ = self._cell("BET-SF")
         frame, pol = frame_with_event_at_last_bar(spec.family, STATE_FLAT)
         assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_FLAT, (

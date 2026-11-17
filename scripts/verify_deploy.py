@@ -125,8 +125,8 @@ _PRESETS = {
 
 # P22 cent ladder (2026-11-16, คุณหมอสั่งผ่าน Hermes): engine-p1/p2/p3 run
 # the P22 champion on REAL Exness Standard Cent accounts. Stage 2 ARMED
-# 17/11: P1 trades live (dry_run=0 — kill switch deployed + sizing proven
-# at runtime + คุณหมอ approved); P2/P3 stay dry (one account at a time).
+# 17/11: the FULL ladder trades live (dry_run=0 — kill switch deployed +
+# sizing proven at runtime + คุณหมอ approved P1 first, then P2/P3).
 # Config mirrors demo C (mr-bet-p22-C). CENT UNITS: the bridge reports
 # balance/equity in USC (1 USD = 100 USC), so every baseline compared
 # against bridge equity (initial_equity → in-engine account-level DD line)
@@ -147,9 +147,9 @@ _P22_CENT_COMMON = {
     "mt5_server": "Exness-MT5Real25", "mt5_symbol": "XAUUSDc",
     "trade_blocker_daily_limit": "10", "trade_blocker_weekly_limit": "30",
 }
-# dry_run is per-account (stage 2, 17/11): P1 ARMED live, P2/P3 still dry.
+# dry_run is per-account (stage 2, 17/11): the FULL ladder ARMED live.
 for _name, _usc, _dry in (
-    ("P1", 5000.0, "0"), ("P2", 2000.0, "1"), ("P3", 1000.0, "1"),
+    ("P1", 5000.0, "0"), ("P2", 2000.0, "0"), ("P3", 1000.0, "0"),
 ):
     _PRESETS.setdefault("p22-cent", {})[_name] = {
         **_P22_CENT_COMMON,
