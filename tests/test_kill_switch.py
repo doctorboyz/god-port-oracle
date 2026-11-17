@@ -46,7 +46,10 @@ class FakeRoot:
     """Stands in for the RPyC service exposed by docker/mt5 bridges.
 
     Records initialize/shutdown so the handle-safety contract is testable,
-    and order_send so flatten behavior is assertable.
+    and order_send so flatten behavior is assertable. account_info is
+    call-counted: since ISSUE-010 phase 2 the supervisor must NEVER read
+    equity over the bridge (that polling disturbed the engines' single
+    terminal handle) — any call is a contract break.
     """
 
     def __init__(self, equity=None, positions=None, mid=None, tick_bid=0.0):
@@ -56,6 +59,7 @@ class FakeRoot:
         self.tick_bid = tick_bid
         self.initialize_calls = 0
         self.shutdown_calls = 0
+        self.account_info_calls = 0
         self.order_calls: list[tuple] = []
         self.closed_tickets: list = []
 
@@ -68,6 +72,7 @@ class FakeRoot:
         return True
 
     def account_info(self):
+        self.account_info_calls += 1
         if self.equity is None:
             return None
         return {"equity": self.equity, "balance": self.equity, "currency": "USD"}
@@ -179,6 +184,44 @@ def seeded_state(tmp_path, name: str, **fields) -> KillState:
     return state
 
 
+KS_TEST_NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+
+def seed_engine_db(tmp_path, name: str, equity, minutes_ago: float = 1.0,
+                   peak=None, now: datetime | None = None) -> str:
+    """A real sqlite file shaped like the engine's own DB, carrying the
+    per-cycle equity snapshot the engine stamps (ISSUE-010 phase 2) —
+    the supervisor's ONLY equity/heartbeat source since the bridge stop
+    being one. Freshness is relative to the fixed test clock so trigger
+    tests are deterministic."""
+    now = now or KS_TEST_NOW
+    path = tmp_path / f"oracle_{name.lower()}.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS accounts ("
+        "id INTEGER PRIMARY KEY, name TEXT UNIQUE, balance REAL, leverage INTEGER,"
+        "bridge_host TEXT, bridge_port INTEGER, signal_group TEXT, is_active BOOLEAN,"
+        "created_at TEXT, current_equity REAL, equity_ts TEXT, peak_equity REAL)"
+    )
+    ts = (now - timedelta(minutes=minutes_ago)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO accounts "
+        "(id, name, balance, leverage, bridge_host, bridge_port, signal_group,"
+        " current_equity, equity_ts, peak_equity) "
+        "VALUES (1, ?, 0, 500, 'x', 8001, 'g', ?, ?, ?)",
+        (name, equity, ts, peak),
+    )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def ks_db_env(paths_by_name: dict) -> dict:
+    """KILL_DB_PATH_<name> env wiring for make_config(**env)."""
+    return {f"KILL_DB_PATH_{name}": path
+            for name, path in paths_by_name.items()}
+
+
 # ─── Observation factory ─────────────────────────────────────────────────
 
 
@@ -207,12 +250,19 @@ class TestHandleSafety:
 
     def test_observe_never_touches_handle(self, monkeypatch, tmp_path):
         config = make_config(monkeypatch, tmp_path)
+        db = seed_engine_db(tmp_path, "B", equity=1000.0)
+        target = ks.AccountTarget(
+            name="B", group=GROUP_DEMO, bridge_host="mt5b",
+            bridge_port=8001, db_path=db,
+            engine_container="oracle-engine-train",
+        )
         root = FakeRoot(equity=1000.0, mid=4000.0)
         install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
         install_tcp_probe(monkeypatch)
-        ks._observe(target_by_name(config, "B"))
+        ks._observe(target, KS_TEST_NOW, 10)
         assert root.initialize_calls == 0
         assert root.shutdown_calls == 0
+        assert root.account_info_calls == 0  # equity is DB-sourced now
 
     def test_flatten_never_touches_handle(self, monkeypatch):
         root = FakeRoot(equity=1000.0, mid=4000.0, positions=[
@@ -231,7 +281,9 @@ class TestHandleSafety:
 
     def test_full_cycle_with_kill_never_touches_handle(
             self, monkeypatch, tmp_path):
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        db = seed_engine_db(tmp_path, "B", equity=800.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             KILL_DB_PATH_B=db)
         state = seeded_state(
             tmp_path, "B",
             peak_equity=1000.0,
@@ -248,117 +300,7 @@ class TestHandleSafety:
         assert alerts, "20% DD should have fired"
         assert root.shutdown_calls == 0
         assert root.initialize_calls == 0
-
-
-# ─── account_info shape safety (2026-11-17 production bug 2) ─────────────
-
-
-class ErrorShapeRoot(FakeRoot):
-    """Bridge whose account_info answers with a NON-dict — the production
-    failure mode: the server's _to_dict fallthrough (str(obj)) or an error
-    structure from a failed server-side call, instead of the account dict.
-
-    The shape is chosen so dict() raises the EXACT observed VPS message:
-    "dictionary update sequence element #0 has length 5; 2 is required"
-    (mt5b ×1, mt5c ×1, mt5p1 ×2 — transient, not every poll)."""
-
-    def account_info(self):
-        return [(False, "server-side call failed", None, None, None)]
-
-
-class TestAccountInfoShapeSafety:
-    """A non-dict account_info answer must fail SAFE: this read failed for
-    THIS bridge only (None → data_ok=False → triggers skip one cycle), never
-    a crash mid-cycle, never a touch of the shared MT5 handle. Pre-fix the
-    shape guard, dict() raised inside the generic except — the supervisor
-    survived but logged the misleading "account_info failed: dictionary
-    update sequence..." line, indistinguishable from a dead bridge."""
-
-    def _conn_captured(self, monkeypatch, root):
-        holder = {}
-
-        def fake_connect(host, port, config=None):
-            holder["conn"] = FakeConn(root)
-            return holder["conn"]
-
-        monkeypatch.setattr(ks.rpyc, "connect", fake_connect)
-        return holder
-
-    def test_production_error_message_reproduced(self):
-        """Evidence lock: the observed VPS log line is exactly what dict()
-        does on this shape — proves the mechanism, not a guess."""
-        with pytest.raises(ValueError,
-                           match="element #0 has length 5; 2 is required"):
-            dict([(False, "server-side call failed", None, None, None)])
-
-    def test_error_shape_is_read_failed_not_crash(self, monkeypatch):
-        root = ErrorShapeRoot()
-        holder = self._conn_captured(monkeypatch, root)
-        with HandleSafeBridge("mt5b", 8001) as bridge:
-            assert bridge.account_info() is None
-        # socket dropped so the next cycle reconnects fresh
-        assert holder["conn"].closed is True
-        # the shared MT5 handle is never touched (handle-safety contract)
-        assert root.initialize_calls == 0
-        assert root.shutdown_calls == 0
-
-    def test_shape_guard_classifies_before_materialize(self, monkeypatch, caplog):
-        """Causal RED→GREEN of the fix itself: the guard must classify the
-        bad shape BEFORE dict() — the log must carry the distinct
-        non-dict-response line, not the generic dict() ValueError."""
-        import logging
-        root = ErrorShapeRoot()
-        self._conn_captured(monkeypatch, root)
-        with caplog.at_level(logging.WARNING, logger="scripts.kill_switch"):
-            with HandleSafeBridge("mt5b", 8001) as bridge:
-                assert bridge.account_info() is None
-        joined = caplog.text
-        assert "non-dict response (type=" in joined, (
-            "the shape guard did not fire — the answer went straight to "
-            "dict() materialization again"
-        )
-        assert "dictionary update sequence" not in joined
-
-    def test_string_fallthrough_shape_is_read_failed(self, monkeypatch):
-        """docker/mt5 _to_dict fallthrough returns str(obj) — a plain string
-        answer must also be a read-failure, not a crash."""
-
-        class StringRoot(FakeRoot):
-            def account_info(self):
-                return "<account_info unavailable>"
-
-        root = StringRoot()
-        self._conn_captured(monkeypatch, root)
-        with HandleSafeBridge("mt5b", 8001) as bridge:
-            assert bridge.account_info() is None
-
-    def test_observe_error_shape_skips_account_not_cycle(
-            self, monkeypatch, tmp_path):
-        """Supervisor cycle level: the bad shape costs THIS bridge's data for
-        this cycle (data_ok=False, no equity, no mid) — the cycle itself
-        completes and every trigger that needs data skips cleanly."""
-        config = make_config(monkeypatch, tmp_path)
-        root = ErrorShapeRoot()
-        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
-        install_tcp_probe(monkeypatch)
-        ob = ks._observe(target_by_name(config, "B"))
-        assert ob.tcp_ok is True
-        assert ob.data_ok is False
-        assert ob.equity is None
-        assert ob.mid is None
-        assert root.initialize_calls == 0
-        assert root.shutdown_calls == 0
-
-    def test_healthy_dict_still_passes_through(self, monkeypatch):
-        """Guard must not over-block: a normal account dict (rpyc netref to a
-        server dict exposes .keys exactly like the real bridge) still
-        materializes — read path unchanged for healthy answers."""
-        root = FakeRoot(equity=1000.0, mid=4000.0)
-        self._conn_captured(monkeypatch, root)
-        with HandleSafeBridge("mt5b", 8001) as bridge:
-            info = bridge.account_info()
-        assert info == {"equity": 1000.0, "balance": 1000.0,
-                        "currency": "USD"}
+        assert root.account_info_calls == 0
 
 
 # ─── Triggers ────────────────────────────────────────────────────────────
@@ -548,8 +490,9 @@ class TestConnectivityTrigger:
 
 
 class TestStatePersistence:
-    def _armed(self, monkeypatch, tmp_path):
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+    def _armed(self, monkeypatch, tmp_path, **env):
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             **env)
         state = seeded_state(
             tmp_path, "B",
             peak_equity=1000.0,
@@ -558,7 +501,8 @@ class TestStatePersistence:
         return config, state
 
     def test_trigger_fires_once_across_restart(self, monkeypatch, tmp_path):
-        config, state = self._armed(monkeypatch, tmp_path)
+        db = seed_engine_db(tmp_path, "B", equity=800.0)
+        config, state = self._armed(monkeypatch, tmp_path, KILL_DB_PATH_B=db)
         root = FakeRoot(equity=800.0, mid=4000.0)
         install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
         install_tcp_probe(monkeypatch)
@@ -591,7 +535,8 @@ class TestStatePersistence:
         peak=1000 was recovered from the state file. A fresh supervisor
         (lost state) would set peak=895 and stay silent — silence here is
         the smell that persistence broke."""
-        config, state = self._armed(monkeypatch, tmp_path)
+        db = seed_engine_db(tmp_path, "B", equity=895.0)
+        config, state = self._armed(monkeypatch, tmp_path, KILL_DB_PATH_B=db)
         root = FakeRoot(equity=895.0, mid=4000.0)  # 10.5% below persisted peak
         install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
         install_tcp_probe(monkeypatch)
@@ -630,7 +575,9 @@ class TestStatePersistence:
 
 class TestDryRun:
     def test_dry_run_alerts_but_never_acts(self, monkeypatch, tmp_path):
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="1")
+        db = seed_engine_db(tmp_path, "B", equity=800.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="1",
+                             KILL_DB_PATH_B=db)
         state = seeded_state(
             tmp_path, "B",
             peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
@@ -657,7 +604,9 @@ class TestDryRun:
         assert "daily_loss" in state.account("B")["triggers"]
 
     def test_armed_mode_flattens_and_stops(self, monkeypatch, tmp_path):
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        db = seed_engine_db(tmp_path, "B", equity=800.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             KILL_DB_PATH_B=db)
         state = seeded_state(
             tmp_path, "B",
             peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
@@ -683,9 +632,14 @@ class TestDryRun:
 
 
 class TestGroupPolicy:
-    def _armed(self, monkeypatch, tmp_path, **env):
+    def _armed(self, monkeypatch, tmp_path, equity=800.0, **env):
+        # every account's ENGINE DB carries the equity row the supervisor
+        # now reads instead of the bridge (ISSUE-010 phase 2)
+        dbs = {t: seed_engine_db(tmp_path, t, equity=equity)
+               for t in ("A", "B", "C", "D", "P1", "P2", "P3")}
         config = make_config(monkeypatch, tmp_path,
-                             KILL_SWITCH_DRY_RUN="0", **env)
+                             KILL_SWITCH_DRY_RUN="0",
+                             **ks_db_env(dbs), **env)
         state = KillState(config.state_path).load()
         for t in config.targets:
             acct = state.account(t.name)
@@ -764,7 +718,7 @@ class TestGroupPolicy:
         roots = self._roots_for(config)
         real_root = roots[("mt5a", 8001)]
         for t in config.targets:  # equity back at peak → no NEW trigger fires
-            roots[(t.bridge_host, t.bridge_port)].equity = 1000.0
+            seed_engine_db(tmp_path, t.name, equity=1000.0)
         real_root.positions = [
             {"ticket": 99, "symbol": "XAUUSDm", "volume": 0.01, "type": 0},
         ]
@@ -787,7 +741,7 @@ class TestGroupPolicy:
         state.save()
         roots = self._roots_for(config)
         for t in config.targets:
-            roots[(t.bridge_host, t.bridge_port)].equity = 1000.0
+            seed_engine_db(tmp_path, t.name, equity=1000.0)
         roots[("mt5b", 8001)].positions = [
             {"ticket": 42, "symbol": "XAUUSD", "volume": 0.01, "type": 0},
         ]
@@ -868,8 +822,12 @@ class TestCli:
 
     def test_dry_run_flag_overrides_env(self, monkeypatch, tmp_path):
         """--no-dry-run on the CLI must arm even when env says dry-run
-        (operator's explicit one-shot arming for a controlled test)."""
-        make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="1")
+        (operator's explicit one-shot arming for a controlled test).
+        Since the phase-2 boot guard, arming requires a readable engine
+        DB — the real compose wires KILL_DB_PATH_* for every account."""
+        db = seed_engine_db(tmp_path, "B", equity=1000.0)
+        make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="1",
+                    KILL_DB_PATH_B=db)
         argv = ["--once", "--no-dry-run", "--state",
                 str(tmp_path / "state.json")]
         monkeypatch.setattr(
@@ -929,7 +887,9 @@ class TestFlattenFailLoud:
         """Armed kill fires while the bridge cannot report positions → the
         action/alert must say READ-FAILED (manual check required), never
         the old silent '0 closed, 0 failed'."""
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        db = seed_engine_db(tmp_path, "B", equity=800.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             KILL_DB_PATH_B=db)
         state = seeded_state(
             tmp_path, "B",
             peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
@@ -961,7 +921,9 @@ class TestFlattenFailLoud:
         """REAL group: flatten read-failed → the URGENT alert must demand
         MANUAL intervention (the block is enforced, but 'is it flat?' is
         UNKNOWN — the operator must look at the terminal)."""
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        db = seed_engine_db(tmp_path, "A", equity=800.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             KILL_DB_PATH_A=db)
         state = seeded_state(
             tmp_path, "A",
             peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
@@ -989,7 +951,9 @@ class TestFlattenFailLoud:
         the same 'believed flat' failure on every later cycle."""
         import logging
 
-        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        db = seed_engine_db(tmp_path, "B", equity=1000.0)
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0",
+                             KILL_DB_PATH_B=db)
         state = seeded_state(tmp_path, "B", peak_equity=1000.0,
                             day={"date": "2026-01-01", "start_equity": 1000.0})
         state.record_trigger("B", "daily_loss", "killed earlier", {})

@@ -6,10 +6,26 @@ one engine process; the missing FIA layer is an INDEPENDENT supervisor.
 This is it — a new file only, zero changes to metty/ broky/ shared/
 docker/mt5/ Dockerfile (the paper farm builds from the same tree).
 
+ISSUE-010 phase 2 (2026-11-17, doctorboyz order via Hermes): ชั้นพิทักษ์เงิน
+ต้องไม่พึ่ง bridge ที่มันปกป้อง. Production evidence: supervisor bridge
+polling was the disturber of the engines' single shared terminal handle —
+"stream has been closed" on all three engines (P1 11 / P2 9 / P3 8 since
+08:00) and account_info via the supervisor failed 18/18; `docker stop
+kill-switch` stopped the errors dead (0 in 7 minutes). Since then equity
+and status come from the ENGINE DB (each engine stamps accounts.
+current_equity + equity_ts every cycle — metty additive write):
+  · equity            → accounts.current_equity (engine's own row)
+  · dd_from_peak      → vs max(kill-state peak, accounts.peak_equity)
+  · connectivity      → freshness of equity_ts (catches a dead ENGINE,
+                        not just a dead bridge — better than any ping)
+  · order_rate        → engine DB (as before)
+The bridge is left for exactly two jobs: the tick_mid cross-check feeding
+price_dev, and flatten when a trigger actually fires.
+
 Triggers (env-tunable, defaults in brackets): daily_loss [3.0% vs start
 of UTC day] · dd_from_peak [10.0% from high-water peak] · order_rate
 [>20 trades/hour/account] · price_dev [>1.0% vs cross-account median] ·
-connectivity [>10 min without usable bridge data].
+connectivity [>10 min without a fresh engine equity stamp].
 
 Group policies: DEMO/CENT = flatten + docker stop engine container + TG;
 REAL = bridge flatten ONLY + persistent block + URGENT TG — no code
@@ -47,6 +63,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import socket
 import sqlite3
 import statistics
@@ -209,6 +226,34 @@ class KillConfig:
 # ─── Handle-safe bridge client ──────────────────────────────────────────
 
 
+# Retry policy for the remaining bridge reads (ISSUE-010 phase 1 keepers):
+# transient blips get ONE retry after a jittered delay — never a hammering
+# loop, and never a retry on order_send (an ambiguous order must never be
+# re-sent). Jitter de-synchronizes reconnects across accounts.
+RETRY_JITTER_RANGE = (0.2, 0.8)
+
+
+def _sleep_retry_jitter() -> None:
+    time.sleep(random.uniform(*RETRY_JITTER_RANGE))
+
+
+def _describe_remote(obj) -> str:
+    """What the bridge ACTUALLY returned, for the read-failure log
+    (ISSUE-013): type(netref) on a netref can report the generic wrapper
+    class, which told the operator nothing. repr() materializes over the
+    wire and shows the remote object's real type and content — guarded,
+    because a broken bridge can raise on repr too."""
+    try:
+        type_name = type(obj).__name__
+    except Exception:
+        type_name = "unknown-type"
+    try:
+        snippet = repr(obj)[:120]
+    except Exception as exc:
+        snippet = f"<repr failed: {exc}>"
+    return f"type={type_name} repr={snippet!r}"
+
+
 class HandleSafeBridge:
     """Read/flatten client for ONE MT5 bridge.
 
@@ -218,6 +263,10 @@ class HandleSafeBridge:
     socket is dropped with conn.close() only. Netrefs are materialized to
     local dicts exactly once per response — no per-key netref round-trips
     in loops (same contract as metty/bridge/client.py).
+
+    ISSUE-010 phase 2: equity/status NO LONGER comes from here — the
+    supervisor reads the engine DB. This client is left with exactly the
+    tick cross-check (price_dev) and the flatten action.
     """
 
     def __init__(self, host: str, port: int):
@@ -247,72 +296,81 @@ class HandleSafeBridge:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    # -- reads ----------------------------------------------------------
-
-    def account_info(self) -> Optional[dict]:
-        """Local dict of account_info() or None (no terminal/handle/bad shape)."""
-        try:
-            netref = self._connect().root.account_info()
-            if netref is None:
-                return None
-            if not hasattr(netref, "keys"):
-                # Production (VPS 2026-11-17, 4× transient: mt5b ×1, mt5c ×1,
-                # mt5p1 ×2): the bridge can answer account_info with a NON-dict
-                # — the server's _to_dict fallthrough (str(obj)) or an error
-                # structure from a failed server-side call. dict() on that
-                # raised "dictionary update sequence element #0 has length 5;
-                # 2 is required", logged as a generic "account_info failed"
-                # that looked like a dead bridge while the socket was fine.
-                # Any non-mapping answer = THIS read failed for THIS bridge:
-                # drop the socket, return None, next cycle retries fresh.
-                # Never let a shape error be anything but a skipped read —
-                # see tests/test_kill_switch.py::TestAccountInfoShapeSafety.
-                logger.warning(
-                    "[KS] bridge %s:%s account_info non-dict response "
-                    "(type=%s) — treating as read-failed",
-                    self.host, self.port, type(netref).__name__,
-                )
-                self.close()
-                return None
-            return dict(netref)  # materialize ONCE
-        except Exception as exc:
-            logger.warning("[KS] bridge %s:%s account_info failed: %s",
-                           self.host, self.port, exc)
-            self.close()
-            return None
+    # -- reads (retry-once + jitter, ISSUE-010 phase 1 keeper) ----------
 
     def positions(self) -> Optional[list[dict]]:
         """All open positions as local dicts, or None on bridge failure.
 
         Returns [] when the terminal reports no positions — None vs []
         is the bridge-unhealthy distinction (same contract as
-        fetch_deal_history_sync in metty/bridge/client.py).
-        """
-        try:
-            netref_list = self._connect().root.positions_get()
-            if netref_list is None:
-                return []
-            # one materialization pass — dict() per item, then local only
-            return [dict(p) for p in netref_list]
-        except Exception as exc:
-            logger.warning("[KS] bridge %s:%s positions_get failed: %s",
-                           self.host, self.port, exc)
-            self.close()
-            return None
+        fetch_deal_history_sync in metty/bridge/client.py). A transient
+        read failure gets ONE jittered retry: flatten is a money-safety
+        action, and aborting it on a blip leaves positions open."""
+        for attempt in (1, 2):
+            try:
+                netref_list = self._connect().root.positions_get()
+                if netref_list is None:
+                    return []
+                if isinstance(netref_list, (str, bytes)) or \
+                        not hasattr(netref_list, "__iter__"):
+                    # non-list answer (a str IS iterable — catch it by type,
+                    # not just by protocol) = THIS read failed for THIS
+                    # bridge (server _to_dict fallthrough / error shape) —
+                    # log what actually came back (ISSUE-013), drop the
+                    # socket, treat as read-failed. Never dict() it.
+                    logger.warning(
+                        "[KS] bridge %s:%s positions_get non-list response "
+                        "(%s) — treating as read-failed",
+                        self.host, self.port, _describe_remote(netref_list),
+                    )
+                    self.close()
+                    return None
+                # one materialization pass — dict() per item, then local only
+                return [dict(p) for p in netref_list]
+            except Exception as exc:
+                self.close()
+                if attempt == 1:
+                    _sleep_retry_jitter()
+                    continue
+                logger.warning("[KS] bridge %s:%s positions_get failed "
+                               "after one retry: %s",
+                               self.host, self.port, exc)
+                return None
+        return None  # unreachable — for type-checkers
 
     def tick_mid(self, symbol: str) -> Optional[float]:
-        """(bid+ask)/2 for a symbol, or None if the terminal has no tick."""
-        try:
-            tick = self._connect().root.symbol_info_tick(symbol)
-            if tick is None:
+        """(bid+ask)/2 for a symbol, or None if the terminal has no tick.
+
+        Transient failure → ONE jittered retry (the read that feeds the
+        price_dev cross-check must not die on a blip, and must not hammer
+        the bridge either). A non-dict answer is logged with its real
+        type/repr (ISSUE-013) and treated as read-failed."""
+        for attempt in (1, 2):
+            try:
+                netref = self._connect().root.symbol_info_tick(symbol)
+                if netref is None:
+                    return None
+                if not hasattr(netref, "keys"):
+                    logger.warning(
+                        "[KS] bridge %s:%s symbol_info_tick(%s) non-dict "
+                        "response (%s) — treating as read-failed",
+                        self.host, self.port, symbol,
+                        _describe_remote(netref),
+                    )
+                    self.close()
+                    return None
+                tick = dict(netref)  # materialize ONCE
+                bid, ask = float(tick.get("bid") or 0), float(tick.get("ask") or 0)
+                if bid <= 0 or ask <= 0:
+                    return None
+                return (bid + ask) / 2.0
+            except Exception:
+                self.close()
+                if attempt == 1:
+                    _sleep_retry_jitter()
+                    continue
                 return None
-            tick = dict(tick)  # materialize ONCE
-            bid, ask = float(tick.get("bid") or 0), float(tick.get("ask") or 0)
-            if bid <= 0 or ask <= 0:
-                return None
-            return (bid + ask) / 2.0
-        except Exception:
-            return None
+        return None  # unreachable — for type-checkers
 
     # -- flatten --------------------------------------------------------
 
@@ -419,6 +477,93 @@ def count_trades_last_hour(db_path: str, account_name: str) -> Optional[int]:
         logger.warning("[KS] %s order-rate read failed (%s): %s",
                        account_name, db_path, exc)
         return None
+
+
+def read_account_snapshot(db_path: str, account_name: str) -> Optional[dict]:
+    """The engine's per-cycle equity snapshot row (ISSUE-010 phase 2) —
+    the supervisor's ONLY equity/heartbeat view of the account:
+
+        current_equity  what the engine last saw as its equity
+        equity_ts       when the engine stamped it (the heartbeat)
+        peak_equity     engine-side high-water mark (seed for dd_from_peak)
+
+    Read-only mount, mode=ro — WAL readers never block the engine writer.
+    None = DB unreadable or account not enrolled (or the engine DB is
+    pre-phase-2 and has no snapshot columns): the trigger layer skips,
+    never invents a reading.
+    """
+    if not db_path:
+        return None
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            row = conn.execute(
+                "SELECT current_equity, equity_ts, peak_equity "
+                "FROM accounts WHERE name = ?",
+                (account_name,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {"equity": row[0], "equity_ts": row[1],
+                    "peak_equity": row[2]}
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("[KS] %s equity snapshot read failed (%s): %s",
+                       account_name, db_path, exc)
+        return None
+
+
+def _equity_age_minutes(ts_raw, now: datetime) -> Optional[float]:
+    """Age of an engine equity stamp in minutes, or None when the stamp
+    is missing/unparseable (an unprovable heartbeat is NOT a fresh one)."""
+    if not ts_raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(ts_raw))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds() / 60.0
+
+
+def snapshot_schema_problem(db_path: str) -> Optional[str]:
+    """None = OK to arm against this DB. Else a human reason this DB cannot
+    serve phase-2 equity reads.
+
+    Cross-context review HIGH (2026-11-17), reproduced empirically: an
+    ARMED phase-2 supervisor pointed at a PRE-phase-2 engine DB reads
+    'no such column: current_equity' on every account, sees every engine
+    as dead, and flattens LIVE positions on the first cycle over a
+    deploy-order mistake. The runbook says engines-before-kill-switch;
+    this guard makes the wrong order a LOUD refusal instead of a kill
+    (same fail-closed boot convention as _env_dry_run). A DB file that
+    does not exist yet is NOT a schema problem (engine simply not
+    started — its connectivity semantics are real), and an unreadable DB
+    is left to alarm at runtime rather than block boot."""
+    if not db_path:
+        return None
+    if not Path(db_path).exists():
+        return None  # engine not started yet — not a schema problem
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            cols = {row[1] for row in
+                    conn.execute("PRAGMA table_info(accounts)")}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None  # unreadable right now ≠ proven missing schema
+    if "current_equity" not in cols or "equity_ts" not in cols:
+        return (
+            f"{db_path}: accounts table lacks current_equity/equity_ts — "
+            "the engine image predates phase 2; rebuild the engines first "
+            "(deploy order: engines BEFORE kill-switch)"
+        )
+    return None
 
 
 # ─── Docker stop (Engine API over the unix socket, stdlib only) ──────────
@@ -538,31 +683,60 @@ class Trigger:
 
 @dataclass
 class Observation:
-    """One account's reading for one cycle."""
+    """One account's reading for one cycle.
+
+    equity/equity_ts/db_peak come from the ENGINE DB (the engine stamps
+    them every cycle); mid is the bridge tick cross-check — the only
+    bridge read left. data_ok means a FRESH usable equity arrived (the
+    stamp is inside the connectivity window), not just any row value."""
     target: AccountTarget
-    equity: Optional[float] = None
+    equity: Optional[float] = None      # accounts.current_equity (engine stamp)
+    equity_ts: Optional[str] = None    # ISO UTC of the engine stamp
+    db_peak: Optional[float] = None    # accounts.peak_equity (engine high-water)
     mid: Optional[float] = None
     tcp_ok: bool = False
-    data_ok: bool = False       # usable equity arrived this cycle
+    data_ok: bool = False              # fresh usable equity arrived this cycle
     opened_last_hour: Optional[int] = None
 
 
-def _observe(target: AccountTarget) -> Observation:
-    """Read one account: TCP probe, account equity, cross-check tick."""
+def _observe(target: AccountTarget, now: datetime,
+             connectivity_minutes: int) -> Observation:
+    """Read one account: engine DB first (equity/peak/heartbeat), then the
+    bridge tick cross-check.
+
+    ISSUE-010 phase 2: equity/status come from the engine's own DB row —
+    the supervisor must not depend on the bridge it protects (supervisor
+    polling disturbed the engines' single shared terminal handle:
+    "stream has been closed" ×28, account_info via supervisor 18/18
+    failed, VPS 2026-11-17). A dead bridge does NOT blind the supervisor:
+    the DB is a volume mount, so the last-known equity and its heartbeat
+    are still read. The bridge is touched only for the price_dev tick."""
     obs = Observation(target=target)
     obs.tcp_ok = probe_tcp(target.bridge_host, target.bridge_port)
-    if not obs.tcp_ok:
-        return obs
-    with HandleSafeBridge(target.bridge_host, target.bridge_port) as bridge:
-        info = bridge.account_info()
-        if info is None:
-            return obs
+
+    snap = read_account_snapshot(target.db_path or "", target.name)
+    if snap is not None:
         try:
-            obs.equity = float(info.get("equity") or 0) or None
+            equity = float(snap.get("equity") or 0)
         except (TypeError, ValueError):
-            obs.equity = None
-        if obs.equity is None or obs.equity <= 0:
-            return obs
+            equity = 0.0
+        if equity > 0:
+            obs.equity = equity
+        obs.equity_ts = snap.get("equity_ts") or None
+        try:
+            obs.db_peak = float(snap.get("peak_equity") or 0) or None
+        except (TypeError, ValueError):
+            obs.db_peak = None
+        # fresh = the engine stamped inside the connectivity window; a
+        # stale stamp keeps the last-known equity for the alert context
+        # but is NOT usable data — the engine is dead, connectivity fires.
+        age = _equity_age_minutes(obs.equity_ts, now)
+        obs.data_ok = obs.equity is not None and age is not None \
+            and age <= connectivity_minutes
+
+    if not obs.tcp_ok:
+        return obs  # bridge unreachable — tick skipped, DB already read
+    with HandleSafeBridge(target.bridge_host, target.bridge_port) as bridge:
         # engine-seen price = this bridge's own tick for its symbol variant
         symbols = [os.environ.get(f"MT5_SYMBOL_{target.name}", "")] \
             + SYMBOL_CANDIDATES
@@ -570,7 +744,6 @@ def _observe(target: AccountTarget) -> Observation:
             obs.mid = bridge.tick_mid(symbol)
             if obs.mid is not None:
                 break
-    obs.data_ok = obs.equity is not None
     return obs
 
 
@@ -597,9 +770,17 @@ def evaluate_triggers(
             if day.get("date") != today:
                 acct["day"] = {"date": today, "start_equity": obs.equity}
                 logger.info("[KS] %s day baseline set: %.2f", name, obs.equity)
-            peak = max(float(acct.get("peak_equity") or 0.0), obs.equity)
+            # high-water = max of the supervisor's own memory, the
+            # engine-side peak (accounts.peak_equity, maintained by
+            # portfolio_manager) and the current equity — never lowered.
+            peak = max(
+                float(acct.get("peak_equity") or 0.0),
+                float(obs.db_peak or 0.0),
+                obs.equity,
+            )
             acct["peak_equity"] = peak
-            acct["last_good_data"] = _now_iso()
+            # the heartbeat anchor is the ENGINE's own stamp time
+            acct["last_good_data"] = obs.equity_ts or _now_iso()
         else:
             peak = float(acct.get("peak_equity") or 0.0)
 
@@ -680,13 +861,15 @@ def _connectivity_trigger(
     name: str,
     now: datetime,
 ) -> Optional[Trigger]:
-    """Fires when no usable bridge data arrived for the whole window.
+    """Fires when the ENGINE stopped stamping equity for the whole window
+    (ISSUE-010 phase 2: the heartbeat is accounts.equity_ts, which catches
+    a dead ENGINE — not just a dead bridge, which is all a ping could see).
 
-    "Never had data" anchors at the supervisor boot time — the trigger
+    "Never had a stamp" anchors at the supervisor boot time — the trigger
     arms `connectivity_minutes` after boot instead of firing instantly
     (a supervisor that kills on its own startup lag would be broken)."""
     acct = state.account(name)
-    last_raw = acct.get("last_good_data")
+    last_raw = obs.equity_ts or acct.get("last_good_data")
     last_ok: Optional[datetime] = None
     if last_raw:
         try:
@@ -701,7 +884,7 @@ def _connectivity_trigger(
     if silent_minutes > config.connectivity_minutes:
         return Trigger(
             TRIGGER_CONNECTIVITY,
-            f"no usable bridge data for {silent_minutes:.1f} min "
+            f"no fresh equity from engine DB for {silent_minutes:.1f} min "
             f"> {config.connectivity_minutes} min "
             f"(tcp={'ok' if obs.tcp_ok else 'DOWN'})",
             {"silent_minutes": round(silent_minutes, 1),
@@ -744,6 +927,75 @@ class KillSwitchSupervisor:
         self._boot_time = datetime.now(timezone.utc)
         # connectivity "never had data" anchor (see evaluate_triggers)
         self.state._boot_time = self._boot_time
+        # Fail-closed boot (cross-context review HIGH, 2026-11-17): an
+        # armed supervisor that CANNOT read engine equity is a guaranteed
+        # false mass-flatten waiting for one deploy-order mistake. DRY RUN
+        # boots through the gap on purpose — it only alerts, and those
+        # alerts are exactly how the operator notices the gap.
+        if not config.dry_run:
+            wired = [t for t in config.targets if t.db_path]
+            if not wired:
+                raise ValueError(
+                    "ARMED kill switch with no KILL_DB_PATH_* wired — the "
+                    "equity source is the engine DB (ISSUE-010 phase 2); "
+                    "refusing to arm a supervisor whose every account would "
+                    "read as a dead engine (fail-closed boot)"
+                )
+            for target in wired:
+                problem = snapshot_schema_problem(target.db_path)
+                if problem is not None:
+                    raise ValueError(
+                        "ARMED kill switch refusing to start — " + problem
+                    )
+        # hourly success-rate metric (ISSUE-010 phase 1 keeper): one log
+        # line per account per hour — the operator's first answer to
+        # "is the supervisor actually seeing this account?"
+        self._hourly_key: Optional[str] = None
+        self._hourly: dict[str, dict[str, int]] = {}
+
+    # -- hourly success-rate metric -------------------------------------
+
+    def _record_hourly(self, obs_by_name: dict[str, Observation],
+                       now: datetime) -> None:
+        """Count this cycle's read outcomes; on hour rollover flush ONE
+        log line per account. DB reads = the equity snapshot read; tick =
+        the only bridge read left. A tick the cycle never attempted
+        (bridge TCP down) is not counted as a tick failure."""
+        hour_key = now.strftime("%Y-%m-%dT%H")
+        if self._hourly_key is None:
+            self._hourly_key = hour_key
+        elif hour_key != self._hourly_key:
+            self._flush_hourly()
+            self._hourly_key = hour_key
+        for name, obs in obs_by_name.items():
+            bucket = self._hourly.setdefault(
+                name, {"db_ok": 0, "db_fail": 0, "tick_ok": 0, "tick_fail": 0}
+            )
+            if obs.equity is not None:
+                bucket["db_ok"] += 1
+            else:
+                bucket["db_fail"] += 1
+            if obs.mid is not None:
+                bucket["tick_ok"] += 1
+            elif obs.tcp_ok:
+                bucket["tick_fail"] += 1
+
+    def _flush_hourly(self) -> None:
+        def rate(ok: int, total: int) -> str:
+            if total == 0:
+                return "n/a"
+            return f"{ok * 100.0 / total:.1f}%"
+
+        for name in sorted(self._hourly):
+            b = self._hourly[name]
+            db_total = b["db_ok"] + b["db_fail"]
+            tick_total = b["tick_ok"] + b["tick_fail"]
+            logger.info(
+                "[KS] hourly %s: db %d/%d (%s) tick %d/%d (%s)",
+                name, b["db_ok"], db_total, rate(b["db_ok"], db_total),
+                b["tick_ok"], tick_total, rate(b["tick_ok"], tick_total),
+            )
+        self._hourly = {}
 
     # -- actions --------------------------------------------------------
 
@@ -818,8 +1070,10 @@ class KillSwitchSupervisor:
         that fired this cycle."""
         now = now or datetime.now(timezone.utc)
         obs_by_name = {
-            t.name: _observe(t) for t in self.config.targets
+            t.name: _observe(t, now, self.config.connectivity_minutes)
+            for t in self.config.targets
         }
+        self._record_hourly(obs_by_name, now)
         fired = evaluate_triggers(self.config, self.state, obs_by_name, now)
 
         # group triggers per account: state first, then one policy pass

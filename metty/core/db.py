@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -570,6 +571,13 @@ def _migrate_trading_columns(conn: sqlite3.Connection) -> None:
         ("accounts", "cooldown_until", "TEXT"),
         ("accounts", "peak_equity", "REAL"),
         ("accounts", "baseline_balance", "REAL"),
+        # ISSUE-010 phase 2 (2026-11-17): engine per-cycle equity snapshot.
+        # The kill switch reads equity/DD/connectivity from these columns
+        # instead of the MT5 bridge — the money-protection layer must not
+        # depend on the component it protects (supervisor bridge polling
+        # was disturbing the engines' single shared terminal handle).
+        ("accounts", "current_equity", "REAL"),
+        ("accounts", "equity_ts", "TEXT"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -793,6 +801,46 @@ def update_peak_equity(
             "UPDATE accounts SET peak_equity = ? "
             "WHERE name = ? AND (peak_equity IS NULL OR peak_equity < ?)",
             (equity, account_name, equity),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_equity_snapshot(
+    account_name: str,
+    equity: float,
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """Per-cycle equity snapshot written by the engine itself (ISSUE-010
+    phase 2, 2026-11-17): the current equity plus the UTC moment it was
+    observed, both in one UPDATE.
+
+    The kill switch reads equity / drawdown-from-peak / connectivity from
+    these columns instead of polling the MT5 bridge — the money-protection
+    layer must not depend on the component it protects (VPS 2026-11-17:
+    supervisor bridge polling disturbed the engines' single shared terminal
+    handle, "stream has been closed" ×28 while engines kept trading).
+
+    Pure additive write: no engine read path consumes this. The caller
+    stamps a fresh equity_ts ONLY when it has a real equity value — a
+    fresh timestamp over a stale equity would fabricate a healthy
+    heartbeat for the kill switch.
+
+    Returns True if the account row changed, False when the account is
+    not enrolled in this DB (caller decides how loud to be).
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE accounts SET current_equity = ?, equity_ts = ? "
+            "WHERE name = ?",
+            (
+                float(equity),
+                datetime.now(timezone.utc).isoformat(),
+                account_name,
+            ),
         )
         conn.commit()
         return cursor.rowcount > 0

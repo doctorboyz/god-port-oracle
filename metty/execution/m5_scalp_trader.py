@@ -45,6 +45,7 @@ from metty.core.db import (
     insert_live_trade,
     insert_rejected_signal,
     reconcile_closed_positions,
+    update_equity_snapshot,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -890,9 +891,43 @@ class M5ScalpTrader:
 
         return closed
 
+    def _write_equity_snapshot(self) -> None:
+        """ISSUE-010 phase 2 (2026-11-17): stamp current equity + UTC now
+        into the accounts row, every cycle — Real-A runs THIS engine, and
+        the kill switch's equity/heartbeat view of the REAL account is
+        this DB row (no more bridge polling: the supervisor's cycling
+        connections disturbed the single shared terminal handle).
+
+        Goes through _get_balance() so the cycle's own equity fetch later
+        in _run_once_connected hits the 60s cache — the bridge session
+        count per cycle stays what it was (review MEDIUM: a second cold
+        connect/initialize/shutdown session per cycle is the exact churn
+        pattern that disturbed the handle).
+
+        STALE VALUES MUST NEVER GET A FRESH STAMP: _get_balance falls
+        back to the DB balance when the bridge is down, but the cache is
+        set ONLY from real MT5 equity — so a warm (<60s) cache proves the
+        value is bridge-sourced. No warm cache → no stamp; the missing
+        stamp IS the connectivity alarm.
+
+        Additive contract: write-only, never raises into the cycle.
+        """
+        try:
+            self._get_balance()
+            if self._equity_cache > 0 and \
+                    (time.time() - self._equity_cache_time) < 60:
+                update_equity_snapshot(self.account, float(self._equity_cache),
+                                       self.db_path)
+        except Exception as e:
+            logger.debug("[M5Scalp:%s] equity snapshot write failed: %s",
+                         self.display_name, e)
+
     def run_once(self) -> dict:
         """Run a single M5 scalping cycle."""
         self._cycle_count += 1
+        # ISSUE-010 phase 2: equity heartbeat at the TOP of the cycle —
+        # before any early return, so every cycle proves the engine lives.
+        self._write_equity_snapshot()
         logger.info("[M5Scalp:%s] Cycle #%d starting", self.display_name, self._cycle_count)
         try:
             return self._run_once_connected()

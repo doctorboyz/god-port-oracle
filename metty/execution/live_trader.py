@@ -48,6 +48,7 @@ from metty.core.db import (
     insert_live_trade,
     insert_rejected_signal,
     reconcile_closed_positions,
+    update_equity_snapshot,
 )
 from shared.events import Event, EventBus, EventType
 from shared.logging_utils import log_trade, log_signal, log_position, log_circuit_break
@@ -1180,6 +1181,37 @@ class LiveTrader:
                 return self._paper_equity_from_db()
             return None
 
+    def _write_equity_snapshot(self) -> None:
+        """ISSUE-010 phase 2 (2026-11-17): stamp current equity + UTC now
+        into the accounts row, every cycle.
+
+        The kill switch reads this as its ONLY equity/heartbeat view of
+        this account (equity, drawdown-from-peak, connectivity = freshness
+        of equity_ts) — it no longer polls the bridge, whose single shared
+        terminal handle the supervisor's cycling connections were
+        disturbing ("stream has been closed" on all engines, VPS
+        2026-11-17). A skipped/held cycle still stamps: the heartbeat must
+        prove the ENGINE is alive, not that it traded.
+
+        Additive contract: write-only, never raises into the trading
+        cycle — a monitoring stamp may not break the money path. Paper
+        farms write the DB-reconstructed equity via _get_equity (dry_run),
+        so farm behavior changes by exactly this one row per cycle.
+        """
+        try:
+            equity = self._get_equity()
+            if equity is None or equity <= 0:
+                return  # no real value → no stamp (a stamp IS the heartbeat)
+            if not update_equity_snapshot(self.account, float(equity),
+                                          self.db_path):
+                logger.debug(
+                    "[%s] equity snapshot skipped — account not in DB",
+                    self.display_name,
+                )
+        except Exception as e:
+            logger.debug("[%s] equity snapshot write failed: %s",
+                         self.display_name, e)
+
     def _get_free_margin(self) -> float | None:
         """Get current account free margin from MT5 (accounts for used margin of open
         positions). Returns None if unavailable.
@@ -2255,6 +2287,11 @@ class LiveTrader:
         """
         init_db(self.db_path)
         self._cycle_count += 1
+        # ISSUE-010 phase 2: equity heartbeat BEFORE anything can
+        # short-circuit the cycle (no-data skips, holds, gates) — the kill
+        # switch's whole view of this account is this DB row, so it must
+        # be stamped on every cycle, alive or not trading.
+        self._write_equity_snapshot()
 
         # 1. Fetch candles
         candles = self._fetch_candles()
