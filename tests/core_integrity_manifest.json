@@ -105,7 +105,7 @@
   "metty/cli.py": "dabdf8d8931cb0d383dbf410a0388402d0d4b503d363994fdbe5db51a62bb4a7",
   "metty/config/settings.yaml": "33e34c415f0edfc036a4edc781543161ec994cc4fef915aeda9b5e613e566016",
   "metty/core/__init__.py": "bb38a2b1cc4b377bb11594b95121b382b091b92cb52c5bfb1b1f6a56426a8f80",
-  "metty/core/account_registry.py": "a744684e472593520c5286f2b04b93524a3544b8eea4d27414d797852b475370",
+  "metty/core/account_registry.py": "cba356040de53d50b91c1edd02cc4d026ed7b023416761f89bb2288d17132622",
   "metty/core/db.py": "c99599c15d82b975538d30ccacc3ce1b62c8fe8c4475e5700e3532bef4e77f05",
   "metty/core/models.py": "ecd560c9ab95e9e723980846b7b7889ace636dc6e2f8e2f96c510b72bd9b71ac",
   "metty/core/portfolio_gate.py": "eb0612436810fad3dabfb71bc50094241427c4c23218c7b5267e8d01010e6f3d",

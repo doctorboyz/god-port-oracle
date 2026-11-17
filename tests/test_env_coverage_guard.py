@@ -139,6 +139,19 @@ _ENV_READ_RE = re.compile(
 # member set in a live config source.
 ALLOWED_OPTIONAL: dict[str, str] = {
     "POSITION_SIZING_METHOD": "sizing method override; RiskConfig default used when unset",
+    # P22 champion (17/11 P0 repurpose): trailing activation/trail deliberately
+    # NOT set on any live service — engine defaults 0.20/0.10 are exactly what
+    # farm P22 / demo C ran with (see the oracle-engine-p1 compose comment).
+    # The old Real-A config was the last setter (0.40/0.20, 2026-07-12); its
+    # removal in the P0 repurpose made the family read-with-default only.
+    "TRAILING_ACTIVATION_PCT": "engine default 0.20 is the champion value (mirror P1-P3/demo C/farm)",
+    "TRAILING_TRAIL_PCT": "engine default 0.10 is the champion value (mirror P1-P3/demo C/farm)",
+    # m5-scalp is disabled on every live service (M5_SCALP_ENABLED=0, P22 =
+    # MR swing only). The scalp-path spread knob reads a sane default and the
+    # path never runs; swing spread is governed by SWING_MAX_SPREAD_* (set).
+    # The old Real-A config was the last setter (45, removed in the P0
+    # repurpose 17/11).
+    "M5_MAX_SPREAD": "scalp path disabled on every live service; swing spread uses SWING_MAX_SPREAD_*",
 }
 
 

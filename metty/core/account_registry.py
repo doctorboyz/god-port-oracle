@@ -31,6 +31,27 @@ _DEFAULT_ACCOUNT_LIMIT = 0.50    # 50%
 _DEFAULT_COOLDOWN_HOURS = 2
 
 
+def _display_label(name: str, account_type: str) -> str:
+    """Human-readable label with a per-account DISPLAY_NAME_<NAME> override.
+
+    P0 repurpose (2026-11-17, คุณหมอสั่งผ่าน Hermes): account A's label is
+    "P0" while its internal key stays "A" everywhere (registry, DB, kill
+    switch, KILL_DB_PATH_A). The override is env-driven so only the
+    deployment that sets DISPLAY_NAME_A sees the new label — other surfaces
+    (tests, farm) keep the derived Real-/Demo-/Cent- label.
+    """
+    override = os.environ.get(f"DISPLAY_NAME_{name}")
+    if override:
+        return override
+    if account_type == "cent_real":
+        prefix = "Cent"
+    elif account_type == "real":
+        prefix = "Real"
+    else:
+        prefix = "Demo"
+    return f"{prefix}-{name}"
+
+
 @dataclass(frozen=True)
 class AccountConfigInfo:
     """All configuration for a single trading account, derived from env vars.
@@ -44,9 +65,9 @@ class AccountConfigInfo:
 
     @property
     def display_name(self) -> str:
-        """Human-readable label: 'Real-A', 'Demo-B', etc."""
-        prefix = "Real" if self.account_type == "real" else "Demo"
-        return f"{prefix}-{self.name}"
+        """Human-readable label: 'Real-A', 'Cent-P1', or a DISPLAY_NAME_<NAME>
+        override ('P0' for account A, P0 repurpose 2026-11-17)."""
+        return _display_label(self.name, self.account_type)
     broker_login: str
     broker_password: str
     broker_server: str
@@ -116,15 +137,14 @@ def get_display_name(account: str) -> str:
 
     Reads ACCOUNT_TYPE_<NAME> env var, defaults to 'real' for A, 'demo' for others.
     Portfolio cent accounts set ACCOUNT_TYPE_Pn=cent_real when live.
+    A DISPLAY_NAME_<NAME> override wins (P0 repurpose 2026-11-17: A → 'P0'
+    — label only, the internal key stays 'A').
     """
-    account_type = os.environ.get(f"ACCOUNT_TYPE_{account.upper()}", "real" if account.upper() == "A" else "demo")
-    if account_type == "cent_real":
-        prefix = "Cent"
-    elif account_type == "real":
-        prefix = "Real"
-    else:
-        prefix = "Demo"
-    return f"{prefix}-{account.upper()}"
+    account = account.upper()
+    account_type = os.environ.get(
+        f"ACCOUNT_TYPE_{account}", "real" if account == "A" else "demo",
+    )
+    return _display_label(account, account_type)
 
 
 def get_account_configs(accounts: Optional[list[str]] = None) -> dict[str, AccountConfigInfo]:

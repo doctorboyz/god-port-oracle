@@ -231,8 +231,11 @@ class TestComposeRiskIntent:
         return merged
 
     def test_expected_accounts_covered(self, compose_risk):
+        # A joined the set in the P0 repurpose (17/11, คุณหมอสั่งผ่าน
+        # Hermes): account A now runs the P22 champion live with
+        # RISK_PER_TRADE_A=0.005 hard-coded — same intent as the ladder.
         expected = (
-            {"B", "C", "D", "P1", "P2", "P3"}
+            {"A", "B", "C", "D", "P1", "P2", "P3"}
             | {f"P{i}" for i in range(11, 25)}
             | {f"P{i}" for i in range(31, 36)}
         )

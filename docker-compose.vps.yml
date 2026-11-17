@@ -117,8 +117,23 @@ services:
       - mt5-config-q:/config
     restart: unless-stopped
 
-  # ═══ Oracle Engine for Real-A only — V4 model, production quality ═══
-  # B/C/D moved to oracle-engine-train (V12 mixed model)
+  # ═══ Account A → "P0": P22 champion on Exness Standard (USD) ═══════════
+  # Repurpose คุณหมอสั่งผ่าน Hermes 17/11: account A (Exness-MT5Real15,
+  # STANDARD USD, $100 deposited — bridge reports USD directly, production
+  # proof 15:02 UTC: balance=$100.00) runs the P22 champion, the SAME
+  # strategy as P1-P3 but with USD baselines (100 — NOT the USC-style
+  # 10000; wrong units here either freeze the account at boot or kill the
+  # 20% DD line, causal proof tests/test_p0_repurpose_causal.py).
+  #
+  # This replaces the 4-week-old Real-A config: ranging_hard_block=1
+  # (starves every P22/MR entry), m5-scalp enabled, ML veto on, and the
+  # pre-bugfix image. IRON OVERRIDE 17/11: this service MAY be recreated
+  # per the repurpose order — mt5a is STILL untouchable in every way.
+  #
+  # DRY_RUN=0 hard-coded (mirror P1-P3): a stale host DRY_RUN can win
+  # NEITHER arm NOR disarm. All strategy/safety knobs hard-coded — the
+  # host .env carries legacy values (ML_FILTER_ENABLED=1, RR_RATIO_*=3.0,
+  # RANGING_HARD_BLOCK=1 …) that interpolation would let win.
   oracle-engine:
     build:
       context: .
@@ -126,84 +141,84 @@ services:
     container_name: oracle-engine
     environment:
       - TRADING_PHASE=${TRADING_PHASE:-both}
-      - DRY_RUN=${DRY_RUN:-1}
+      - DRY_RUN=0
       - ACCOUNTS=A
       - DB_PATH=/app/data/oracle.db
       - COLLECT_INTERVAL=${COLLECT_INTERVAL:-300}
       - TRADE_INTERVAL=${TRADE_INTERVAL:-300}
-      - SCALP_ENABLED=${SCALP_ENABLED:-0}
-      - M5_SCALP_ENABLED=${M5_SCALP_ENABLED:-1}
-      - M5_SCALP_INTERVAL=${M5_SCALP_INTERVAL:-300}
-      - M5_SCALP_SPREAD_MAX=${M5_SCALP_SPREAD_MAX:-30}
-      - M5_SCALP_RISK_PER_TRADE=${M5_SCALP_RISK_PER_TRADE:-0.015}
-      - ML_FILTER_ENABLED=${ML_FILTER_ENABLED_A:-1}
-      - ML_LOSS_THRESHOLD=${ML_LOSS_THRESHOLD:-0.55}
-      - ML_MODEL_DIR_A=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
-      - ML_MODEL_DIR=${ML_MODEL_DIR_A:-/app/data/models/trade_outcome_v4}
-      - SWING_DISABLED_ACCOUNTS=${SWING_DISABLED_ACCOUNTS:-}
-      - MAX_POSITIONS_A=${MAX_POSITIONS_A:-5}
-      - EQUITY_PER_POSITION_A=${EQUITY_PER_POSITION_A:-200}
-      - MAX_POSITIONS_CAP_A=${MAX_POSITIONS_CAP_A:-5}
-      # Fix 1 (2026-07-09): min positions floor = 2 for Real-A so equity dip
-      # doesn't collapse max_positions to 1 and block all new entries.
-      # Formula: min(cap, max(min_positions, floor(equity/per_pos)))
-      - MIN_POSITIONS_A=${MIN_POSITIONS_A:-2}
-      # Fix 3 (2026-07-09): ranging hard-block per CLAUDE.md "Ranging = พัก".
-      # When regime=ranging and not learning_mode, generator returns HOLD.
-      # Real-A only — B/C/D (oracle-engine-train) leave unset to collect ML data.
-      - RANGING_HARD_BLOCK=${RANGING_HARD_BLOCK:-1}
+      # P22 = MR swing only (mirror P1-P3): scalp path off
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      # MR-only generator mode (mirror P1-P3)
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      # RANGING_HARD_BLOCK intentionally NOT set (MR enters in ranging)
+      - H4_USE_CLOSED_BAR_ONLY=1
+      # ML veto OFF — HARD-CODED (host .env legacy ML_FILTER_ENABLED=1)
+      - ML_FILTER_ENABLED=0
       - LEARNING_MODE=0
-      - ATR_MULTIPLIER_A=${ATR_MULTIPLIER_A:-2.0}
-      - RR_RATIO_A=${RR_RATIO_A:-2.5}
-      - MIN_CONFIDENCE_A=${MIN_CONFIDENCE_A:-0.45}
-      - BUY_MIN_CONFIDENCE_A=${BUY_MIN_CONFIDENCE_A:-0.45}
-      - M5_MAX_SPREAD_A=${M5_MAX_SPREAD_A:-45}
-      - PARTIAL_TP_ENABLED_A=${PARTIAL_TP_ENABLED_A:-0}
-      - TP1_RATIO_A=${TP1_RATIO_A:-0.5}
-      - RR_SCALE_IN_A=${RR_SCALE_IN_A:-2.5}
-      # Fix #1 (2026-07-12): widen trailing TP for Real-A — defaults 0.20/0.10
-      # choke winners before 2.5R TP (win:loss 0.82:1 vs design 2.5:1).
-      # arm 0.40% = trail arms after ~$16 MFE (was $8).
-      # trail 0.20% = exit on $8 pullback from peak (was $4) — survives normal noise.
-      # B/C/D keep defaults (0.20/0.10) — only Real-A widened for observation.
-      - TRAILING_ACTIVATION_PCT_A=${TRAILING_ACTIVATION_PCT_A:-0.40}
-      - TRAILING_TRAIL_PCT_A=${TRAILING_TRAIL_PCT_A:-0.20}
-      # Fix #2 (2026-07-12): H4 trend from CLOSED H4 bar only — resampler's
-      # last bin is the in-progress H4 bar; EMA10/50 on its close flipped
-      # 19+ times in 8h on Real-A (07-10) and green-lit 2 counter-trend
-      # SELLs that hit SL. =1 drops the incomplete bar; =0 keeps legacy.
-      - H4_USE_CLOSED_BAR_ONLY=${H4_USE_CLOSED_BAR_ONLY:-1}
-      # Fix #3 (2026-07-12): ATR multiplier 1.5 → 2.0 — SL was tightest of all
-      # accounts (B=2.0, C/D=2.5, forward-engine BEST=2.0). 1.5× on XAUUSD M5
-      # puts SL within normal noise range → stopped on pullbacks even when
-      # direction is right. 2.0 matches B + proven forward config; risk per
-      # trade preserved (position sizing lowers lots to keep $ risk constant).
-      - INITIAL_BALANCE_A=${INITIAL_BALANCE_A:-500}
-      - INITIAL_EQUITY_A=${INITIAL_EQUITY_A:-500}
-      - ACCOUNT_TYPE_A=${ACCOUNT_TYPE_A:-real}
-      # Kill switch (user-approved 2026-07-01): ขาดวัน > 5% / ขาดสัปดาห์ > 10% / MaxDD 20% from peak
-      - DRAWDOWN_DAILY_LIMIT_A=${DRAWDOWN_DAILY_LIMIT_A:-0.05}
-      - DRAWDOWN_WEEKLY_LIMIT_A=${DRAWDOWN_WEEKLY_LIMIT_A:-0.10}
-      - DRAWDOWN_ACCOUNT_LIMIT_A=${DRAWDOWN_ACCOUNT_LIMIT_A:-0.20}
-      - DRAWDOWN_COOLDOWN_HOURS_A=${DRAWDOWN_COOLDOWN_HOURS_A:-4}
-      # ISSUE C3: never allow LEARNING_MODE on Real-A — guard in live_trader __init__
-      - LEARNING_MODE=0
-      # TradeBlocker config (gap-filler gate, ISSUE C1)
-      - TRADE_BLOCKER_DAILY_LIMIT=${TRADE_BLOCKER_DAILY_LIMIT:-20}
-      - TRADE_BLOCKER_WEEKLY_LIMIT=${TRADE_BLOCKER_WEEKLY_LIMIT:-80}
-      - TRADE_BLOCKER_HARD_MAX_LOTS=${TRADE_BLOCKER_HARD_MAX_LOTS:-0.50}
-      - TRADE_BLOCKER_MARGIN_SAFETY=${TRADE_BLOCKER_MARGIN_SAFETY:-0.80}
-      # ═══ MT5 Bridge credentials (A only) ════════════════════════════════
+      # ── P22 champion knobs (mirror P1-P3) ──
+      - STRATEGY_ID_A=mr-bet-p22-P0
+      - ATR_MULTIPLIER_A=2.0
+      - RR_RATIO_A=1.20
+      - MIN_CONFIDENCE_A=0.55
+      - BUY_MIN_CONFIDENCE_A=0.55
+      - MR_BOLL_THRESHOLD_A=0.85
+      - TIME_STOP_BARS_A=12
+      - TRAILING_TP_ENABLED_A=1
+      # trailing activation/trail deliberately NOT set → engine defaults
+      # 0.20/0.10, exactly what P1-P3 / farm P22 / demo C ran with.
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_A=1440
+      - RISK_PER_TRADE_A=0.005
+      - PARTIAL_TP_ENABLED_A=0
+      - TP1_RATIO_A=0.5
+      - RR_SCALE_IN_A=2.5
+      # Hour gates open (mirror P1-P3: P22 won with full occupancy)
+      - ENTRY_HOURS_A=
+      - BLOCKED_HOURS_A=
+      - SWING_MAX_SPREAD_A=30
+      - MR_COST_MULT_A=3.0
+      - SL_CAP_A=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_A=1
+      - MAX_POSITIONS_CAP_A=1
+      - MIN_POSITIONS_A=1
+      # USD — inert in the swing path while cap=1 (min(1, max(1, floor(eq/
+      # epp))) == 1 for ANY equity — causal test), kept account-currency-
+      # correct for the day the cap is raised.
+      - EQUITY_PER_POSITION_A=100
+      # ── USD baselines (STANDARD account — the bridge reports USD!) ──
+      # INITIAL_EQUITY feeds the in-engine account-level DD line compared
+      # against bridge equity. A cent-style 10000 here reads $100 as −99%
+      # → frozen at boot. USD keeps the 20% line real (100 → blocks at 80).
+      - INITIAL_BALANCE_A=100
+      - INITIAL_EQUITY_A=100
+      - LEVERAGE_A=500
+      - ACCOUNT_TYPE_A=real
+      - SIGNAL_GROUP_A=portfolio
+      # Display label ONLY (P0 repurpose 17/11): logs/alerts show "P0",
+      # the internal key stays "A" (DB, kill switch, KILL_DB_PATH_A).
+      - DISPLAY_NAME_A=P0
+      # In-engine drawdown lines (champion mirror)
+      - DRAWDOWN_DAILY_LIMIT_A=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_A=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_A=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_A=4
+      # TradeBlocker — champion mirror + lot clamp 0.05 hard-coded
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      # ═══ MT5 Bridge credentials (A only — from VPS .env, never in repo) ═══
       - MT5_LOGIN_A=${MT5_LOGIN_A:-}
       - MT5_PASSWORD_A=${MT5_PASSWORD_A:-}
-      - MT5_SERVER_A=${MT5_SERVER_A:-Exness-MT5Trial17}
+      - MT5_SERVER_A=Exness-MT5Real15
       - MT5_BRIDGE_A_HOST=mt5a
       - MT5_BRIDGE_A_PORT=8001
       - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
       - TG_CHAT_ID=${TG_CHAT_ID:-}
       # 2026-09-20 (doctorboyz): ปิด broadcast โปง (adisorn bot spam) —
       # daily summary 00:00 UTC + bridge status ทุก 4h; trade alerts ยังส่งปกติ.
-      # Was applied directly on VPS without commit — committed 2026-09-21.
       - DAILY_SUMMARY_DISABLED=${DAILY_SUMMARY_DISABLED:-1}
       - BRIDGE_STATUS_DISABLED=${BRIDGE_STATUS_DISABLED:-1}
     volumes:
