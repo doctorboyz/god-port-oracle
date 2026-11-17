@@ -316,14 +316,27 @@ class HandleSafeBridge:
 
     # -- flatten --------------------------------------------------------
 
-    def flatten(self) -> list[dict]:
+    def flatten(self) -> Optional[list[dict]]:
         """Close every open position on this terminal.
 
         Mirrors the engine's own close path (metty/bridge/client.py
         close_position): opposite-deal order_send with the position ticket,
         FOK filling, no SL/TP. Returns one result dict per position.
+
+        Fail-loud contract (retro งาน 4 follow-up, 2026-11-17): positions()
+        returns None on bridge failure — flatten() must NOT treat that as
+        "nothing to close" (the old `if not positions:` silently returned
+        [] and callers reported a clean '0 closed, 0 failed' while real
+        positions could still be open). None = read-failed → flatten NOT
+        confirmed, the account is NOT declared flat; [] = the terminal
+        genuinely holds no positions (really flat).
         """
         positions = self.positions()
+        if positions is None:
+            logger.error("[KS] bridge %s:%s flatten ABORTED — positions "
+                         "unreadable; CANNOT confirm the account is flat "
+                         "(manual check required)", self.host, self.port)
+            return None
         if not positions:
             return []
         results: list[dict] = []
@@ -746,9 +759,18 @@ class KillSwitchSupervisor:
         actions: list[str] = []
         with HandleSafeBridge(target.bridge_host, target.bridge_port) as bridge:
             results = bridge.flatten()
-            closed = sum(1 for r in results if r.get("success"))
-            failed = len(results) - closed
-            actions.append(f"flatten: {closed} closed, {failed} failed")
+            if results is None:
+                # read-failed — NEVER report a clean flatten here: real
+                # positions may still be open behind the broken read
+                logger.error("[KS] %s flatten READ-FAILED — account NOT "
+                             "confirmed flat", target.name)
+                actions.append(
+                    "flatten: READ-FAILED — bridge cannot report positions; "
+                    "account NOT confirmed flat (manual check required)")
+            else:
+                closed = sum(1 for r in results if r.get("success"))
+                failed = len(results) - closed
+                actions.append(f"flatten: {closed} closed, {failed} failed")
         if target.stoppable:
             stop = self.docker.stop(target.engine_container)
             actions.append(
@@ -772,6 +794,14 @@ class KillSwitchSupervisor:
             with HandleSafeBridge(obs.target.bridge_host,
                                   obs.target.bridge_port) as bridge:
                 results = bridge.flatten()
+                if results is None:
+                    # read-failed — cannot verify the account is flat; say
+                    # so instead of silently passing (the block stays, the
+                    # VERIFICATION failed — the operator must look)
+                    logger.warning("[KS] %s BLOCK-enforcement flatten "
+                                   "read-failed — CANNOT verify the account "
+                                   "is flat (manual check required)", name)
+                    continue
                 closed = sum(1 for r in results if r.get("success"))
             if closed:
                 logger.info("[KS] %s BLOCK-enforcement flattened %d new "

@@ -149,28 +149,29 @@ class M5ScalpTrader:
             "C": float(os.environ.get("ATR_MULTIPLIER_C", os.environ.get("ATR_MULTIPLIER", "1.5"))),
             "D": float(os.environ.get("ATR_MULTIPLIER_D", os.environ.get("ATR_MULTIPLIER", "1.5"))),
         }
-        per_account_rr = {
-            "A": float(os.environ.get("RR_RATIO_A", os.environ.get("RR_RATIO", "2.0"))),
-            "B": float(os.environ.get("RR_RATIO_B", os.environ.get("RR_RATIO", "2.0"))),
-            "C": float(os.environ.get("RR_RATIO_C", os.environ.get("RR_RATIO", "2.0"))),
-            "D": float(os.environ.get("RR_RATIO_D", os.environ.get("RR_RATIO", "2.0"))),
-        }
-        per_account_conf = {
-            "A": float(os.environ.get("MIN_CONFIDENCE_A", os.environ.get("MIN_CONFIDENCE", "0.50"))),
-            "B": float(os.environ.get("MIN_CONFIDENCE_B", os.environ.get("MIN_CONFIDENCE", "0.50"))),
-            "C": float(os.environ.get("MIN_CONFIDENCE_C", os.environ.get("MIN_CONFIDENCE", "0.50"))),
-            "D": float(os.environ.get("MIN_CONFIDENCE_D", os.environ.get("MIN_CONFIDENCE", "0.50"))),
-        }
-        per_account_spread = {
-            "A": float(os.environ.get("M5_MAX_SPREAD_A", os.environ.get("M5_MAX_SPREAD", "40"))),
-            "B": float(os.environ.get("M5_MAX_SPREAD_B", os.environ.get("M5_MAX_SPREAD", "30"))),
-            "C": float(os.environ.get("M5_MAX_SPREAD_C", os.environ.get("M5_MAX_SPREAD", "30"))),
-            "D": float(os.environ.get("M5_MAX_SPREAD_D", os.environ.get("M5_MAX_SPREAD", "30"))),
-        }
-        if not risk_config:
-            self.risk.risk_reward_ratio = per_account_rr.get(self.account, self.risk.risk_reward_ratio)
-            self.risk.min_confidence = per_account_conf.get(self.account, self.risk.min_confidence)
-            self.risk.max_spread_points = per_account_spread.get(self.account, self.risk.max_spread_points)
+        # mr-bet hardening (2026-11-17, retro งาน 4 follow-up): RR_RATIO_* /
+        # MIN_CONFIDENCE_* / M5_MAX_SPREAD_* env must ALWAYS win — the runner
+        # (scripts/oracle_runner.py run_m5_scalp_trader) ALWAYS passes a
+        # risk_config (M5_SCALP_RISK_PER_TRADE / M5_SCALP_SPREAD_MAX), so the
+        # old `if not risk_config:` branch never fired on the live path and
+        # the per-account env was silently skipped — same bug class as
+        # live_trader RR/conf (2026-09-23) and risk_per_trade (2026-11-17).
+        # Env set → env wins (per-account key, then global). Env unset →
+        # risk_config value stands (legacy callers unchanged).
+        # Real-A note: compose sets RR_RATIO_A=2.5 / MIN_CONFIDENCE_A=0.45 /
+        # M5_MAX_SPREAD_A=45 — after this fix the live m5-scalp honors them
+        # (previously M5ScalpRiskConfig defaults 2.0/0.50 and the runner's
+        # M5_SCALP_SPREAD_MAX=30 silently applied instead).
+        # See tests/test_m5_scalp_env_wins_causal.py.
+        _env_rr = os.environ.get(f"RR_RATIO_{self.account}") or os.environ.get("RR_RATIO")
+        if _env_rr is not None:
+            self.risk.risk_reward_ratio = float(_env_rr)
+        _env_conf = os.environ.get(f"MIN_CONFIDENCE_{self.account}") or os.environ.get("MIN_CONFIDENCE")
+        if _env_conf is not None:
+            self.risk.min_confidence = float(_env_conf)
+        _env_spread = os.environ.get(f"M5_MAX_SPREAD_{self.account}") or os.environ.get("M5_MAX_SPREAD")
+        if _env_spread is not None:
+            self.risk.max_spread_points = float(_env_spread)
         # Fix #3 bugfix (2026-07-13): ATR_MULTIPLIER_A env must ALWAYS win, even
         # when a risk_config is passed (registry default atr_multiplier=2.5).
         # Previously inside `if not risk_config` → env skipped → trades used 2.5.

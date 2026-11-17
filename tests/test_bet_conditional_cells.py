@@ -18,6 +18,7 @@ Locks the iron constraints of the task (คุณหมอ 13/11):
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -93,29 +94,50 @@ def _anchored_base(base: pd.DataFrame, want_state: str,
     """Extend the base so the tail cannot cross an H4 bucket boundary.
 
     The gate is FRAME-RELATIVE: a bucket becomes visible once its close time
-    is ≤ the last M5 bar's close. A decline tail that spills across a 4-hour
-    boundary therefore CLOSES the decline bucket and the gate reads DOWN
-    instead of the base's state — the helper used to depend on wall clock
-    (red within ~105 min of every boundary; proven on a clean HEAD worktree
-    2026-11-17 — red at 02:40 UTC, green at 02:05 UTC, same tree). When the
-    natural tail would cross, extend the base IN ITS OWN PATTERN (flat stays
-    flat, rising keeps rising by rising_history's per-bucket step) to end
-    one bar before the next boundary, then start the tail there: every
-    bucket visible to the gate is then pure base. The stale-feed guard
-    still passes — it compares the frame's LAST bar against now, and the
-    frame already extends past now by design.
+    is ≤ the last M5 bar's close. A tail that spills across a 4-hour
+    boundary therefore CLOSES its own bucket and the gate reads the tail
+    instead of the base — the helper used to depend on wall clock (red
+    within ~105 min of every boundary; proven on a clean HEAD worktree
+    2026-11-17 — red at 02:40 UTC, green at 02:05 UTC, same tree). The fix:
+    look at the H4 bucket CONTAINING the tail's first bar; if that bucket
+    closes before the tail ends, extend the base IN ITS OWN PATTERN (flat
+    stays flat, rising keeps rising by rising_history's per-bucket step)
+    so the tail starts ON/AFTER that bucket's end — every bucket visible
+    to the gate is then pure base, and the tail lives inside one forming
+    bucket. The stale-feed guard still passes — it compares the frame's
+    LAST bar against now, and the frame already extends past now by design.
+
+    Grid-safety (2026-11-17, cross-context review catch): the frame's bar
+    timestamps carry `_now()`'s seconds (pd.date_range(end=...) does NOT
+    snap to the 5-min grid — verified empirically), while bucket ends are
+    grid-aligned. So bucket_end - tail_first_open is usually NOT a
+    multiple of 5 min and a floor division loses a bar: the tail's first
+    bar then lands inside the closing bucket and — H4 close being the LAST
+    member bar's close — a single leaked bar flips the gate (proven: spike
+    scenario read UP at 36 of 50 sampled minutes, sec=0, and at every
+    off-grid second; RSI/Stoch family tails share the helper). extend_bars
+    is therefore CEIL, floored at 1 (0 bars → make_m5([]) → IndexError,
+    proven at minutes ≥ 235-236 of the bucket), and the bucket end is the
+    CONTAINING bucket's end — an exact on-grid tail start (08:00:00)
+    belongs to the bucket starting there, not the one ending there.
     """
     tail_bars = _tail_bars_guard(tail_bars)
     tail_first_open = base.index[-1] + pd.Timedelta(minutes=5)
-    # first boundary strictly after the tail's first open (4h grid ⊇ 5min grid)
-    next_boundary = (tail_first_open + pd.Timedelta(minutes=1)).ceil("4h")
+    # END of the H4 bucket CONTAINING the tail's first bar. On-grid exact
+    # hits (e.g. 08:00:00) belong to the bucket STARTING there (closed-left
+    # bins), so bump an exact match to the following boundary.
+    bucket_end = tail_first_open.ceil("4h")
+    if bucket_end == tail_first_open:
+        bucket_end += pd.Timedelta(hours=4)
     last_tail_close = tail_first_open + pd.Timedelta(minutes=5 * tail_bars)
-    if next_boundary > last_tail_close:
-        return base  # natural anchor already fits inside the forming bucket
-    extend_bars = int(
-        (next_boundary - pd.Timedelta(minutes=5) - tail_first_open)
-        .total_seconds() // 300
-    ) + 1
+    if bucket_end > last_tail_close:
+        return base  # the whole tail lives inside that still-forming bucket
+    # extend so the tail's first open lands ON/AFTER bucket_end:
+    #   tail_first_open + 5min*extend >= bucket_end  →  ceil, never 0
+    #   (ceil, because the off-grid seconds make the delta a non-multiple
+    #    of 5 min — floor drops a bar back into the closing bucket)
+    extend_bars = max(1, math.ceil(
+        (bucket_end - tail_first_open).total_seconds() / 300))
     last_close = float(base["close"].iloc[-1])
     if want_state == STATE_UP:
         # rising_history: +step per 48-bar bucket → per-bar continuation
@@ -265,10 +287,19 @@ class TestGateCausality:
     def test_forming_bucket_is_invisible(self):
         """Causal lock: the H4 bucket still forming at the signal moment
         cannot move the gate — 10 steep bars inside a new bucket on top of
-        a flat history still read FLAT (closed buckets only)."""
-        df = flat_history(n_buckets=54)
-        spike = [4000.0 + 30.0 * (k + 1) for k in range(10)]  # forming, steep
-        frame = pd.concat([df, make_m5(spike, start=df.index[-1] + pd.Timedelta(minutes=5))])
+        a flat history still read FLAT (closed buckets only).
+
+        Bucket-aware anchor (2026-11-17, คุณหมอผ่าน Hermes): the spike used
+        to be appended straight at `_now()`, so whenever the run happened
+        within the 10-bar span (~50 min) of an H4 boundary the spike CLOSED
+        its own bucket and the gate read UP (proven red at minute 195 of
+        the bucket on a clean tree — fail window = minute ≥ 190). The base
+        is extended flat to the next boundary first (see _anchored_base)
+        so the spike always lands inside the forming bucket."""
+        base = _anchored_base(flat_history(n_buckets=54), STATE_FLAT, 10)
+        last_close = float(base["close"].iloc[-1])
+        spike = [last_close + 30.0 * (k + 1) for k in range(10)]  # forming, steep
+        frame = pd.concat([base, make_m5(spike, start=base.index[-1] + pd.Timedelta(minutes=5))])
         assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_FLAT
 
     def test_bucket_closing_exactly_now_becomes_visible(self):
@@ -400,19 +431,24 @@ class TestTailAnchorBucketAware:
         specs = {s.cell_id: s for s in cells.load_bet_cells()}
         return specs[cell_id], store
 
-    def _fake_now(self, minute_into_bucket: int) -> pd.Timestamp:
+    def _fake_now(self, minute_into_bucket: int,
+                  sec: int = 0) -> pd.Timestamp:
         return pd.Timestamp("2026-11-17 04:00") + pd.Timedelta(
-            minutes=minute_into_bucket)
+            minutes=minute_into_bucket, seconds=sec)
 
-    @pytest.mark.parametrize("minute", [10, 200])
+    @pytest.mark.parametrize("minute,sec", [
+        (10, 0), (200, 0),          # the historical green/red pair
+        (200, 27), (193, 51),       # off-grid seconds (cross-context review
+    ])                              # catch 2026-11-17: floor lost a bar)
     def test_flat_gate_opens_bet_at_any_clock(self, monkeypatch, tmp_path,
-                                              minute):
-        fake_now = self._fake_now(minute)
+                                              minute, sec):
+        fake_now = self._fake_now(minute, sec)
         monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
         spec, _ = self._cell("BET-SF")
         frame, pol = frame_with_event_at_last_bar(spec.family, STATE_FLAT)
         assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_FLAT, (
-            f"minute {minute}: the gate must read the base's FLAT, not the tail"
+            f"minute {minute}:{sec:02d}: the gate must read the base's FLAT, "
+            "not the tail"
         )
         assert pol == "BUY"
         conn = store.connect(tmp_path / "bet.db")
@@ -421,18 +457,59 @@ class TestTailAnchorBucketAware:
         row = store.get_open_bet(conn, "BET-SF")
         conn.close()
         assert row is not None, (
-            f"wall clock (minute {minute} of the H4 bucket) changed whether "
-            "the bet opened — the tail anchor is not bucket-aware"
+            f"wall clock (minute {minute}:{sec:02d} of the H4 bucket) changed "
+            "whether the bet opened — the tail anchor is not bucket-aware"
         )
 
-    @pytest.mark.parametrize("minute", [10, 200])
-    def test_up_gate_state_at_any_clock(self, monkeypatch, minute):
-        fake_now = self._fake_now(minute)
+    @pytest.mark.parametrize("minute,sec", [
+        (10, 0), (200, 0), (200, 27), (193, 51),
+    ])
+    def test_up_gate_state_at_any_clock(self, monkeypatch, minute, sec):
+        fake_now = self._fake_now(minute, sec)
         monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
         spec, _ = self._cell("BET-RF")
         frame, _ = frame_with_event_at_last_bar(spec.family, STATE_UP)
         assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_UP, (
-            f"minute {minute}: UP base must read UP regardless of wall clock"
+            f"minute {minute}:{sec:02d}: UP base must read UP regardless of "
+            "wall clock"
+        )
+
+    # The forming-bucket scenario has a 10-bar spike tail (50 min). Its
+    # un-anchored fail window is minute ≥ 190; on the FIRST anchored version
+    # (floor instead of ceil) it stayed red at 36 of 50 sampled minutes
+    # (sec=0) and at EVERY off-grid second, because pd.date_range(end=...)
+    # does not snap the frame to the 5-min grid — so the parametrization
+    # pins minutes AND seconds, including the previously-red ones.
+    _FORMING_POINTS = [
+        (0, 0), (60, 0), (120, 0), (185, 0), (189, 0), (190, 0),
+        (191, 0), (193, 0), (195, 0), (197, 0), (200, 0), (210, 0),
+        (221, 0), (233, 0), (235, 0), (236, 0), (238, 0), (239, 0),
+        (190, 27), (195, 27), (200, 51), (221, 13), (235, 27), (239, 59),
+    ]
+
+    @pytest.mark.parametrize("minute,sec", _FORMING_POINTS)
+    def test_forming_bucket_invisible_at_any_clock(self, monkeypatch, minute, sec):
+        """2026-11-17 flake #2 (คุณหมอผ่าน Hermes 17/11): the anchor fix
+        for the family tails (above) left this scenario un-anchored —
+        Hermes saw test_forming_bucket_is_invisible fail at 03:14 UTC on
+        BOTH f0a640d and a clean bb5be64 worktree (46 min before the 04:00
+        boundary). RED proof on the old construction: gate read UP at
+        every minute ≥ 190. The anchored construction must read FLAT at
+        EVERY offset of the 4-hour cycle, grid-aligned seconds or not —
+        no wall-clock luck (the first ceil-fix review caught that the
+        sampled minutes happened to sit exactly on the floor==ceil grid).
+        """
+        fake_now = self._fake_now(minute, sec)
+        monkeypatch.setattr(sys.modules[__name__], "_now", lambda: fake_now)
+        base = _anchored_base(flat_history(n_buckets=54), STATE_FLAT, 10)
+        last_close = float(base["close"].iloc[-1])
+        spike = [last_close + 30.0 * (k + 1) for k in range(10)]
+        frame = pd.concat([base, make_m5(
+            spike, start=base.index[-1] + pd.Timedelta(minutes=5))])
+        assert gates.gate_state_on_last_bar(frame, "h4_ema") == STATE_FLAT, (
+            f"minute {minute}:{sec:02d}: the 10-bar spike must stay inside "
+            "the forming bucket at every wall-clock offset (fail window of "
+            "the un-anchored construction was minute >= 190)"
         )
 
 

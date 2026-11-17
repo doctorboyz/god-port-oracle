@@ -877,3 +877,137 @@ class TestCli:
             lambda self, now=None: [],
         )
         assert ks.main(argv) == 0
+
+
+# ─── Flatten fail-loud (retro งาน 4 follow-up, คุณหมอผ่าน Hermes 17/11) ───
+
+
+class DeadRoot(FakeRoot):
+    """Bridge-side failure: positions_get raises — the read path is broken,
+    but account_info still answers (transient/partial bridge failures are
+    exactly how this looks in production)."""
+
+    def positions_get(self, symbol=None, ticket=None):
+        raise RuntimeError("bridge read failed")
+
+
+class TestFlattenFailLoud:
+    """positions() returns None on bridge failure, [] when really flat.
+    flatten()'s old `if not positions:` treated BOTH as "nothing to close"
+    and returned [] — so a kill that fired mid-bridge-failure reported
+    'flatten: 0 closed, 0 failed' while real positions may still be open:
+    the supervisor BELIEVED the account flat without ever reading it.
+    None must be fail-loud (read-failed, NOT confirmed flat); only [] is
+    allowed to mean 'already flat'."""
+
+    def test_flatten_returns_none_when_positions_unreadable(self, monkeypatch):
+        root = DeadRoot(equity=800.0, mid=4000.0, positions=[
+            {"ticket": 5, "symbol": "XAUUSD", "volume": 0.01, "type": 0},
+        ])
+        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
+        with HandleSafeBridge("mt5b", 8001) as bridge:
+            assert bridge.positions() is None      # read-failed contract
+            results = bridge.flatten()
+        assert results is None, (
+            "bridge read-failure must NOT be flattened into a fake "
+            f"'all closed' result (got {results!r})"
+        )
+        assert root.order_calls == []  # nothing was closed — and none claimed
+
+    def test_flatten_empty_positions_still_returns_empty_list(self, monkeypatch):
+        """Shape guard against over-blocking: no positions reported AND the
+        read succeeded → [] really is 'already flat', not a failure."""
+        root = FakeRoot(equity=800.0, mid=4000.0, positions=[])
+        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
+        with HandleSafeBridge("mt5b", 8001) as bridge:
+            assert bridge.positions() == []
+            results = bridge.flatten()
+        assert results == []
+
+    def test_supervisor_reports_read_failed_not_silent_flat(
+            self, monkeypatch, tmp_path):
+        """Armed kill fires while the bridge cannot report positions → the
+        action/alert must say READ-FAILED (manual check required), never
+        the old silent '0 closed, 0 failed'."""
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        state = seeded_state(
+            tmp_path, "B",
+            peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
+        )
+        root = DeadRoot(equity=800.0, mid=4000.0)  # daily-loss fires
+        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
+        install_tcp_probe(monkeypatch)
+        sent = install_tg(monkeypatch)
+        docker = FakeDocker()
+
+        sup = KillSwitchSupervisor(config, state, docker=docker)
+        sup.cycle(now=datetime(2026, 1, 1, 12, tzinfo=timezone.utc))
+
+        joined = "\n".join(sent)
+        assert "READ-FAILED" in joined, (
+            "the alert must carry the read-failure, not a flat claim"
+        )
+        assert "0 closed" not in joined, (
+            "a bridge read-failure must never be reported as a clean "
+            "'0 closed, 0 failed' flatten"
+        )
+        assert "flat" in joined.lower()
+        # stopping the engine container is independent of the read — it
+        # must still happen (the engine is the position SOURCE)
+        assert docker.stops == ["oracle-engine-train"]
+
+    def test_real_group_read_failed_still_says_manual_intervention(
+            self, monkeypatch, tmp_path):
+        """REAL group: flatten read-failed → the URGENT alert must demand
+        MANUAL intervention (the block is enforced, but 'is it flat?' is
+        UNKNOWN — the operator must look at the terminal)."""
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        state = seeded_state(
+            tmp_path, "A",
+            peak_equity=1000.0, day={"date": "2026-01-01", "start_equity": 1000.0},
+        )
+        root = DeadRoot(equity=800.0, mid=4000.0)
+        install_bridge_mock(monkeypatch, {("mt5a", 8001): root})
+        install_tcp_probe(monkeypatch)
+        sent = install_tg(monkeypatch)
+        docker = FakeDocker()
+
+        KillSwitchSupervisor(config, state, docker=docker).cycle(
+            now=datetime(2026, 1, 1, 12, tzinfo=timezone.utc))
+
+        joined = "\n".join(sent)
+        assert "URGENT" in joined                    # real group stays urgent
+        assert "READ-FAILED" in joined
+        assert "manual" in joined.lower()           # demands human eyes
+        assert docker.stops == []                   # iron rule: never stopped
+        assert root.order_calls == []               # nothing was claimed closed
+
+    def test_blocked_enforcement_read_failed_logs_not_claims_flat(
+            self, monkeypatch, tmp_path, caplog):
+        """BLOCK-enforcement on a read-failed bridge: no 'flattened' claim,
+        a warning that verification failed — silence here would re-create
+        the same 'believed flat' failure on every later cycle."""
+        import logging
+
+        config = make_config(monkeypatch, tmp_path, KILL_SWITCH_DRY_RUN="0")
+        state = seeded_state(tmp_path, "B", peak_equity=1000.0,
+                            day={"date": "2026-01-01", "start_equity": 1000.0})
+        state.record_trigger("B", "daily_loss", "killed earlier", {})
+        state.save()
+        root = DeadRoot(equity=1000.0, mid=4000.0)  # no NEW trigger fires
+        install_bridge_mock(monkeypatch, {("mt5b", 8001): root})
+        install_tcp_probe(monkeypatch)
+        install_tg(monkeypatch)
+        docker = FakeDocker()
+
+        with caplog.at_level(logging.WARNING, logger="scripts.kill_switch"):
+            KillSwitchSupervisor(config, state, docker=docker).cycle(
+                now=datetime(2026, 1, 1, 12, tzinfo=timezone.utc))
+
+        joined = caplog.text
+        assert "read-failed" in joined.lower(), (
+            "enforcement on a read-failed bridge must log the failed "
+            "verification, not pass silently"
+        )
+        assert "flattened" not in joined.lower()
+        assert root.order_calls == []
