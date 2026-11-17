@@ -89,18 +89,37 @@ class TestKillSwitchService:
         assert "kill-switch-state:/ks/state" in vols
         assert "/var/run/docker.sock:/var/run/docker.sock" in vols
 
-    def test_engine_dbs_mounted_read_only(self):
-        """The supervisor must be physically unable to write engine DBs —
-        :ro at the mount level, mode=ro at the sqlite level (belt+braces)."""
+    def test_engine_dbs_mounted_without_ro(self):
+        """Engine DB mounts must NOT be :ro — production lesson 2026-11-16:
+        the engine DBs run in WAL mode and SQLite must create/lock the -shm
+        sidecar even for mode=ro connections, so a physically read-only
+        mount fails every open with CANTOPEN ("unable to open database
+        file") and the order-rate trigger goes blind on all accounts.
+        Data safety lives at the sqlite layer: the supervisor opens these
+        with mode=ro, so this lock is belt-only (braces moved, not removed)."""
         svc = _compose()["services"]["kill-switch"]
         vols = svc["volumes"]
-        assert "oracle-data:/ksdata/a:ro" in vols
-        assert "oracle-train-data:/ksdata/train:ro" in vols
-        assert "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/ksdata/p1:ro" in vols
-        assert "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/ksdata/p2:ro" in vols
-        assert "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/ksdata/p3:ro" in vols
-        assert not [v for v in vols if v.startswith(("oracle-data:", "oracle-train-data:"))
-                    and not v.endswith(":ro")]
+        expected = [
+            "oracle-data:/ksdata/a",
+            "oracle-train-data:/ksdata/train",
+            "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/ksdata/p1",
+            "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/ksdata/p2",
+            "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/ksdata/p3",
+        ]
+        for v in expected:
+            assert v in vols, f"missing engine DB mount: {v}"
+        db_mounts = [
+            v for v in vols
+            if v.startswith(("oracle-data:", "oracle-train-data:",
+                             "${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p"))
+        ]
+        assert len(db_mounts) == 5
+        for v in db_mounts:
+            assert not v.endswith(":ro"), (
+                f"engine DB mount {v!r} is :ro — WAL needs a writable -shm "
+                "sidecar even for mode=ro reads (CANTOPEN on the VPS, "
+                "2026-11-16)"
+            )
 
     def test_per_account_wiring(self):
         env = _svc_env(_compose()["services"], "kill-switch")

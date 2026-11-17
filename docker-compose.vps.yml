@@ -834,7 +834,7 @@ services:
       - KILL_ORDER_RATE_PER_HOUR=${KILL_ORDER_RATE_PER_HOUR:-20}
       - KILL_PRICE_DEV_PCT=${KILL_PRICE_DEV_PCT:-1.0}
       - KILL_CONNECTIVITY_MINUTES=${KILL_CONNECTIVITY_MINUTES:-10}
-      # ── per-account wiring: engine DB (read-only mount below) ───────
+      # ── per-account wiring: engine DB (writable mount, mode=ro reads)
       # B/C/D share oracle_train.db inside oracle-engine-train's volume;
       # the supervisor distinguishes them via the accounts table.
       - KILL_DB_PATH_A=/ksdata/a/oracle.db
@@ -874,13 +874,17 @@ services:
     volumes:
       # kill state survives restarts (trigger dedup across boots)
       - kill-switch-state:/ks/state
-      # engine DBs, READ-ONLY: WAL readers never block the engine writer,
-      # and the supervisor physically cannot corrupt engine data
-      - oracle-data:/ksdata/a:ro
-      - oracle-train-data:/ksdata/train:ro
-      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/ksdata/p1:ro
-      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/ksdata/p2:ro
-      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/ksdata/p3:ro
+      # engine DBs, WRITABLE mount (NOT :ro): engine DBs run in WAL mode and
+      # SQLite must create/lock the -shm sidecar even on mode=ro reads —
+      # a physically read-only mount made every read CANTOPEN on the VPS
+      # (production 2026-11-16, order-rate blind on all 7 accounts).
+      # Safety stays at the sqlite layer: the supervisor opens these
+      # mode=ro (read-only connection), so engine data stays untouchable.
+      - oracle-data:/ksdata/a
+      - oracle-train-data:/ksdata/train
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p1:/ksdata/p1
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p2:/ksdata/p2
+      - ${PORTFOLIO_DATA_DIR:-/opt/god-port/data}/p3:/ksdata/p3
       # docker stop for demo/cent engines (Docker Engine API over the
       # socket — the image has no docker CLI and the Dockerfile is
       # untouchable). SECURITY NOTE: docker.sock is root-equivalent on the
