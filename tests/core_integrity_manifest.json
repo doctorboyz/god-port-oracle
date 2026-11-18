@@ -94,7 +94,7 @@
   "broky/signals/registry.py": "87790c7a2adade89f47503bb103e12efaf47b5203c61176d55135d51bde13a24",
   "broky/signals/scaling.py": "3c5ea7d8828deee242a6e3645d51b99d1dd079f5d10f45432da1cdd8e1d3d2d3",
   "broky/signals/validator.py": "2652393164bbebb3e247fbbab058177926c9062c5d4d655b56cc6fce7e034aca",
-  "docker-compose.paper-farm.yml": "69c99ff2527622f4c0234f32476bc89d1be650b7b46f8583b3ed0c0aff670e62",
+  "docker-compose.paper-farm.yml": "a72ad380af267cfed55ff146be8096d5f81e6e6c09447cf0bf2d22edabf59f3c",
   "docker/mt5/Dockerfile": "36d5396c1ae7c203286ef73e91041d2d003389e780668712ca4ed27ef4324d92",
   "docker/mt5/entrypoint.sh": "421700c13e0cc4ca475e78cd5a5b4072fffb5fc48fbe0b4b4cfb3c03bb06b032",
   "docker/mt5/mt5_bridge_server.py": "29938f55c109ba7770039422e6e4a999e5da7ae904ead4aeae7173f3a2cbbb3f",

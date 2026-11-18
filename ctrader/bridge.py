@@ -112,6 +112,11 @@ class CTraderBridge:
         self._receive_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._last_sent: float = 0.0
+        # Last error that made connect() return False (auth failures carry
+        # the API errorCode, e.g. CH_ACCESS_TOKEN_EXPIRED) — read-only
+        # metadata so callers can fail LOUD with the real reason instead of
+        # retrying a dead token blind. Additive: never set on success.
+        self.last_connect_error: Optional[BaseException] = None
 
         # clientMsgId -> Future[ApiMessage] for req/res messages
         self._pending: dict[str, asyncio.Future] = {}
@@ -139,6 +144,7 @@ class CTraderBridge:
         """Connect, authorize (app then account), resolve symbols, subscribe."""
         if self._connected:
             return True
+        self.last_connect_error = None  # fresh attempt — stale errors must not linger
         if not self.config.is_configured:
             logger.warning(
                 "CTrader bridge disabled for %s — missing credentials (env-only pattern)",
@@ -160,6 +166,7 @@ class CTraderBridge:
             await self.subscribe_spots(self.config.symbol)
         except Exception as exc:  # noqa: BLE001 — one failed step fails the connect
             logger.error("cTrader connect aborted for %s: %s", self.config.name, exc)
+            self.last_connect_error = exc
             await self.disconnect()
             return False
 

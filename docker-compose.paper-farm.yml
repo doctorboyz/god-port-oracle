@@ -7,9 +7,21 @@ services:
       dockerfile: Dockerfile
     container_name: paper-fetcher
     environment:
-    - FEED_SOURCE=bridge
-    - PAPER_BRIDGE_HOST=vpsdeluna
-    - PAPER_BRIDGE_PORT=5012
+    # IC Markets cTrader era (2026-11-18): the Exness VPS bridges/terminals
+    # are gone (17-18/11) — bridge mode has nothing to talk to. Runtime
+    # credentials interpolate from the HOST .env at the repo root on the
+    # Mac mini (NOT the image .env — the command strips that one). Missing
+    # token = fetcher fails loud, never a yfinance fallback; the engines'
+    # stale guard blocks trading meanwhile.
+    - FEED_SOURCE=ctrader
+    - CTRADER_CLIENT_ID=${CTRADER_CLIENT_ID:-}
+    - CTRADER_CLIENT_SECRET=${CTRADER_CLIENT_SECRET:-}
+    - CTRADER_ACCESS_TOKEN=${CTRADER_ACCESS_TOKEN:-}
+    - CTRADER_ACCOUNT_ID=${CTRADER_ACCOUNT_ID:-0}
+    # Demo-first is mandatory on first real connection (ctrader/README.md)
+    - CTRADER_HOST_TYPE=${CTRADER_HOST_TYPE:-demo}
+    - CTRADER_NAME=${CTRADER_NAME:-ctrader-paper}
+    - CTRADER_SYMBOL=${CTRADER_SYMBOL:-XAUUSD}
     command: sh -c "rm -f /app/.env && exec python3 scripts/paper_feed_fetcher.py
       --feed-dir /app/feed --interval 60"
     volumes:

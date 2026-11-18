@@ -1,13 +1,16 @@
 # ctrader/ — cTrader Open API adapter (Phase 3, additive)
 
 บริดจ์ cTrader ที่มีพื้นผิวเหมือน `MT5Bridge` — เพื่อให้อนาคตสลับ broker
-ได้โดยไม่แตะ engine core สถานะปัจจุบัน: **โค้ด + tests ครบ, ยังไม่เคยต่อ
-network จริง, บช. real 6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
+ได้โดยไม่แตะ engine core สถานะปัจจุบัน: **โค้ด + tests ครบ, paper-feed
+wired (FEED_SOURCE=ctrader, 18/11), ยังไม่เคยต่อ network จริง, บช. real
+6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
 
 - Interface parity: `tests/test_ctrader_contract.py` (สะท้อน signature จริง
   ของ `metty/bridge/client.py` — read-only)
 - Unit/lifecycle tests: `tests/test_ctrader_bridge.py` (mock transport ล้วน)
 - Wire protocol: `tests/test_ctrader_protocol.py`
+- Feed wiring tests: `tests/test_paper_feed_ctrader_causal.py` (era
+  discipline + read-only contract + mock end-to-end)
 - Wire contract ต้นทาง: `ctrader/proto_reference/*.proto` (spotware, MIT)
 
 ## โครงสร้าง
@@ -77,6 +80,7 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
 - [ ] สร้าง OAuth application ที่ [openapi.ctrader.com](https://openapi.ctrader.com)
       (login ด้วย cTID) → ได้ **Client ID + Client Secret** (app ต้องผ่าน
       อนุมัติจาก Spotware ก่อน — ใช้เวลาหลักวัน)
+      **สถานะ 18/11: app สร้างแล้ว (Submitted) — รอ Spotware อนุมัติ**
 - [ ] ตั้ง redirect URI ของ app (ใช้ได้ทั้ง localhost สำหรับ flow ครั้งเดียว)
 - [ ] ขอ **access token** (scope=trading) ต่อบช.:
       เปิด `https://openapi.ctrader.com/apps/auth?client_id=<ID>&redirect_uri=<URI>&scope=trading`
@@ -84,13 +88,51 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
       `https://openapi.ctrader.com/apps/token` (grant_type=authorization_code)
       (ทำมือครั้งเดียวได้ — ตัวช่วย `list_accounts_by_token()` อยู่ใน bridge แล้ว)
 - [ ] เปิดบช. **demo** ของ IC Markets cTrader (แยกจาก real 6194964)
-- [ ] เก็บ credential ใน **VPS .env เท่านั้น** (env-only pattern เหมือน MT5):
+- [x] เก็บ credential ใน **VPS .env เท่านั้น** (env-only pattern เหมือน MT5):
       `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_ACCESS_TOKEN`,
-      `CTRADER_ACCOUNT_ID`, `CTRADER_HOST_TYPE=demo`, `CTRADER_NAME`
+      `CTRADER_ACCOUNT_ID`, `CTRADER_HOST_TYPE=demo`, `CTRADER_NAME` —
+      ฟาร์ม Mac mini อ่านจาก host .env ที่ repo root ของ Mac mini (compose
+      `${...}` interpolation), VPS .env เก็บ Client ID/Secret แล้ว
 - [ ] **ระวัง token อายุ** (~30 วัน): adapter ยังไม่มี refresh flow —
       วันที่ token หมด `connect()` จะ error CH_ACCESS_TOKEN_EXPIRED ·
       refresh มือได้ผ่าน `https://openapi.ctrader.com/apps/token`
       (grant_type=refresh_token) หรือขอ flow อัตโนมัติเป็นงานถัดไป
+
+## เปิดฟาร์มกระดาษเมื่อ token มาถึง (runbook, 18/11)
+
+ฟาร์มจอดอยู่บน Mac mini (`docker start` คืนได้ทั้ง 4 containers:
+paper-fetcher + oracle-engine-farm1/farm2/farmbet) — feed ฝั่ง cTrader
+wired แล้ว (`FEED_SOURCE=ctrader` ใน compose, mock-test ครบ), เหลือแค่
+credential จริง:
+
+1. เติม `CTRADER_*` (CLIENT_ID / CLIENT_SECRET / ACCESS_TOKEN /
+   ACCOUNT_ID) ใน **host .env ที่ repo root ของ Mac mini** — บล็อก env
+   ของ service paper-fetcher ใน docker-compose.paper-farm.yml ดึงค่าผ่าน
+   `${...}` ทั้งหมด (runtime values ไม่ใช่ strategy knobs)
+2. **`CTRADER_HOST_TYPE=demo` ก่อนเสมอ** — default ใน compose เป็น demo
+   อยู่แล้ว อย่า override เป็น live จนกว่า demo ผ่าน + คุณหมออนุมัติเป็น
+   ลายเขียน
+3. ถ้า image เก่า (จอดมาก่อนงานนี้): `docker compose -f
+   docker-compose.paper-farm.yml build paper-fetcher` ก่อน เพื่อเอาโค้ด
+   18/11 (package `ctrader/` + fetcher รุ่น ctrader) เข้า image · แล้ว
+   `docker start paper-fetcher oracle-engine-farm1 oracle-engine-farm2
+   oracle-engine-farmbet`
+4. ตรวจจาก artifact จริง:
+   - `docker logs paper-fetcher` ต้องเห็น "era switch … → ctrader" และ
+     "wrote N bars" ต่อ cycle · token ผิด/หมดอายุ = log ERROR ชี้ชัด
+     (เช่น CH_ACCESS_TOKEN_EXPIRED) และ **ไม่มี yfinance fallback เด็ดขาด**
+   - `data/paper-feed/feed-era.json` ต้องเป็น
+     `{era: "ic-ctrader", since: …, venue: "IC Markets"}` · ถ้ามี marker
+     era อื่นค้างอยู่ fetcher จะ refuse ทั้ง seed ทั้ง merge
+     (venue-mix guard) — จะสลับ era จริงๆ ให้ลบ marker แล้ว seed
+   - engines เทรดไม่ได้เองเมื่อ feed ตาย (`MAX_CANDLE_AGE_SECONDS=1800`
+     stale guard) — นั่นคือกลไกป้องกัน ไม่ใช่ bug
+5. **ข้อระวังเดียวของงานนี้**: `docker-compose.paper-farm.yml` เป็นไฟล์
+   **generated** จาก `scripts/paper_farm_apply.py` — บล็อก CTRADER_* ของ
+   paper-fetcher เป็น hand-edit ตาม scope งาน wiring 18/11 · **อย่ารัน
+   `paper_farm_apply.py` จนกว่าจะเพิ่ม ctrader branch ใน
+   `_fetcher_service()` เสร็จ** ไม่งั้น regenerate แล้ว CTRADER_* block
+   หายเงียบๆ (งานถัดไป — อยู่นอก scope วันนี้)
 
 ## แผนเชื่อมแบบ demo ก่อน real (บังคับ)
 
