@@ -50,7 +50,9 @@ def gold_symbols_payload(symbol_id: int = 101, name: str = "XAUUSD") -> dict[str
     ]}
 
 
-def symbol_by_id_payload(symbol_id: int = 101, lot_size: int = 100) -> dict[str, Any]:
+def symbol_by_id_payload(symbol_id: int = 101, lot_size: int = 10_000) -> dict[str, Any]:
+    # lotSize=10000 is the real SymbolByIdRes value for XAUUSD (19/11) and
+    # is already in cents — volume_cents = lots x lotSize (no extra x100)
     return {"symbol": [{
         "symbolId": symbol_id, "symbolName": "XAUUSD", "lotSize": lot_size,
         "minVolume": 1, "maxVolume": 5_000_000,
@@ -458,7 +460,7 @@ async def test_get_positions_maps_position_fields_to_mt5_shape():
     assert pos["ticket"] == 555001
     assert pos["symbol"] == "XAUUSD"
     assert pos["type"] == "BUY"
-    assert pos["volume"] == pytest.approx(1.0)  # 10000 cents / 100 / lotSize 100
+    assert pos["volume"] == pytest.approx(1.0)  # 10000 cents / lotSize 10000
     assert pos["price_open"] == pytest.approx(2345.0)
     assert pos["price_current"] == pytest.approx(2350.0)
     assert pos["sl"] == pytest.approx(2340.0)
@@ -627,7 +629,7 @@ async def test_send_order_market_buy_with_relative_sltp():
     order = transport.sent_of(msg.NEW_ORDER_REQ)[-1]
     assert order.payload["orderType"] == msg.OrderType.MARKET
     assert order.payload["tradeSide"] == msg.TradeSide.BUY
-    assert order.payload["volume"] == 10_000  # 1.0 lot * 100oz * 100 cents
+    assert order.payload["volume"] == 10_000  # 1.0 lot x lotSize 10000 cents
     assert order.payload["ctidTraderAccountId"] == 6194964
     # BUY anchors on ask 2350.30: relSL = 2350.30-2345.0 = 5.30, relTP = 2360-2350.30 = 9.70
     assert order.payload["relativeStopLoss"] == 530_000

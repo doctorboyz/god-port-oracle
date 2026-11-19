@@ -118,13 +118,15 @@ def test_price_scaling():
 
 
 def test_volume_cents_and_lots_round_trip():
-    # XAUUSD: 1 lot = 100 oz; protocol volume = units * 100
-    assert lots_to_volume_cents(1.0, lot_size=100) == 10_000
-    assert lots_to_volume_cents(0.01, lot_size=100) == 100
-    assert volume_cents_to_lots(10_000, lot_size=100) == pytest.approx(1.0)
+    # XAUUSD wire truth (19/11): lotSize=10000 — already in cents, so
+    # volume_cents = lots x lotSize with no extra x100 (see
+    # tests/test_ctrader_volume_scale_causal.py for the causal pin)
+    assert lots_to_volume_cents(1.0, lot_size=10_000) == 10_000
+    assert lots_to_volume_cents(0.01, lot_size=10_000) == 100
+    assert volume_cents_to_lots(10_000, lot_size=10_000) == pytest.approx(1.0)
     assert volume_cents_to_lots(0) == 0.0
-    # Different lot size (e.g. 1000-unit symbol) obeys the same rule
-    assert lots_to_volume_cents(1.0, lot_size=1000) == 100_000
+    # Different lot size (e.g. 1000-cents-per-lot symbol) obeys the same rule
+    assert lots_to_volume_cents(1.0, lot_size=1000) == 1_000
 
 
 def test_money_digits_scaling():

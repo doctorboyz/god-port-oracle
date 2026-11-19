@@ -2,8 +2,11 @@
 
 The cTrader Open API supports two serializations over TLS TCP:
   * protobuf (port 5035): 4-byte length-prefixed ProtoMessage frames
-  * JSON (port 5036): newline-terminated JSON objects with the same
-    envelope shape (clientMsgId / payloadType / payload)
+  * JSON (port 5036): bare JSON objects with the same envelope shape
+    (clientMsgId / payloadType / payload). The server concatenates them
+    on the stream with NO delimiter (verified on the wire 19/11 — the
+    docs specify the JSON serialization but not the framing); clients
+    may send newline-terminated frames, which FrameDecoder also accepts.
 
 This module implements the JSON variant because it needs only the stdlib —
 this repo's dependency set is frozen and holds no protobuf/twisted. Envelope
@@ -11,8 +14,9 @@ and framing reference: https://help.ctrader.com/open-api/sending-receiving-json/
 
 Scaling rules (from the canonical .proto, see ctrader/proto_reference/):
   * spot/trendbar prices  : 1/100000 of a price unit (123000 -> 1.23)
-  * order/trade volumes   : cents of a unit (1000 -> 10.00 units);
-                            lots = volume_cents / 100 / lotSize
+  * order/trade volumes   : cents of a unit (10000 cents = 100 oz of gold);
+                            lotSize is already in cents, so
+                            volume_cents = lots * lotSize (XAUUSD lotSize=10000)
   * money fields          : scaled by 10^moneyDigits (per-message field)
   * trendbar OHLC         : low is absolute (1/100000), open/high/close are
                             deltas from low
@@ -69,7 +73,7 @@ def decode_message(data: str | bytes) -> ApiMessage:
     )
 
 
-# --- JSON transport framing: one JSON object per line, UTF-8 ---
+# --- JSON transport framing: bare JSON objects, UTF-8 (newlines optional) ---
 
 def encode_frame(message: ApiMessage) -> bytes:
     """Wrap one envelope as a newline-terminated frame."""
@@ -77,24 +81,84 @@ def encode_frame(message: ApiMessage) -> bytes:
 
 
 class FrameDecoder:
-    """Incremental newline-framing decoder (feeds may split mid-frame)."""
+    """Incremental JSON-object framing decoder (feeds may split mid-frame).
+
+    Wire truth (verified 19/11 on both demo & live ctraderapi.com:5036,
+    see ctrader/README.md): the server writes bare JSON objects back to
+    back on the TCP stream with NO delimiter — the official docs specify
+    the JSON serialization but not the framing. Newline-terminated frames
+    (what encode_frame sends) and any whitespace between objects are also
+    accepted. Incomplete JSON never raises: the bytes stay buffered until
+    a later feed completes the object. Bytes that can never grow into a
+    JSON value raise ProtocolError (fail loud, not hang).
+    """
+
+    _JSON_LITERALS = ("true", "false", "null")
 
     def __init__(self) -> None:
         self._buffer = b""
+        self._json = json.JSONDecoder()
 
     def feed(self, data: bytes) -> list[bytes]:
-        """Consume raw bytes, return any complete frames found."""
+        """Consume raw bytes, return any complete JSON-object frames found.
+
+        Frames are the exact byte substrings received — decode_message()
+        re-parses them downstream, so no dict conversion happens here.
+        """
         self._buffer += data
         frames: list[bytes] = []
-        while b"\n" in self._buffer:
-            line, self._buffer = self._buffer.split(b"\n", 1)
-            if line.strip():
-                frames.append(line)
-        return frames
+        while True:
+            stripped = self._buffer.lstrip()
+            if not stripped:
+                self._buffer = b""
+                return frames
+            text = self._decode_or_wait(stripped)
+            if text is None:
+                return frames  # trailing bytes incomplete — keep buffering
+            try:
+                _, end = self._json.raw_decode(text)
+            except json.JSONDecodeError as exc:
+                if self._is_incomplete(text, exc):
+                    return frames
+                raise ProtocolError(f"invalid JSON frame: {exc}") from exc
+            frame = text[:end].encode("utf-8")
+            frames.append(frame)
+            self._buffer = stripped[len(frame):]
 
     def pending(self) -> bytes:
-        """Bytes buffered without a newline yet (for diagnostics)."""
+        """Bytes buffered without a complete frame yet (for diagnostics)."""
         return self._buffer
+
+    @staticmethod
+    def _decode_or_wait(stripped: bytes) -> Optional[str]:
+        """Decode the buffer as UTF-8; None = truncated tail, wait for more.
+
+        A multi-byte char split by a chunk boundary is the only legitimate
+        decode failure; anything else is garbage and fails loud.
+        """
+        try:
+            return stripped.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            lead = stripped[exc.start]
+            if 0xC2 <= lead <= 0xF4 and exc.start >= len(stripped) - 3:
+                return None
+            raise ProtocolError(f"invalid UTF-8 in frame: {exc}") from exc
+
+    @classmethod
+    def _is_incomplete(cls, text: str, exc: json.JSONDecodeError) -> bool:
+        """True when the buffer is a valid prefix of a longer JSON value.
+
+        raw_decode stops either wanting more input (error at the very end
+        of the buffer, an unterminated string, or a true/false/null
+        literal still growing) or at genuinely unparseable bytes — only
+        the first kind may wait, the second must raise.
+        """
+        if "Unterminated string" in exc.msg:
+            return True
+        if exc.pos >= len(text):
+            return True
+        tail = text[exc.pos:].lower()
+        return any(literal.startswith(tail) for literal in cls._JSON_LITERALS)
 
 
 # --- Protobuf framing (future, port 5035) — length prefix only.
@@ -108,9 +172,12 @@ def encode_length_prefix(length: int, little_endian: bool = True) -> bytes:
 # --- Unit/scaling helpers ---
 
 PRICE_SCALE = 100_000  # spot & trendbar prices: 1/100000 of a price unit
-VOLUME_CENTS_PER_UNIT = 100  # volumes are expressed in cents of a unit
 DEFAULT_MONEY_DIGITS = 2  # balance/swap/margin default exponent
-DEFAULT_LOT_SIZE = 100  # XAUUSD: 1 lot = 100 oz — replaced by symbol data
+# XAUUSD wire truth (SymbolByIdRes 19/11): lotSize=10000 — the proto field
+# is ALREADY in cents ("Lot size of the Symbol (in cents)",
+# proto_reference/OpenApiModelMessages.proto), so volume_cents = lots ×
+# lotSize and nothing more. 100 cents = 1 unit (oz) of the underlying.
+DEFAULT_LOT_SIZE = 10_000
 
 
 def price_to_real(scaled: int | float | None) -> float:
@@ -126,15 +193,19 @@ def price_to_proto(real: float) -> int:
 
 
 def lots_to_volume_cents(lots: float, lot_size: float = DEFAULT_LOT_SIZE) -> int:
-    """Lots -> protocol volume (cents of a unit). XAUUSD 0.01 lot -> 100."""
-    return int(round(float(lots) * float(lot_size) * VOLUME_CENTS_PER_UNIT))
+    """Lots -> protocol volume. lotSize is already in cents, so this is a
+    plain product: XAUUSD (lotSize=10000) 0.01 lot -> 100 cents, 1 lot ->
+    10000 cents (= 100 oz). Never multiply by 100 again on top — that was
+    the 100x-oversize bug (1 lot on the real wire became 1,000,000 cents).
+    """
+    return int(round(float(lots) * float(lot_size)))
 
 
 def volume_cents_to_lots(volume_cents: int, lot_size: float = DEFAULT_LOT_SIZE) -> float:
-    """Protocol volume (cents) -> lots. 10000 cents of gold -> 1.0 lot."""
+    """Protocol volume (cents) -> lots. XAUUSD 10000 cents of gold -> 1.0 lot."""
     if not volume_cents:
         return 0.0
-    return float(volume_cents) / VOLUME_CENTS_PER_UNIT / float(lot_size)
+    return float(volume_cents) / float(lot_size)
 
 
 def money_to_real(amount: int | float | None, money_digits: int = DEFAULT_MONEY_DIGITS) -> float:

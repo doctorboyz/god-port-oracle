@@ -1,9 +1,12 @@
 # ctrader/ — cTrader Open API adapter (Phase 3, additive)
 
 บริดจ์ cTrader ที่มีพื้นผิวเหมือน `MT5Bridge` — เพื่อให้อนาคตสลับ broker
-ได้โดยไม่แตะ engine core สถานะปัจจุบัน: **โค้ด + tests ครบ, paper-feed
-wired (FEED_SOURCE=ctrader, 18/11), ยังไม่เคยต่อ network จริง, บช. real
-6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
+ได้โดยไม่แตะ engine core สถานะปัจจุบัน (20/11): **โค้ด + tests ครบ,
+paper-feed wired (FEED_SOURCE=ctrader, 18/11), แตะ network จริงแล้ว 19/11
+— OAuth app ผ่านอนุมัติ, token แลกสำเร็จ, app auth + account list ผ่านจริง
+ทั้ง demo/live host (พบบช. real ctid 49596566 / demo ctid 49609239),
+พบและแก้ framing bug + volume scale bug แล้ว (ดูส่วน framing กับ volume
+ด้านล่าง) · บช. real 6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
 
 - Interface parity: `tests/test_ctrader_contract.py` (สะท้อน signature จริง
   ของ `metty/bridge/client.py` — read-only)
@@ -18,7 +21,7 @@ wired (FEED_SOURCE=ctrader, 18/11), ยังไม่เคยต่อ network
 | ไฟล์ | หน้าที่ |
 |---|---|
 | `bridge.py` | `CTraderBridge` — auth 2 ชั้น, spot, order lifecycle, heartbeat, พื้นผิว parity |
-| `protocol.py` | JSON envelope, newline framing, กฎ scaling (ราคา 1/100000, volume cents, moneyDigits) |
+| `protocol.py` | JSON envelope, object-concatenation framing, กฎ scaling (ราคา 1/100000, volume cents, moneyDigits) |
 | `transport.py` | `CTraderTransport` (interface) + `TcpNewlineTransport` (asyncio TLS จริง — ยังไม่ถูกใช้นอก tests) |
 | `messages.py` | payloadType IDs + enums จาก .proto ทางการ |
 | `config.py` | `CTraderConfig.from_env()` — credentials ผ่าน env เท่านั้น |
@@ -27,9 +30,26 @@ wired (FEED_SOURCE=ctrader, 18/11), ยังไม่เคยต่อ network
 ## เลือก JSON mode ทำไม (สำคัญต่อการอนุมัติ)
 
 cTrader Open API มี 2 serialization: protobuf (port 5035) และ JSON
-(port 5036, newline-terminated, TCP หรือ WebSocket) — **envelope เดียวกัน
+(port 5036, TCP หรือ WebSocket) — **envelope เดียวกัน
 (clientMsgId / payloadType / payload)** ตาม
 [docs ทางการ](https://help.ctrader.com/open-api/sending-receiving-json/)
+
+## Framing จริงบน wire (สำคัญ — บทเรียน connection day 19/11)
+
+[docs ทางการ](https://help.ctrader.com/open-api/sending-receiving-json/)
+ระบุแค่ serialization JSON **ไม่ได้ระบุ framing เลย** สมมติฐานเดิม
+"newline-terminated frames" (จาก WebSocket mode ที่ WS มีเฟรมของตัวเอง)
+**ผิดบน TCP เปล่า**: probe จริง 19/11 (raw socket ทั้ง demo/live
+`ctraderapi.com:5036`) พิสูจน์ว่า server เขียน **JSON objects เรียงติดกัน
+ไม่มีตัวคั่น ไม่มี newline ปิดท้าย ไม่มี heartbeat ระหว่างนั้น** — ทุกเฟรม
+คือ object เปล่าๆ เช่น 2101 ตอบกลับมา 44 bytes ครบพอดีที่ `}` แล้วเงียบ
+
+`FrameDecoder` (protocol.py) จึงสกัดเฟรมแบบ incremental ด้วย
+`json.JSONDecoder().raw_decode` — object ยังไม่ครบ = รอ feed ถัดไป
+(ไม่ raise), ครบ = สกัค byte-exact, whitespace/newline ระหว่าง objects
+ข้ามได้ (เฟรมฝั่งเราที่ newline-terminated ยังใช้ได้), garbage ที่ไม่มีทาง
+กลายเป็น JSON = `ProtocolError` (fail loud ไม่ hang) — tests
+`tests/test_ctrader_framing_causal.py` replay byte จริงจาก wire
 
 repo นี้ `pyproject.toml` ตรึง dependency set ไว้และไม่มี protobuf/twisted —
 งานนี้ห้ามแก้ไฟล์เดิม จึงเลือก JSON mode: เชื่อมจริงได้ด้วย stdlib
@@ -65,8 +85,14 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
    อื่นไม่ถูก claim (ตรวจด้วย positionId), และ event ที่ echo
    clientMsgId ของ request ที่ตายแล้ว (timeout/retry) โดนทิ้ง —
    ไม่หล่นไปขโมย waiter ของ retry
-5. **Volume หน่วย cents**: lots × lotSize × 100 (ทอง 1 lot = 100 oz =
-   10000) — lotSize ดึงจาก `ProtoOASymbolByIdReq` ตอน connect
+5. **Volume หน่วย cents — `volume_cents = lots × lotSize` เท่านั้น**:
+   `lotSize` จาก `ProtoOASymbolByIdReq` มาเป็น "cents" อยู่แล้ว (ตาม
+   .proto: `lotSize = 30; // Lot size of the Symbol (in cents)`) —
+   XAUUSD จริงจาก wire = **10000** (1 lot = 100 oz = 10000 cents,
+   0.01 lot = 100 cents) · **ห้ามคูณ 100 ซ้ำอีกชั้น** (bug เดิมทำ 1 lot
+   กลายเป็น 1,000,000 cents = oversize 100 เท่า — คลาสเดียวกับ USC trap;
+   default เก่า 100 ถูกโดยบังเอิญจน mock-test เขียวหลอก) — tests
+   `tests/test_ctrader_volume_scale_causal.py`
 6. **Trendbar window จำกัด 1 สัปดาห์/request** + historical rate limit
    5 req/s — bridge แบ่ง chunk เอง (test พิสูจน์)
 7. **Rate limit ปกติ 50 req/s/connection**
@@ -77,16 +103,17 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
 
 ## สิ่งที่คุณหมอต้องเตรียมเพื่อเชื่อมจริง (checklist)
 
-- [ ] สร้าง OAuth application ที่ [openapi.ctrader.com](https://openapi.ctrader.com)
-      (login ด้วย cTID) → ได้ **Client ID + Client Secret** (app ต้องผ่าน
-      อนุมัติจาก Spotware ก่อน — ใช้เวลาหลักวัน)
-      **สถานะ 18/11: app สร้างแล้ว (Submitted) — รอ Spotware อนุมัติ**
+- [x] สร้าง OAuth application ที่ [openapi.ctrader.com](https://openapi.ctrader.com)
+      (login ด้วย cTID) → ได้ **Client ID + Client Secret**
+      **สถานะ 19/11: Spotware อนุมัติแล้ว ("application is active now")**
 - [ ] ตั้ง redirect URI ของ app (ใช้ได้ทั้ง localhost สำหรับ flow ครั้งเดียว)
-- [ ] ขอ **access token** (scope=trading) ต่อบช.:
+- [x] ขอ **access token** (scope=trading) ต่อบช.:
       เปิด `https://openapi.ctrader.com/apps/auth?client_id=<ID>&redirect_uri=<URI>&scope=trading`
       → ใส่ credential cTID → ได้ `?code=` → แลกเป็น token ที่
       `https://openapi.ctrader.com/apps/token` (grant_type=authorization_code)
-      (ทำมือครั้งเดียวได้ — ตัวช่วย `list_accounts_by_token()` อยู่ใน bridge แล้ว)
+      **สถานะ 19/11: แลก token จริงสำเร็จ (access+refresh ใน VPS .env)** —
+      account list ผ่าน raw probe เจอบช.ใต้ cTID: real ctid **49596566**
+      (traderLogin 6194964) + demo ctid **49609239** (traderLogin 10138643)
 - [ ] เปิดบช. **demo** ของ IC Markets cTrader (แยกจาก real 6194964)
 - [x] เก็บ credential ใน **VPS .env เท่านั้น** (env-only pattern เหมือน MT5):
       `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_ACCESS_TOKEN`,
