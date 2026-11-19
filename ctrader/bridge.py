@@ -233,7 +233,12 @@ class CTraderBridge:
         await self._load_lot_size(self._symbol_ids[self._symbol.lower()])
 
     async def _load_lot_size(self, symbol_id: int) -> None:
-        """ProtoOASymbolByIdReq — lotSize drives the volume<->lots mapping."""
+        """ProtoOASymbolByIdReq — lotSize drives the volume<->lots mapping.
+
+        Fail-loud (P22 wiring 20/11): volume_cents = lots x lotSize, so a
+        guessed lotSize ships silently mis-scaled orders — refuse instead.
+        connect() aborts with this as last_connect_error.
+        """
         request = self._build_request(msg.SYMBOL_BY_ID_REQ, {
             "ctidTraderAccountId": self.config.account_id,
             "symbolId": [symbol_id],
@@ -241,10 +246,18 @@ class CTraderBridge:
         response = await self._await_response(request, msg.SYMBOL_BY_ID_RES)
         for entry in response.payload.get("symbol", []):
             if int(entry.get("symbolId", 0)) == symbol_id:
-                lot_size = entry.get("lotSize") or 100
+                lot_size = entry.get("lotSize")
+                if not lot_size:
+                    raise CTraderApiError(
+                        "LOT_SIZE_MISSING",
+                        f"SymbolByIdRes for symbolId {symbol_id} carried no lotSize",
+                    )
                 self._lot_sizes[symbol_id] = float(lot_size)
                 return
-        self._lot_sizes[symbol_id] = 100.0
+        raise CTraderApiError(
+            "LOT_SIZE_NOT_FOUND",
+            f"SymbolByIdRes did not include symbolId {symbol_id}",
+        )
 
     async def _load_assets(self) -> None:
         """ProtoOAAssetListReq — depositAssetId -> currency name map."""
@@ -513,7 +526,15 @@ class CTraderBridge:
         return self._symbol_ids[resolved.lower()]
 
     def _lot_size(self, symbol_id: int) -> float:
-        return self._lot_sizes.get(symbol_id, 100.0)
+        """lotSize for a symbol; raises when it was never loaded — a guess
+        here mis-scales the order volume silently (order-path rule 20/11)."""
+        lot_size = self._lot_sizes.get(symbol_id)
+        if lot_size is None:
+            raise CTraderApiError(
+                "LOT_SIZE_NOT_LOADED",
+                f"lotSize for symbolId {symbol_id} was never loaded — refusing to guess",
+            )
+        return lot_size
 
     async def subscribe_spots(self, symbol: str) -> bool:
         """ProtoOASubscribeSpotsReq — keep the spot cache fresh for quotes."""

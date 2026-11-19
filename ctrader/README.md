@@ -6,7 +6,13 @@ paper-feed wired (FEED_SOURCE=ctrader, 18/11), แตะ network จริงแ
 — OAuth app ผ่านอนุมัติ, token แลกสำเร็จ, app auth + account list ผ่านจริง
 ทั้ง demo/live host (พบบช. real ctid 49596566 / demo ctid 49609239),
 พบและแก้ framing bug + volume scale bug แล้ว (ดูส่วน framing กับ volume
-ด้านล่าง) · บช. real 6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
+ด้านล่าง) · งาน engine wiring (P22 บน demo IC1/IC2, 20/11) **หยุดที่
+parity gap — รายงาน `ψ/outbox/ctrader_engine_wiring_blocked_2026-11-20.md`**:
+LiveTrader ปฏิเสธชื่อบช. IC1/IC2 ตั้งแต่ constructor + ไม่มีจุด inject bridge
+ใน oracle_runner + engine เรียก sync wrappers 7 ตัว (`*_sync`) และ
+`get_deal_history` ที่ bridge ยังไม่มี — รอ Hermes เลือกทางก่อน (contract test
+งาน 5 ล็อกแค่ 9 async methods จึงไม่จับกลุ่ม sync) · lotSize fallback 3 จุด
+เปลี่ยนเป็น fail-loud แล้ว (20/11) · บช. real 6194964 ยังไม่ถูกแตะแม้บรรทัดเดียว**
 
 - Interface parity: `tests/test_ctrader_contract.py` (สะท้อน signature จริง
   ของ `metty/bridge/client.py` — read-only)
@@ -92,7 +98,13 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
    0.01 lot = 100 cents) · **ห้ามคูณ 100 ซ้ำอีกชั้น** (bug เดิมทำ 1 lot
    กลายเป็น 1,000,000 cents = oversize 100 เท่า — คลาสเดียวกับ USC trap;
    default เก่า 100 ถูกโดยบังเอิญจน mock-test เขียวหลอก) — tests
-   `tests/test_ctrader_volume_scale_causal.py`
+   `tests/test_ctrader_volume_scale_causal.py` · **20/11: fallback 100.0
+   เหลือศูนย์จุด** — ทั้ง 3 จุดที่เคยเดา (`_load_lot_size` สองทาง +
+   `_lot_size` บน order path) กลายเป็น `CTraderApiError` fail-loud
+   (`LOT_SIZE_MISSING` / `LOT_SIZE_NOT_FOUND` / `LOT_SIZE_NOT_LOADED`)
+   — lotSize หาย = connect abort ที่ boot / order ปฏิเสธก่อนออกจากมือ
+   ไม่มีทางเดา scale เงียบๆ — tests
+   `tests/test_ctrader_lot_size_fail_loud_causal.py`
 6. **Trendbar window จำกัด 1 สัปดาห์/request** + historical rate limit
    5 req/s — bridge แบ่ง chunk เอง (test พิสูจน์)
 7. **Rate limit ปกติ 50 req/s/connection**
