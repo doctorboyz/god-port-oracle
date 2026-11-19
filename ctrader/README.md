@@ -199,6 +199,23 @@ connection เดียวบน persistent loop (daemon thread) — handshake �
 `APPLICATION_AUTH_REQ` นับ 1) · `adapter.disconnect()` เป็น no-op โดย
 เจตนา (engine เรียกตาม idiom MT5 แต่ cTrader auth แพง — ห้ามฉีก)
 
+**Loop ownership (sync-loop fix 20/11 กลางวัน)**: connection machinery
+(receive pump + transport queue + pending futures) ผูกกับ loop ที่รัน
+`connect()` — bridge ที่ถูก connect บน throwaway loop (asyncio.run)
+**ไม่มีทาง** ตอบ request จาก persistent loop ได้: request ออกแต่ response
+ถูก consume โดย pump ที่จอดอยู่บน loop เดิม → timeout พอดี
+`request_timeout` + error ว่าง (`str(TimeoutError())`) — อาการที่ probe
+20/11 จับได้ · `ensure_connected_sync` จึงเช็ค **ownership** ไม่ใช่แค่
+`_connected`: เจอ connection ต่าง loop = abandon + rebuild บน persistent
+loop **ครั้งเดียว** (identity guard กัน zombie task จาก loop เก่าฆ่า
+connection ใหม่ + **body gate**: receive/heartbeat จับ transport ตอนเข้า
+loop — เฟรมจาก transport เก่าโดน drop และ zombie heartbeat หยุดเอง ไม่
+มีทางเขียน socket ของ connection ใหม่) · real transport ข้าม loop = สร้าง
+object ใหม่ (queue/
+decoder ผูก loop) — socket เก่ารั่วจน process ตาย (ครั้งเดียวต่อ boot)
+· engine path ปกติ (adapter route ทุกจุดเข้า persistent loop) ไม่เจอ
+migration เลย — test control ล็อกไว้ (auth นับ 1 เท่าเดิม)
+
 **Sizing บน IC1/IC2** (สูตร `lot = equity×0.005÷(SL×100)` + floor
 0.01-granularity):
 
@@ -221,12 +238,21 @@ connection เดียวบน persistent loop (daemon thread) — handshake �
    - log ต้องเห็น symbol resolve (XAUUSD) + account auth (ctid 49633503)
    - `equity_ts` เดินทุก cycle (300s) และ `current_equity` มาจาก bridge
      จริง (~$2,200) — **ห้ามเป็นค่า paper fallback** (test ล็อก path นี้)
+   - **ห้ามมี `cTrader sync call failed` ใน log** (อาการ sync-loop
+     timeout — fix 20/11 แล้ว เจอ = หยุดแล้วรายงาน)
    - reason census สะอาด (skip เพราะเหตุผลจริง เช่น ไม่มีสัญญาณ/สเกล —
      ไม่ใช่ bridge fail ทั้ง cycle)
    - ไม้แรก (simulated): lot ตรงสูตรในตารางข้างบน → เสนอ flip DRY_RUN
+     — **candle ต้องมาจาก bridge** (หลัง fix แล้ว fetch_candles_sync ต้อง
+     ตอบจริง; ก่อนหน้านั้น 20/11 ไม้จำลองคิดจาก CSV fallback ที่ mount
+     อยู่ที่ `/opt/god-port/data/ic1/xau-data/` — ใช้อ้างอิงไม่ได้)
 5. ข้อระวัง: `_check_existing_position` เรียก rpyc ตรง (จุดที่ 11 นอก
    scope) — บช. IC จะ warn ต่อ cycle แล้วตกไป DB (ปลอดภัย แต่ log มี noise
    — งานถัดไปถ้าจะเก็บ)
+6. Seed columns 20/11: `baseline_balance` = deposit face value ·
+   `peak_equity` = deposit face value (กติกา kill-switch: NULL peak =
+   high-water เริ่มที่ 0 = switch ตาบอด) · `broker_server` = "IC Markets
+   cTrader" — seeder backfill ค่าว่างเท่านั้น ค่าจริงที่มีอยู่ชนะเสมอ
 
 ## แผนเชื่อมแบบ demo ก่อน real (บังคับ)
 

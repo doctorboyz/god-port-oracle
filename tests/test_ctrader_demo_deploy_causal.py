@@ -581,3 +581,94 @@ class TestICSeeder:
         finally:
             conn.close()
         assert count == 1
+
+
+class TestICSeederSeedColumns:
+    """Sync-loop dispatch (20/11) seed nits, as RULES:
+
+    - baseline_balance = deposit face value — the DD-line anchor. The
+      VPS IC1 row was seeded with it EMPTY (dead-layer class the cent
+      lesson warns about): an empty baseline kills drawdown math from
+      the first cycle.
+    - peak_equity = deposit face value — kill-switch dd_from_peak reads
+      max(kill-state peak, accounts.peak_equity); a NULL peak means the
+      high-water mark starts at zero and the switch is blind. P-account
+      enrollment seeds peak = baseline (generate_variants.enroll_accounts)
+      — IC rows must follow the SAME rule.
+    - broker_server = "IC Markets cTrader" (was the Exness-MT5 default
+      on IC rows — cosmetic but wrong).
+    - Backfill is idempotent and NEVER clobbers real data on the existing
+      VPS row.
+    """
+
+    def _row(self, db):
+        from metty.core.db import get_connection
+        conn = get_connection(db)
+        try:
+            return conn.execute(
+                "SELECT broker_server, baseline_balance, peak_equity "
+                "FROM accounts WHERE name='IC1'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+    def _env(self, monkeypatch, tmp_db):
+        from metty.core.db import init_db
+        init_db(tmp_db)
+        monkeypatch.setenv("INITIAL_BALANCE_IC1", "2200")
+        monkeypatch.setenv("LEVERAGE_IC1", "1000")
+        monkeypatch.setenv("MT5_BRIDGE_IC1_HOST", "mt5ic1")
+        monkeypatch.setenv("MT5_BRIDGE_IC1_PORT", "8001")
+        monkeypatch.setenv("SIGNAL_GROUP_IC1", "portfolio")
+
+    def test_new_row_gets_full_seed_columns(self, monkeypatch, tmp_path):
+        db = tmp_path / "oracle_ic.db"
+        self._env(monkeypatch, db)
+        import scripts.oracle_runner as runner
+        runner._seed_ctrader_accounts(["IC1"], db)
+        server, baseline, peak = self._row(db)
+        assert server == "IC Markets cTrader"
+        assert baseline == 2200.0, "baseline = deposit face value (DD anchor)"
+        assert peak == 2200.0, "peak = deposit face value (kill-switch rule)"
+
+    def test_backfills_existing_vps_row_with_empty_seed_columns(self, monkeypatch, tmp_path):
+        """The REAL IC1 row on the VPS today: Exness default server, no
+        baseline, no peak. A restart with the fixed seeder must repair it
+        without dropping/recreating the row."""
+        db = tmp_path / "oracle_ic.db"
+        self._env(monkeypatch, db)
+        from metty.core.db import insert_account
+        insert_account(name="IC1", balance=2200.0, leverage=1000,
+                       bridge_host="mt5ic1", bridge_port=8001,
+                       signal_group="portfolio", db_path=db)  # legacy shape
+        import scripts.oracle_runner as runner
+        runner._seed_ctrader_accounts(["IC1"], db)
+        server, baseline, peak = self._row(db)
+        assert server == "IC Markets cTrader"
+        assert baseline == 2200.0
+        assert peak == 2200.0
+
+    def test_backfill_never_clobbers_real_values(self, monkeypatch, tmp_path):
+        """Existing data wins: a row with a real baseline/peak and a
+        non-default broker_server must be untouched by the seeder."""
+        db = tmp_path / "oracle_ic.db"
+        self._env(monkeypatch, db)
+        from metty.core.db import get_connection, insert_account
+        insert_account(name="IC1", balance=2200.0, leverage=1000,
+                       bridge_host="mt5ic1", bridge_port=8001,
+                       signal_group="portfolio",
+                       broker_server="Custom Broker", db_path=db)
+        conn = get_connection(db)
+        conn.execute(
+            "UPDATE accounts SET baseline_balance = 999.0, peak_equity = 1234.0 "
+            "WHERE name = 'IC1'"
+        )
+        conn.commit()
+        conn.close()
+
+        import scripts.oracle_runner as runner
+        runner._seed_ctrader_accounts(["IC1"], db)
+        server, baseline, peak = self._row(db)
+        assert server == "Custom Broker", "real server wins"
+        assert baseline == 999.0, "real baseline wins"
+        assert peak == 1234.0, "real high-water mark wins"

@@ -184,6 +184,16 @@ class FakeTransport:
 
     async def connect(self) -> None:
         self.connected = True
+        # Reconnect-safe across event loops (mirrors TcpNewlineTransport's
+        # per-connect state reset): an asyncio.Queue binds to the loop that
+        # first awaits it. A STALE binding (from a previous, now dead or
+        # parked loop) must be replaced so one fake can serve the bridge's
+        # loop-migration lifecycle (connect on loop A → A dies → reconnect
+        # on the persistent loop). An UNBOUND queue keeps its contents —
+        # existing tests push frames before the first connect.
+        bound = getattr(self._queue, "_loop", None)
+        if bound is not None and bound is not asyncio.get_running_loop():
+            self._queue = asyncio.Queue[bytes | None]()
 
     async def close(self) -> None:
         self.connected = False

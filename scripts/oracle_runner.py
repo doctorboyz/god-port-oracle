@@ -722,29 +722,68 @@ def _seed_ctrader_accounts(accounts: list, db_path) -> None:
     P-account seeder minus the farm-variant enrollment (no league table
     for demo engines). Values from per-account env: INITIAL_BALANCE_ICn,
     LEVERAGE_ICn, MT5_BRIDGE_ICn_HOST/PORT, SIGNAL_GROUP_ICn. Idempotent.
+
+    Seed columns (sync-loop dispatch 20/11 — the VPS IC1 row was seeded
+    with these EMPTY, which is the dead-layer class the cent/P0 lessons
+    warn about):
+      - baseline_balance = deposit face value (the DD-line anchor)
+      - peak_equity = deposit face value — kill-switch dd_from_peak reads
+        max(kill-state peak, accounts.peak_equity); a NULL peak starts the
+        high-water mark at zero and blinds the switch. Same rule as
+        P-account enrollment (generate_variants.enroll_accounts).
+      - broker_server = "IC Markets cTrader" (not the Exness default)
+    Existing rows are BACKFILLED (empty values only — real data always
+    wins), so a restart on the existing VPS DB repairs without recreating.
     """
-    from metty.core.db import get_account_id_by_name, insert_account
+    from metty.core.db import get_account_id_by_name, get_connection, insert_account
 
     for acct_name in accounts:
         acct_name = acct_name.strip().upper()
         if not (len(acct_name) >= 2 and acct_name[:2] == "IC" and acct_name[2:].isdigit()):
             continue
-        if get_account_id_by_name(acct_name, Path(db_path)) is not None:
-            continue
+        deposit = float(os.environ.get(f"INITIAL_BALANCE_{acct_name}", "500"))
+        if get_account_id_by_name(acct_name, Path(db_path)) is None:
+            try:
+                insert_account(
+                    name=acct_name,
+                    balance=deposit,
+                    leverage=int(os.environ.get(f"LEVERAGE_{acct_name}", "500")),
+                    bridge_host=os.environ.get(f"MT5_BRIDGE_{acct_name}_HOST",
+                                               f"mt5{acct_name.lower()}"),
+                    bridge_port=int(os.environ.get(f"MT5_BRIDGE_{acct_name}_PORT", "8001")),
+                    signal_group=os.environ.get(f"SIGNAL_GROUP_{acct_name}", "portfolio"),
+                    broker_server="IC Markets cTrader",
+                    db_path=Path(db_path),
+                )
+                logger.info("Seeded cTrader demo account %s", acct_name)
+            except Exception as exc:
+                logger.warning("Could not seed cTrader account %s: %s", acct_name, exc)
+                continue
         try:
-            insert_account(
-                name=acct_name,
-                balance=float(os.environ.get(f"INITIAL_BALANCE_{acct_name}", "500")),
-                leverage=int(os.environ.get(f"LEVERAGE_{acct_name}", "500")),
-                bridge_host=os.environ.get(f"MT5_BRIDGE_{acct_name}_HOST",
-                                           f"mt5{acct_name.lower()}"),
-                bridge_port=int(os.environ.get(f"MT5_BRIDGE_{acct_name}_PORT", "8001")),
-                signal_group=os.environ.get(f"SIGNAL_GROUP_{acct_name}", "portfolio"),
-                db_path=Path(db_path),
-            )
-            logger.info("Seeded cTrader demo account %s", acct_name)
+            conn = get_connection(Path(db_path))
+            try:
+                # Backfill, never clobber: empty/default values only.
+                conn.execute(
+                    "UPDATE accounts SET baseline_balance = ? "
+                    "WHERE name = ? AND baseline_balance IS NULL",
+                    (deposit, acct_name),
+                )
+                conn.execute(
+                    "UPDATE accounts SET peak_equity = ? "
+                    "WHERE name = ? AND peak_equity IS NULL",
+                    (deposit, acct_name),
+                )
+                conn.execute(
+                    "UPDATE accounts SET broker_server = 'IC Markets cTrader' "
+                    "WHERE name = ? AND (broker_server = '' "
+                    "OR broker_server = 'Exness-MT5')",
+                    (acct_name,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as exc:
-            logger.warning("Could not seed cTrader account %s: %s", acct_name, exc)
+            logger.warning("Could not backfill seed columns for %s: %s", acct_name, exc)
 
 
 def _seed_default_accounts(db_path) -> None:

@@ -178,6 +178,18 @@ class CTraderBridge:
         self._receive_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._last_sent: float = 0.0
+        # Loop ownership (sync-loop fix 20/11): the connection machinery
+        # (receive pump, transport queue, pending futures) is bound to the
+        # loop that ran connect(). A bridge whose connect() ran on a
+        # throwaway loop (asyncio.run flow, the probe lifecycle) can never
+        # serve that loop's requests from another loop — ensure_connected_
+        # sync uses _conn_loop to detect this and migrate the connection
+        # onto the persistent loop exactly once.
+        self._conn_loop: Optional[asyncio.AbstractEventLoop] = None
+        # Loop the current transport object was first used on — real
+        # transports carry loop-bound internals (queue/decoder/pump), so
+        # crossing loops requires a fresh object (see connect()).
+        self._transport_loop: Optional[asyncio.AbstractEventLoop] = None
         # Last error that made connect() return False (auth failures carry
         # the API errorCode, e.g. CH_ACCESS_TOKEN_EXPIRED) — read-only
         # metadata so callers can fail LOUD with the real reason instead of
@@ -210,9 +222,26 @@ class CTraderBridge:
     # ------------------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Connect, authorize (app then account), resolve symbols, subscribe."""
+        """Connect, authorize (app then account), resolve symbols, subscribe.
+
+        Loop-aware (sync-loop fix 20/11): a connection owned by ANOTHER
+        loop can never serve this one (its receive pump is parked there),
+        so connect() detects the mismatch, abandons the foreign connection
+        and rebuilds here — exactly once, never per call.
+
+        Direction is NOT checked: awaiting connect() directly from a
+        throwaway loop on a bridge the PERSISTENT loop owns would steal
+        ownership (kill its in-flight waiters + one ~2s handshake). The
+        engine never does this (CTraderEngineAdapter routes every touch
+        through the persistent loop); direct async callers on a shared
+        bridge are unsupported — use a bridge per asyncio.run flow (the
+        paper-feed pattern).
+        """
+        loop = asyncio.get_running_loop()
         if self._connected:
-            return True
+            if self._conn_loop is loop:
+                return True
+            self._abandon_foreign_connection()
         self.last_connect_error = None  # fresh attempt — stale errors must not linger
         if not self.config.is_configured:
             logger.warning(
@@ -220,11 +249,13 @@ class CTraderBridge:
                 self.config.name,
             )
             return False
+        self._refresh_transport_for(loop)
         try:
             await self._transport.connect()
         except Exception as exc:  # noqa: BLE001 — connect must return False, never raise
             logger.error("cTrader connect to %s:%s failed: %s", self.host, self.port, exc)
             return False
+        self._transport_loop = loop
 
         self._receive_task = asyncio.create_task(self._receive_loop())
         try:
@@ -240,6 +271,7 @@ class CTraderBridge:
             return False
 
         self._connected = True
+        self._conn_loop = loop
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info(
             "Connected to cTrader %s:%s (%s, account %d, symbol %s)",
@@ -248,9 +280,57 @@ class CTraderBridge:
         )
         return True
 
+    def _refresh_transport_for(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Replace a real transport whose loop-bound internals belong to
+        another loop (queue/decoder/pump — the only safe cross-loop reset
+        is a fresh object). The old socket cannot be closed from here
+        (its writer belongs to the other loop): it leaks until process
+        exit, once per migration. Injected transports (tests) keep their
+        identity — they are in-process fakes with no loop-bound state.
+        """
+        if (
+            isinstance(self._transport, TcpNewlineTransport)
+            and self._transport_loop is not None
+            and self._transport_loop is not loop
+        ):
+            self._transport = TcpNewlineTransport(self.host, self.port)
+
+    def _abandon_foreign_connection(self) -> None:
+        """Drop a connection owned by another loop WITHOUT touching that loop.
+
+        The old receive/heartbeat tasks live on the foreign loop — cancel()
+        only flags them (that loop may be dead or parked forever). Their
+        teardown blocks are identity-guarded (see _receive_loop), so a
+        zombie can never mark the NEW connection dead nor fail its pending
+        futures. The old transport's socket stays open until process exit
+        (its writer belongs to the foreign loop); real transports are
+        replaced with a fresh object in _refresh_transport_for.
+        """
+        logger.warning(
+            "cTrader %s: connection lives on another event loop — "
+            "rebuilding it on the current loop (sync-loop fix 20/11)",
+            self.config.name,
+        )
+        self._connected = False
+        for task in (self._heartbeat_task, self._receive_task):
+            if task is None:
+                continue
+            try:
+                task.cancel()
+            except RuntimeError:
+                # The foreign loop is already closed: Task.cancel() wakes
+                # the awaited future, whose loop can never run callbacks.
+                # The task is an unwakeable zombie either way — flag only.
+                pass
+        self._heartbeat_task = None
+        self._receive_task = None
+        self._fail_pending(ConnectionError("connection abandoned (foreign event loop)"))
+        self._conn_loop = None
+
     async def disconnect(self) -> None:
         """Tear down tasks, transport and pending futures (idempotent)."""
         self._connected = False
+        self._conn_loop = None
         for task in (self._heartbeat_task, self._receive_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -430,21 +510,50 @@ class CTraderBridge:
         return None
 
     def _fail_pending(self, reason: Exception) -> None:
-        """Fail every in-flight future (called on connection loss/disconnect)."""
+        """Fail every in-flight future (called on connection loss/disconnect).
+
+        Per-future tolerance (sync-loop fix 20/11): a future created on a
+        foreign loop that has since DIED raises on set_exception (its loop
+        can never run the callback) — such waiters are unwakeable zombies
+        anyway; skipping them must not abort the teardown of the others.
+        """
         futures = list(self._pending.values()) + [
             wait.future for wait in self._order_queue
         ]
         for future in futures:
             if not future.done():
-                future.set_exception(reason)
+                try:
+                    future.set_exception(reason)
+                except RuntimeError:  # dead-loop future — unwakeable, skip
+                    pass
         self._pending.clear()
         self._order_waits.clear()
         self._order_queue.clear()
 
     async def _receive_loop(self) -> None:
-        """Dispatch incoming frames: responses, events, heartbeats."""
+        """Dispatch incoming frames: responses, events, heartbeats.
+
+        Two guards against a zombie task from an abandoned foreign loop
+        (see _abandon_foreign_connection):
+
+        - BODY: the transport is captured at entry and every frame is
+          gated on it — after a migration the zombie's iterator keeps
+          draining the OLD transport, but its frames must never reach
+          _handle_frame (which reads the CURRENT transport at call time:
+          a server heartbeat echo would write to the NEW connection's
+          socket from the foreign loop, and a late anonymous
+          EXECUTION_EVENT could claim a NEW order's waiter with the OLD
+          order's ticket).
+        - TEARDOWN (finally): identity-guarded so the zombie's cancelled
+          teardown can never mark the NEW connection dead nor fail its
+          pending futures.
+        """
+        task = asyncio.current_task()
+        transport = self._transport
         try:
-            async for frame in self._transport.messages():
+            async for frame in transport.messages():
+                if self._transport is not transport:
+                    continue  # stale frame from the abandoned connection — drop
                 try:
                     await self._handle_frame(frame)
                 except Exception as exc:  # noqa: BLE001 — one bad frame must not kill the loop
@@ -454,7 +563,7 @@ class CTraderBridge:
         except Exception as exc:  # noqa: BLE001 — connection lost
             logger.warning("cTrader receive loop ended: %s", exc)
         finally:
-            if self._connected:
+            if self._connected and self._receive_task is task:
                 logger.error("cTrader connection lost for %s", self.config.name)
                 self._connected = False
                 self._fail_pending(ConnectionError("connection lost"))
@@ -556,9 +665,14 @@ class CTraderBridge:
         we mirror (config.heartbeat_interval). If sending fails the
         connection is dead — stop the loop loudly, not silently.
         """
+        transport = self._transport  # gate: _send reads the CURRENT
+        # transport at call time — a zombie heartbeat from an abandoned
+        # foreign loop must never write to the NEW connection's socket.
         try:
             while True:
                 await asyncio.sleep(self.config.heartbeat_interval)
+                if self._transport is not transport:
+                    return  # connection migrated — stop heartbeating it
                 idle = time.monotonic() - self._last_sent
                 if idle >= self.config.heartbeat_interval:
                     await self._send(ApiMessage(payload_type=msg.HEARTBEAT_EVENT))
@@ -566,7 +680,7 @@ class CTraderBridge:
             pass
         except Exception as exc:  # noqa: BLE001 — a dead heartbeat = dead connection
             logger.error("cTrader heartbeat loop stopped: %s (connection lost)", exc)
-            if self._connected:
+            if self._connected and self._heartbeat_task is asyncio.current_task():
                 self._connected = False
                 self._fail_pending(ConnectionError("heartbeat send failed"))
 
@@ -1173,10 +1287,18 @@ class CTraderBridge:
         touching the wire. The FIRST caller pays the ~2s handshake; every
         later caller in this process reuses the same connection until the
         server drops it (the next call then reconnects exactly once).
+
+        Loop ownership (sync-loop fix 20/11): ``_connected`` alone is NOT
+        enough — a bridge connected on a throwaway loop (asyncio.run flow)
+        has its receive pump parked on that loop and can never answer
+        requests from the persistent loop. The fast path therefore also
+        requires the persistent loop to OWN the connection; otherwise
+        connect() itself abandons the foreign connection and rebuilds
+        here, exactly once.
         """
-        if self._connected:
-            return True
         self._sync_loop.ensure_started()
+        if self._connected and self._conn_loop is self._sync_loop.loop:
+            return True
         if self._sync_loop.is_current():
             raise RuntimeError(
                 "ensure_connected_sync called from the persistent loop — "
