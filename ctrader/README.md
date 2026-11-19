@@ -105,8 +105,25 @@ repo นี้ `pyproject.toml` ตรึง dependency set ไว้และ�
    — lotSize หาย = connect abort ที่ boot / order ปฏิเสธก่อนออกจากมือ
    ไม่มีทางเดา scale เงียบๆ — tests
    `tests/test_ctrader_lot_size_fail_loud_causal.py`
-6. **Trendbar window จำกัด 1 สัปดาห์/request** + historical rate limit
-   5 req/s — bridge แบ่ง chunk เอง (test พิสูจน์)
+6. **Trendbar fetch 3 ชั้น (fix D1 20/11)** — ก่อนหน้า: ไล่ chunk
+   1 สัปดาห์/request ทำให้ D1 500 แท่ง = หน้าต่าง 500 วัน ≈ 72
+   requests × (rate limit 5 req/s + RTT) ≈ 31s > sync budget
+   (`request_timeout × 2` = 20s) → โดนฆ่ากลางทาง ได้ 0 rows ทุก cycle
+   · ชั้นหลัก: **ส่ง span เต็ม + field `count`** (docs ทางการไม่มี cap
+   span สำหรับ trendbars — บรรทัด 1 สัปดาห์คือ cap ของ *tick data*)
+   ใน request เดียว → D1 500 = 1 request (~0.4s) และไล่ page ย้อนหลัง
+   ด้วย `hasMore` เมื่อ server cap จำนวนแถวต่อ response · ชั้นสำรอง:
+   backend ที่ตอบ **error payload** กับ span ใหญ่ → กลับไปใช้ chunk
+   รายสัปดาห์ (latch จน reconnect — ประหยัดเฉพาะ connection ที่ติดถาวร
+   เช่น engine; fetcher stateless ต่อ fetch จ่ายทุกครั้งอยู่ดี) ส่วน
+   **timeout ธรรมดาไม่ latch** (กัน hiccup ครั้งเดียว degrade ถาวร)
+   พร้อม **early-stop 2 chunk ว่างติดกัน** = จุดเริ่มประวัติ · ชั้นกันโคตร:
+   **budget `trendbar_fetch_budget`** (default 15s < 20s sync budget)
+   ประวัติยาวเกินงบ → คืนแท่งใหม่ล่าสุดบางส่วนแทนตายเงียบๆ · **per-request
+   timeout ถูก clamp ตามงบคงเหลือ** — request ที่บินช่วงท้ายไม่มีสิทธิ์
+   รอเกินงบ (กัน worst case budget+10s ทะลุ sync deadline — รอบ
+   cross-context review จับ) — tests
+   `tests/test_ctrader_trendbar_fetch_causal.py`
 7. **Rate limit ปกติ 50 req/s/connection**
 8. **Equity ไม่มีใน `ProtoOATrader`** — bridge คำนวณ = balance + Σ
    unrealized PnL จาก reconcile + spot (ประมาณใน quote currency — สำหรับ

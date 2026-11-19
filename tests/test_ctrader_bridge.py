@@ -595,8 +595,10 @@ async def test_get_candles_tail_keeps_requested_count():
     await bridge.disconnect()
 
 
-async def test_get_candles_chunks_window_over_one_week():
-    """H1 x 200 bars = 30 days > 1-week cap -> two chunked requests."""
+async def test_get_candles_full_span_one_request_with_count():
+    """H1 x 200 bars = 30-day span: ONE full-span request carrying count
+    (the documented bars-back-from-toTimestamp field) — no weekly
+    chunking when the backend honors it (D1 fix 20/11)."""
     transport = FakeTransport()
     bridge = await connect_bridge(transport)
 
@@ -608,16 +610,47 @@ async def test_get_candles_chunks_window_over_one_week():
         } for i in range(n)]
 
     transport.replies[msg.GET_TRENDBARS_REQ] = [
+        {"period": msg.TrendbarPeriod.H1, "trendbar": h1_bars(3_000_000, 200)},
+    ]
+    df = await bridge.get_candles("XAUUSD", "H1", 200)
+    assert len(df) == 200
+    requests = transport.sent_of(msg.GET_TRENDBARS_REQ)
+    assert len(requests) == 1
+    assert requests[0].payload["count"] == 200
+    # The full requested span in one window — not a 1-week slice.
+    span_ms = requests[0].payload["toTimestamp"] - requests[0].payload["fromTimestamp"]
+    assert span_ms == 200 * 3_600 * 1000
+    await bridge.disconnect()
+
+
+async def test_get_candles_falls_back_to_weekly_chunks_when_wide_rejected():
+    """Backends that answer an error for spans over 1 week keep the
+    proven weekly-chunk path: contiguous windows, no data skipped."""
+    transport = FakeTransport()
+    bridge = await connect_bridge(transport)
+
+    def h1_bars(start_minutes: int, n: int) -> list[dict[str, Any]]:
+        return [{
+            "volume": 50, "period": msg.TrendbarPeriod.H1,
+            "low": int(2350.0 * 100_000), "deltaOpen": 0, "deltaClose": 0,
+            "deltaHigh": 0, "utcTimestampInMinutes": start_minutes + i * 60,
+        } for i in range(n)]
+
+    transport.replies[msg.GET_TRENDBARS_REQ] = [
+        error_res("CH_INVALID_REQUEST", "span too wide"),
         {"period": msg.TrendbarPeriod.H1, "trendbar": h1_bars(3_000_000, 100)},
         {"period": msg.TrendbarPeriod.H1, "trendbar": h1_bars(3_000_000 - 100 * 60, 100)},
     ]
     df = await bridge.get_candles("XAUUSD", "H1", 200)
     assert len(df) == 200
-    assert len(transport.sent_of(msg.GET_TRENDBARS_REQ)) == 2
+    requests = transport.sent_of(msg.GET_TRENDBARS_REQ)
+    assert len(requests) == 3  # one wide attempt + two weekly chunks
+    wide, first, second = requests
+    wide_span = wide.payload["toTimestamp"] - wide.payload["fromTimestamp"]
+    assert wide_span > msg.TRENDBAR_MAX_WINDOW_MS  # what got rejected
     # The second chunk's window is contiguous with the first one
-    first_req, second_req = transport.sent_of(msg.GET_TRENDBARS_REQ)
-    assert second_req.payload["toTimestamp"] == first_req.payload["fromTimestamp"]
-    assert second_req.payload["fromTimestamp"] < first_req.payload["fromTimestamp"]
+    assert second.payload["toTimestamp"] == first.payload["fromTimestamp"]
+    assert second.payload["fromTimestamp"] < first.payload["fromTimestamp"]
     await bridge.disconnect()
 
 
@@ -1352,8 +1385,10 @@ async def test_get_candles_pages_hasmore_inside_window():
     assert len(df) == 4  # all four bars, no silent gap
     requests = transport.sent_of(msg.GET_TRENDBARS_REQ)
     assert len(requests) == 2
-    # Second page pages backward from the oldest received bar, same window
-    assert requests[1].payload["toTimestamp"] == (now_min - 5) * 60_000
+    # Second page pages backward from the oldest received bar (exclusive
+    # bound: oldest - 1ms, so the boundary bar is never double-counted),
+    # same window start (wide path, D1 fix 20/11).
+    assert requests[1].payload["toTimestamp"] == (now_min - 5) * 60_000 - 1
     assert requests[1].payload["fromTimestamp"] == requests[0].payload["fromTimestamp"]
     await bridge.disconnect()
 

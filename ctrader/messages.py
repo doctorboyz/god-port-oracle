@@ -166,8 +166,20 @@ TRENDBAR_PERIOD_SECONDS = {
     TrendbarPeriod.MN1: 2592000,  # nominal 30 days
 }
 
-# Max window per ProtoOAGetTrendbarsReq request (1 week, from proto docs).
+# Fallback window per ProtoOAGetTrendbarsReq request (1 week). The
+# official message reference documents NO span cap for trendbars (Unix
+# bounds only) plus an optional count field — the primary fetch path
+# asks for the full span with count in one request. 1 week is the
+# documented cap for historical TICK data; we keep it as the fallback
+# window for backends that reject wide trendbar spans (D1 fix 20/11).
 TRENDBAR_MAX_WINDOW_MS = 604_800_000
+
+# Consecutive empty weekly windows before the fallback declares the
+# start of history and stops paging backward. 2 tolerates one odd
+# empty week without chasing history the server does not have —
+# pre-fix, D1 x 500 on a ~130-day backend walked ~53 empty windows
+# (~72 requests total) and died at the sync timeout with zero bars.
+TRENDBAR_EMPTY_WINDOW_LIMIT = 2
 
 # Historical data rate limit: 5 requests/second per connection (official docs).
 HISTORICAL_REQUESTS_PER_SECOND = 5

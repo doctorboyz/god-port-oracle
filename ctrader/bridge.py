@@ -213,6 +213,10 @@ class CTraderBridge:
         self._spot: dict[int, dict[str, float]] = {}
         self._subscribed: set[int] = set()
         self._symbol: Optional[str] = None  # resolved default symbol name
+        # Wide trendbar windows (full span + count in one request) were
+        # rejected by this backend: latch until reconnect so each fetch
+        # does not pay a doomed wide request first (reset in connect()).
+        self._trendbar_wide_rejected: bool = False
         # Persistent-loop facility for the sync parity wrappers (20/11
         # engine wiring): started lazily by ensure_connected_sync().
         self._sync_loop = _SyncLoopThread()
@@ -272,6 +276,7 @@ class CTraderBridge:
 
         self._connected = True
         self._conn_loop = loop
+        self._trendbar_wide_rejected = False  # fresh connection may accept wide windows
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info(
             "Connected to cTrader %s:%s (%s, account %d, symbol %s)",
@@ -434,6 +439,7 @@ class CTraderBridge:
 
     async def _await_response(
         self, request: ApiMessage, expected_type: int | None = None,
+        timeout: float | None = None,
     ) -> ApiMessage:
         """Send a req/res message and await the matching response envelope."""
         future: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -441,7 +447,10 @@ class CTraderBridge:
         self._pending[request.client_msg_id] = future
         try:
             await self._send(request)
-            response = await asyncio.wait_for(future, timeout=self.config.request_timeout)
+            response = await asyncio.wait_for(
+                future,
+                timeout=self.config.request_timeout if timeout is None else timeout,
+            )
         finally:
             self._pending.pop(request.client_msg_id, None)
         if expected_type is not None and response.payload_type not in (
@@ -789,17 +798,149 @@ class CTraderBridge:
     async def _fetch_trendbars(
         self, symbol_id: int, period: int, count: int,
     ) -> list[dict[str, Any]]:
-        """Chunked ProtoOAGetTrendbarsReq — window capped at 1 week/request.
+        """Fetch up to `count` trendbars, newest-first.
 
-        The server may also cap the number of bars per response (hasMore) —
-        when that happens we page BACKWARD inside the same window from the
-        oldest bar received, instead of skipping the rest of the window.
+        The official message reference documents no span cap for
+        trendbars (Unix bounds only) and an optional count field — bars
+        back from toTimestamp — so the primary path asks for the whole
+        span with count in ONE request (D1 x 500 = 1 request instead of
+        ~72 weekly windows ≈ 31s at the 5 req/s historical rate limit,
+        past the sync wrapper's request_timeout * 2 budget; D1 fix
+        20/11).
+
+        Backends that reject wide spans fall back to the proven weekly
+        windows, which stop early at the start of history; both paths
+        respect a wall-clock budget so even an unbounded history returns
+        the newest partial slice instead of timing out to zero bars.
         """
+        if count <= 0:
+            return []
         period_seconds = msg.TRENDBAR_PERIOD_SECONDS[period]
         to_ms = int(time.time() * 1000)
-        window_start = to_ms - count * period_seconds * 1000
+        window_start = max(0, to_ms - count * period_seconds * 1000)
+        deadline = time.monotonic() + self.config.trendbar_fetch_budget
+        if not self._trendbar_wide_rejected:
+            bars = await self._fetch_trendbars_wide(
+                symbol_id, period, count, window_start, to_ms, deadline,
+            )
+            if bars is not None:
+                return bars
+            # Wide failed outright (rejected or timed out) — the wide path
+            # itself decides whether to latch the rejection; this fetch
+            # continues on the proven weekly chunks.
+        return await self._fetch_trendbars_chunked(
+            symbol_id, period, count, window_start, to_ms, deadline,
+        )
+
+    def _trendbar_page_timeout(self, deadline: float) -> float:
+        """Per-request timeout clamped to the fetch budget's remainder.
+
+        An in-flight page must never wait a full request_timeout past
+        the deadline: worst case budget + request_timeout + sleep
+        exceeds the sync wrapper's 2 x request_timeout and the coroutine
+        dies mid-walk with zero bars — the original D1 bug (review H1,
+        20/11).
+        """
+        remaining = deadline - time.monotonic()
+        return max(0.05, min(self.config.request_timeout, remaining))
+
+    async def _fetch_trendbars_wide(
+        self, symbol_id: int, period: int, count: int,
+        window_start: int, to_ms: int, deadline: float,
+    ) -> Optional[list[dict[str, Any]]]:
+        """Primary path: full-span window + count in one request, paging
+        backward only when the server caps rows per response (hasMore).
+
+        Returns None when the FIRST request fails outright (wide spans
+        unusable here → caller falls back to weekly chunks). An explicit
+        server rejection (CTraderApiError — the receive loop converts
+        ProtoOAErrorRes) latches until reconnect; a plain timeout does
+        NOT (transient — the next fetch retries wide, or a single hiccup
+        would permanently degrade every later fetch on this connection
+        to the slow chunked path, review M2 20/11). A later page
+        failure keeps the bars collected so far — partial data beats a
+        crash.
+        """
         bars: list[dict[str, Any]] = []
         cursor_to = to_ms
+        while len(bars) < count:
+            request = self._build_request(msg.GET_TRENDBARS_REQ, {
+                "ctidTraderAccountId": self.config.account_id,
+                "fromTimestamp": window_start,
+                "toTimestamp": cursor_to,
+                "period": period,
+                "symbolId": symbol_id,
+                "count": count - len(bars),
+            })
+            try:
+                response = await self._await_response(
+                    request, msg.GET_TRENDBARS_RES,
+                    timeout=self._trendbar_page_timeout(deadline),
+                )
+            except CTraderApiError as exc:
+                # Explicit server rejection (the receive loop converts
+                # ProtoOAErrorRes into CTraderApiError): this backend
+                # enforces a span cap — latch until reconnect.
+                if not bars:
+                    logger.info(
+                        "wide trendbar window rejected (%s) — using weekly "
+                        "chunks until reconnect", exc,
+                    )
+                    self._trendbar_wide_rejected = True
+                    return None
+                logger.warning("trendbar page failed after %d bars: %s", len(bars), exc)
+                return bars
+            except Exception as exc:  # noqa: BLE001 — never raise out of a fetch
+                # Timeout/transport trouble is transient — do NOT latch,
+                # or one hiccup would permanently degrade every later
+                # fetch on this connection to the slow chunked path
+                # (review M2 20/11).
+                if not bars:
+                    logger.info(
+                        "wide trendbar window failed (%s) — using weekly chunks "
+                        "this fetch (transient: retried next fetch)", exc,
+                    )
+                    return None
+                logger.warning("trendbar page failed after %d bars: %s", len(bars), exc)
+                return bars
+            chunk = response.payload.get("trendbar") or []
+            if not chunk:
+                return bars  # nothing at this cursor — start of history
+            bars.extend(chunk)
+            if len(bars) >= count or not response.payload.get("hasMore"):
+                return bars  # count filled, or everything available was returned
+            previous_to = cursor_to
+            cursor_to = min(
+                int(bar.get("utcTimestampInMinutes", 0)) for bar in chunk
+            ) * 60_000 - 1
+            if cursor_to >= previous_to or cursor_to <= window_start:
+                return bars  # no backward progress / span exhausted
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "trendbar fetch budget hit at %d/%d bars — returning newest slice",
+                    len(bars), count,
+                )
+                return bars
+            await asyncio.sleep(self.config.trendbar_min_interval)
+        return bars
+
+    async def _fetch_trendbars_chunked(
+        self, symbol_id: int, period: int, count: int,
+        window_start: int, to_ms: int, deadline: float,
+    ) -> list[dict[str, Any]]:
+        """Fallback path: weekly windows (≤ TRENDBAR_MAX_WINDOW_MS).
+
+        Early-stop: after TRENDBAR_EMPTY_WINDOW_LIMIT consecutive empty
+        windows the history before them does not exist — stop paging.
+        Pre-fix, D1 x 500 on a backend with ~130 days of history walked
+        ~53 empty windows (~72 requests, ~20s+ on the wire) and died at
+        the sync timeout with zero bars. The deadline keeps even an
+        unbounded history inside the sync wrapper's timeout, returning
+        the newest partial slice.
+        """
+        bars: list[dict[str, Any]] = []
+        cursor_to = to_ms
+        empty_windows = 0
         while len(bars) < count and cursor_to > window_start:
             window_begin = max(window_start, cursor_to - msg.TRENDBAR_MAX_WINDOW_MS)
             request = self._build_request(msg.GET_TRENDBARS_REQ, {
@@ -810,27 +951,47 @@ class CTraderBridge:
                 "symbolId": symbol_id,
             })
             try:
-                response = await self._await_response(request, msg.GET_TRENDBARS_RES)
+                response = await self._await_response(
+                    request, msg.GET_TRENDBARS_RES,
+                    timeout=self._trendbar_page_timeout(deadline),
+                )
             except Exception as exc:  # noqa: BLE001 — partial data beats a crash
+                # Includes CTraderApiError: the receive loop converts
+                # ProtoOAErrorRes into an exception (errorCode inside).
                 logger.error("trendbar fetch failed: %s", exc)
                 break
-            chunk = response.payload.get("trendbar", [])
+            chunk = response.payload.get("trendbar") or []
             bars.extend(chunk)
             previous_to = cursor_to
             if response.payload.get("hasMore") and chunk:
                 # Server capped this window's bars — continue from the oldest
-                # bar received, still inside the same window (bar order in
-                # the response is not guaranteed, so min() over timestamps).
+                # bar received (exclusive: oldest - 1ms, same bound as the
+                # wide path — an inclusive cursor re-fetches the boundary
+                # bar every page, inflating len(bars) with duplicates and
+                # ending the walk short of unique bars; review M4 20/11).
                 cursor_to = min(
                     int(bar.get("utcTimestampInMinutes", 0)) for bar in chunk
-                ) * 60_000
+                ) * 60_000 - 1
+                empty_windows = 0
             else:
                 cursor_to = window_begin
+                if chunk:
+                    empty_windows = 0
+                else:
+                    empty_windows += 1
+                    if empty_windows >= msg.TRENDBAR_EMPTY_WINDOW_LIMIT:
+                        break  # start of history — older windows are empty
             if cursor_to >= previous_to:
                 break  # no backward progress — keep what we have, don't spin
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "trendbar fetch budget hit at %d/%d bars — returning newest slice",
+                    len(bars), count,
+                )
+                break
             if cursor_to > window_start:
                 # Historical data rate limit: 5 req/s per connection.
-                await asyncio.sleep(getattr(self.config, "trendbar_min_interval", 0.2))
+                await asyncio.sleep(self.config.trendbar_min_interval)
         return bars
 
     async def get_quote(self, symbol: str = "XAUUSD") -> Optional[tuple[float, float]]:

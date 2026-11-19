@@ -36,6 +36,13 @@ class CTraderConfig(BaseModel):
     heartbeat_interval: float = 20.0  # SDK behavior: heartbeat when idle >20s
     # Historical data rate limit: 5 req/s — pause between trendbar chunks.
     trendbar_min_interval: float = 0.2
+    # Wall-clock budget for ONE get_candles trendbar fetch (all requests
+    # combined). Per-request timeouts are clamped to the budget's
+    # remainder inside the fetch, so a walk can never overrun into the
+    # sync wrapper's request_timeout * 2 deadline (killed mid-walk =
+    # zero bars, the D1 x 500 bug 20/11). Default leaves 5s headroom
+    # under 2 x request_timeout = 20s.
+    trendbar_fetch_budget: float = 15.0
 
     @property
     def is_configured(self) -> bool:
