@@ -7,7 +7,7 @@ the real sizing call — never os.environ echo.
 
 Danger points this file pins:
 
-1. DRY_RUN=1 HARD-CODED per service (no ${...}): flipping to live is a
+1. DRY_RUN HARD-CODED per service (no ${...}): each flip to live is a
    deliberate compose edit after Hermes verifies simulated trades — the
    stale-host-.env bug class must not be able to arm the engine.
 2. USD face-value baselines: the cTrader bridge reports USD on these demo
@@ -41,11 +41,12 @@ COMPOSE = ROOT / "docker-compose.ctrader-demo.yml"
 # ── The cTrader-demo contract (single source of truth) ──────────────────
 # usd = face value the bridge reports (USD demo accounts).
 # ctid = ctidTraderAccountId on the IC Markets demo server (19/11 session).
-# Stage 1: DRY_RUN=1 both — Hermes arms only after verifying simulated
-# trades + bridge equity stamps (runbook in the handoff).
+# Stage 2 (20/11): IC1 ARMED (DRY_RUN=0) after Hermes verified simulated
+# trades + bridge equity stamps + 3 clean cycles; IC2 stays dry-run until
+# its own verification pass (runbook in the handoff).
 IC_EXPECT = {
     "IC1": {"usd": 2200, "ctid": "49633503", "strategy_id": "mr-bet-p22-IC1",
-            "dry_run": "1"},
+            "dry_run": "0"},
     "IC2": {"usd": 500, "ctid": "49633450", "strategy_id": "mr-bet-p22-IC2",
             "dry_run": "1"},
 }
@@ -195,7 +196,7 @@ class TestComposeContract:
         for acct, spec in IC_EXPECT.items():
             want = f"DRY_RUN={spec['dry_run']}"
             assert any(e == want for e in _service_env(doc, acct)), (
-                f"{acct}: requires {want} hard-coded (stage 1 = simulated)"
+                f"{acct}: requires {want} hard-coded (never ${{...}})"
             )
 
     def test_real_account_ctid_absent(self):

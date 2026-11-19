@@ -12,10 +12,11 @@
 # P0 lesson: a wrong-unit baseline kills the DD line at boot).
 #
 # Rules this file must keep (contract tests lock them):
-# - DRY_RUN=1 HARD-CODED: flipping to live is a separate compose-line
-#   change after Hermes verifies the first simulated trades (demo-level
-#   approval stands from 19/11; real accounts are NOT covered by this file
-#   and require the kill-switch rebuild first).
+# - DRY_RUN is HARD-CODED per service (never ${...}): IC1 ARMED 20/11
+#   (Hermes verified simulated trades + bridge equity stamps + 3 clean
+#   cycles first); IC2 stays DRY_RUN=1 until its own verification pass.
+#   Real accounts are NOT covered by this file and require the kill-switch
+#   rebuild + written approval first.
 # - CTRADER_HOST_TYPE_ICn=demo HARD-CODED, and the runner refuses non-demo
 #   engine wiring anyway (belt + suspenders).
 # - ${...} ONLY for credentials (CTRADER_CLIENT_ID/CLIENT_SECRET/
@@ -36,9 +37,9 @@ services:
     container_name: oracle-engine-ic1
     environment:
       - TRADING_PHASE=trade
-      # DRY-RUN stage 1: Hermes verifies simulated trades + equity stamps
-      # from the bridge before flipping this line (runbook in the handoff).
-      - DRY_RUN=1
+      # ARMED 20/11: Hermes verified simulated trades + bridge equity
+      # stamps + 3 clean cycles (0 sync-call failures) before this flip.
+      - DRY_RUN=0
       - ACCOUNTS=IC1
       - DB_PATH=/app/data/oracle_ic1.db
       - COLLECT_INTERVAL=300
