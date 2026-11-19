@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -65,6 +65,13 @@ def _is_portfolio_account(name: str) -> bool:
     table by name at init instead of the static ACCOUNT_IDS map, because each
     P-engine container runs against its own database file."""
     return len(name) >= 2 and name[0] == "P" and name[1:].isdigit()
+
+
+def _is_ic_account(name: str) -> bool:
+    """IC-accounts (cTrader demo engines, IC Markets) — same DB-lookup
+    account_id resolution as P-accounts: one engine container per account
+    against its own database file (engine wiring stage 2, 20/11)."""
+    return len(name) >= 2 and name[:2] == "IC" and name[2:].isdigit()
 
 # Risk per trade by account (conservative for demo)
 ACCOUNT_RISK = {"A": 0.01, "B": 0.02, "C": 0.02, "D": 0.02}
@@ -124,15 +131,53 @@ class LiveTrader:
         risk_config: Optional[RiskConfig] = None,
         event_bus: Optional[EventBus] = None,
         notifier: Optional["TelegramNotifier"] = None,
+        bridge_factory: Optional["Callable[[Any], Any]"] = None,
     ):
         self.account = account.upper()
         # ISSUE M3: fail loud on unknown account — silent fallback to account_id=3
         # routed Real-A trades to demo "C" in DB → kill switch reacted to demo PnL.
-        if self.account not in ACCOUNT_IDS and not _is_portfolio_account(self.account):
+        # IC-accounts (cTrader demo engines, 20/11) pass the same way P-accounts do.
+        if (
+            self.account not in ACCOUNT_IDS
+            and not _is_portfolio_account(self.account)
+            and not _is_ic_account(self.account)
+        ):
             raise ValueError(
                 f"Unknown account '{self.account}' — must be one of {list(ACCOUNT_IDS)} "
-                f"or a P-account (P1-P99). Check ACCOUNT_NAME env var."
+                f"or a P-account (P1-P99) or an IC-account (IC1-IC99). "
+                f"Check ACCOUNT_NAME env var."
             )
+        # cTrader wiring (stage 2, 20/11): the sanctioned injection point for
+        # a non-MT5 bridge. This engine constructs its bridge at NINE self-serve
+        # points via a function-local `from metty.bridge.client import MT5Bridge`
+        # followed by `MT5Bridge(config)`. Editing nine call sites (and every
+        # future one) would scatter the seam; instead the factory passed here
+        # replaces the metty.bridge.client.MT5Bridge module attribute for THIS
+        # process — the single point through which all nine sites connect to
+        # the injected bridge. Deployment rule: one engine account per process
+        # (the compose gives each IC-engine its own container); the factory
+        # guards against a name mismatch so a mixed process fails loud
+        # instead of routing the wrong account's orders.
+        # Default (None): the seam is left untouched — MT5 / A-D / P
+        # behavior identical to the byte (default-path contract test).
+        self._bridge_factory = bridge_factory
+        if bridge_factory is not None:
+            import metty.bridge.client as _bridge_client
+            installed = getattr(_bridge_client, "_injected_bridge_factory", None)
+            if installed is not None and installed is not bridge_factory:
+                raise RuntimeError(
+                    "a different bridge factory is already installed in this "
+                    "process — one engine account per process (cTrader "
+                    "wiring 20/11); refusing to swap mid-flight"
+                )
+            if installed is None:
+                if not hasattr(_bridge_client, "MT5Bridge"):
+                    raise RuntimeError(
+                        "metty.bridge.client.MT5Bridge missing — cannot "
+                        "install the bridge factory (wiring bug, report it)"
+                    )
+                _bridge_client.MT5Bridge = bridge_factory
+                _bridge_client._injected_bridge_factory = bridge_factory
         self.display_name = get_display_name(self.account)
         self.db_path = db_path
         # DATA_DIR env lets a container point at a shared feed volume
@@ -191,9 +236,10 @@ class LiveTrader:
         if self.account in ACCOUNT_IDS:
             self.account_id = ACCOUNT_IDS[self.account]
         else:
-            # P-accounts: resolve account_id from the accounts table by name.
-            # Each P-engine container runs against its own DB file, so the
-            # static map doesn't apply. Fail loud if the row is missing.
+            # P-accounts and IC-accounts: resolve account_id from the accounts
+            # table by name. Each engine container runs against its own DB
+            # file, so the static map doesn't apply. Fail loud if the row is
+            # missing.
             from metty.core.db import get_account_id_by_name
             resolved = get_account_id_by_name(self.account, self.db_path)
             if resolved is None:

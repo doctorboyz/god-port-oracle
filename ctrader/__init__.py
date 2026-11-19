@@ -10,11 +10,13 @@ without touching core code (contract: tests/test_ctrader_contract.py).
 
 from .bridge import CTraderApiError, CTraderBridge
 from .config import CTraderConfig
+from .engine_adapter import CTraderEngineAdapter
 from .endpoints import EndPoints
 
 __all__ = [
     "CTraderApiError",
     "CTraderBridge",
     "CTraderConfig",
+    "CTraderEngineAdapter",
     "EndPoints",
 ]

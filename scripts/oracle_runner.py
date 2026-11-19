@@ -243,12 +243,103 @@ def run_collector(account: str, db_path: str, interval: int):
         time.sleep(interval)
 
 
+def _is_ctrader_account(account: str) -> bool:
+    """ACCOUNT_TYPE_{account}=ctrader selects the cTrader bridge for this
+    engine (engine wiring stage 2, 20/11). Any other value (real/demo/
+    cent_real/...) keeps the MT5 path — default behavior untouched."""
+    return os.environ.get(f"ACCOUNT_TYPE_{account}", "").strip().lower() == "ctrader"
+
+
+def _build_ctrader_bridge_factory(account: str):
+    """Factory for the LiveTrader bridge-injection point (cTrader branch).
+
+    Per-account env wins (same precedence as every engine knob):
+        CTRADER_ACCOUNT_ID_{account} -> CTRADER_ACCOUNT_ID   (ctidTraderAccountId)
+        CTRADER_HOST_TYPE_{account}  -> CTRADER_HOST_TYPE    (demo only — see below)
+    Credentials are the shared CTRADER_* set (host .env via compose
+    interpolation, never in this repo).
+
+    Fail-loud at BOOT, never mid-order: missing ctid or credentials raise
+    here so the trader thread dies loudly instead of silently degrading
+    every cycle to CSV feed + paper equity (the heartbeat lie the wiring
+    dispatch explicitly forbids). Demo-only: engine wiring for live cTrader
+    accounts is out of scope until the kill switch is rebuilt (see
+    ctrader/README.md).
+
+    The returned factory is a CACHED singleton: every one of the engine's
+    nine self-serve constructions gets the SAME CTraderEngineAdapter —
+    one persistent connection per engine process per account (hot-path
+    rule: reconnect per call would cost ~2s of app+account auth each).
+    """
+    from ctrader import CTraderConfig
+    from ctrader.engine_adapter import CTraderEngineAdapter
+
+    def _int_env(key: str) -> int:
+        raw = (os.environ.get(key) or "").strip()
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+
+    ctid = _int_env(f"CTRADER_ACCOUNT_ID_{account}") or _int_env("CTRADER_ACCOUNT_ID")
+    if not ctid:
+        raise RuntimeError(
+            f"ACCOUNT_TYPE_{account}=ctrader but CTRADER_ACCOUNT_ID_{account} / "
+            f"CTRADER_ACCOUNT_ID are unset — refusing to start (the engine would "
+            f"have to guess the trading account)."
+        )
+    host_type = (
+        os.environ.get(f"CTRADER_HOST_TYPE_{account}")
+        or os.environ.get("CTRADER_HOST_TYPE")
+        or "demo"
+    ).strip().lower() or "demo"
+    if host_type != "demo":
+        raise RuntimeError(
+            f"Engine cTrader wiring is DEMO-ONLY (ACCOUNT_TYPE_{account}=ctrader, "
+            f"CTRADER_HOST_TYPE={host_type!r}). Live cTrader accounts require the "
+            f"kill-switch rebuild first — see ctrader/README.md."
+        )
+    config = CTraderConfig(
+        name=f"ctrader-{account.lower()}",
+        client_id=os.environ.get("CTRADER_CLIENT_ID", ""),
+        client_secret=os.environ.get("CTRADER_CLIENT_SECRET", ""),
+        access_token=os.environ.get("CTRADER_ACCESS_TOKEN", ""),
+        account_id=ctid,
+        host_type=host_type,
+        symbol=os.environ.get("CTRADER_SYMBOL", "XAUUSD"),
+    )
+    if not config.is_configured:
+        raise RuntimeError(
+            f"cTrader credentials missing for {account} "
+            f"(CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET / CTRADER_ACCESS_TOKEN) — "
+            f"refusing to start half-configured."
+        )
+    adapter = CTraderEngineAdapter(config, account=account.upper())
+
+    def factory(mt5_config):
+        adapter.assert_account(mt5_config)  # one engine account per process
+        return adapter
+
+    logger.info(
+        "[Trader:%s] cTrader bridge selected (ACCOUNT_TYPE_%s=ctrader, ctid=%d, host=demo)",
+        get_display_name(account), account, ctid,
+    )
+    return factory
+
+
 def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifier=None):
     """Run live trader in a loop."""
     from dotenv import load_dotenv
     load_dotenv()
 
     from metty.execution.live_trader import LiveTrader, RiskConfig
+
+    # Bridge selection point (cTrader branch, 20/11): the ONLY place the
+    # trading path decides which broker a given account runs on. Default
+    # (MT5 path) constructs no factory and behaves exactly as before.
+    bridge_factory = None
+    if _is_ctrader_account(account):
+        bridge_factory = _build_ctrader_bridge_factory(account)
 
     risk = RiskConfig(risk_per_trade=float(os.environ.get("RISK_PER_TRADE", "0.02")))
     trader = LiveTrader(
@@ -258,6 +349,7 @@ def run_trader(account: str, db_path: str, interval: int, dry_run: bool, notifie
         risk_config=risk,
         event_bus=_event_bus,
         notifier=notifier,
+        bridge_factory=bridge_factory,
     )
     mode = "DRY-RUN" if dry_run else "LIVE"
     logger.info("[Trader:%s] Starting %s trader (interval=%ds)", get_display_name(account), mode, interval)
@@ -624,6 +716,37 @@ def _seed_portfolio_accounts(accounts: list, db_path) -> None:
             logger.warning("Could not seed portfolio account %s: %s", acct_name, exc)
 
 
+def _seed_ctrader_accounts(accounts: list, db_path) -> None:
+    """Seed IC-accounts (IC<digits> — cTrader demo engines, 20/11) so
+    LiveTrader can resolve its account_id by name, exactly like the
+    P-account seeder minus the farm-variant enrollment (no league table
+    for demo engines). Values from per-account env: INITIAL_BALANCE_ICn,
+    LEVERAGE_ICn, MT5_BRIDGE_ICn_HOST/PORT, SIGNAL_GROUP_ICn. Idempotent.
+    """
+    from metty.core.db import get_account_id_by_name, insert_account
+
+    for acct_name in accounts:
+        acct_name = acct_name.strip().upper()
+        if not (len(acct_name) >= 2 and acct_name[:2] == "IC" and acct_name[2:].isdigit()):
+            continue
+        if get_account_id_by_name(acct_name, Path(db_path)) is not None:
+            continue
+        try:
+            insert_account(
+                name=acct_name,
+                balance=float(os.environ.get(f"INITIAL_BALANCE_{acct_name}", "500")),
+                leverage=int(os.environ.get(f"LEVERAGE_{acct_name}", "500")),
+                bridge_host=os.environ.get(f"MT5_BRIDGE_{acct_name}_HOST",
+                                           f"mt5{acct_name.lower()}"),
+                bridge_port=int(os.environ.get(f"MT5_BRIDGE_{acct_name}_PORT", "8001")),
+                signal_group=os.environ.get(f"SIGNAL_GROUP_{acct_name}", "portfolio"),
+                db_path=Path(db_path),
+            )
+            logger.info("Seeded cTrader demo account %s", acct_name)
+        except Exception as exc:
+            logger.warning("Could not seed cTrader account %s: %s", acct_name, exc)
+
+
 def _seed_default_accounts(db_path) -> None:
     """Seed demo A/B/C accounts if they don't exist yet (legacy behavior).
 
@@ -680,6 +803,9 @@ def main():
     # account against its own DB file, so the row must exist before
     # LiveTrader resolves its account_id.
     _seed_portfolio_accounts(accounts, db_path)
+
+    # Seed IC-accounts (cTrader demo engines, 20/11) — same DB precondition.
+    _seed_ctrader_accounts(accounts, db_path)
 
     # Setup Telegram notifier.
     # 2026-09-20: REPORTING_ENABLED (default 0) is the master kill-switch for ALL

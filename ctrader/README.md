@@ -173,6 +173,61 @@ credential จริง:
    `_fetcher_service()` เสร็จ** ไม่งั้น regenerate แล้ว CTRADER_* block
    หายเงียบๆ (งานถัดไป — อยู่นอก scope วันนี้)
 
+## Engine wiring stage 2 — P22 บน cTrader demo (20/11)
+
+**สถานะ: code เสร็จ + test ครบ + DRY_RUN — ยังไม่ deploy (Hermes เป็นคน
+deploy ตาม runbook ข้างล่าง)**
+
+สอง engine วิ่ง P22 champion ผ่าน CTraderBridge แล้ว (ไม่ใช่ MT5):
+
+- `oracle-engine-ic1` — ctid 49633503, baseline **$2,200 USD** face value
+- `oracle-engine-ic2` — ctid 49633450, baseline **$500 USD** face value
+- ทั้งคู่ `DRY_RUN=1` hard-code ใน `docker-compose.ctrader-demo.yml`
+  (simulated trades ก่อน — Hermes เป็นคนเสนอ flip เมื่อเห็นไม้แรกตรงสูตร)
+
+กลไกเลือก bridge (จุดเดียวใน runner): `ACCOUNT_TYPE_ICn=ctrader` →
+`_build_ctrader_bridge_factory()` สร้าง `CTraderEngineAdapter` (cache ต่อ
+process) → ส่งเข้า `LiveTrader(bridge_factory=...)` — constructor เอา factory
+ไปแทน `metty.bridge.client.MT5Bridge` ที่ 9 จุด self-serve ทั้งหมด ไม่แก้
+call-site แม้แต่จุดเดียว · บช. อื่น (A/P1-P3) ไม่ส่ง factory = เดินทาง MT5
+เหมือนเดิมเป๊ะ (test ล็อกไว้) · account อื่นปลอมเข้ามา = `ACCOUNT_MISMATCH`
+refuse + หนึ่ง engine ต่อ process
+
+**Persistent connection (กฎ hot-path)**: sync wrappers ทั้ง 6 ใช้
+connection เดียวบน persistent loop (daemon thread) — handshake เดียว
+ต่อหลาย cycle (พิสูจน์ใน test: 2 cycles เต็ม + async order flow =
+`APPLICATION_AUTH_REQ` นับ 1) · `adapter.disconnect()` เป็น no-op โดย
+เจตนา (engine เรียกตาม idiom MT5 แต่ cTrader auth แพง — ห้ามฉีก)
+
+**Sizing บน IC1/IC2** (สูตร `lot = equity×0.005÷(SL×100)` + floor
+0.01-granularity):
+
+| บช. | equity | SL | raw | ส่งจริง |
+|-----|--------|----|-----|---------|
+| IC1 | $2,200 | $6 | 0.0183 | **0.01** (floor) |
+| IC1 | $2,200 | $4 | 0.0275 | **0.02** (เหนือ floor — บช.ควบคุม) |
+| IC2 | $500 | $6 | 0.0042 | **0.01** (floor ≈ 1.2%/ไม้ — flag ให้คุณหมอทราบ) |
+
+**Runbook deploy IC1 (บังคับตามลำดับ)**:
+
+1. `docker compose -f docker-compose.ctrader-demo.yml build` **ก่อนเสมอ**
+   (up โดยไม่ build = image เก่า = equity_ts ไม่เดิน = มองเหมือน outage)
+2. ขึ้น VPS env ก่อน: `CTRADER_CLIENT_ID` / `CTRADER_CLIENT_SECRET` /
+   `CTRADER_ACCESS_TOKEN` (host `.env` — repo ไม่เก็บ) · ไม่ตั้งค่าเหล่านี้ =
+   container ตายตั้งแต่ boot พร้อมเหตุผล (fail-loud by design)
+3. `docker compose -f docker-compose.ctrader-demo.yml up -d oracle-engine-ic1`
+   (IC2 รอ IC1 ผ่าน 1 cycle ก่อน)
+4. ตรวจจาก artifact จริง:
+   - log ต้องเห็น symbol resolve (XAUUSD) + account auth (ctid 49633503)
+   - `equity_ts` เดินทุก cycle (300s) และ `current_equity` มาจาก bridge
+     จริง (~$2,200) — **ห้ามเป็นค่า paper fallback** (test ล็อก path นี้)
+   - reason census สะอาด (skip เพราะเหตุผลจริง เช่น ไม่มีสัญญาณ/สเกล —
+     ไม่ใช่ bridge fail ทั้ง cycle)
+   - ไม้แรก (simulated): lot ตรงสูตรในตารางข้างบน → เสนอ flip DRY_RUN
+5. ข้อระวัง: `_check_existing_position` เรียก rpyc ตรง (จุดที่ 11 นอก
+   scope) — บช. IC จะ warn ต่อ cycle แล้วตกไป DB (ปลอดภัย แต่ log มี noise
+   — งานถัดไปถ้าจะเก็บ)
+
 ## แผนเชื่อมแบบ demo ก่อน real (บังคับ)
 
 1. **Demo account ก่อนเสมอ** — `CTRADER_HOST_TYPE=demo` + ctidTraderAccountId

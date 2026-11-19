@@ -20,6 +20,7 @@ CTraderTransport (transport.py), which unit tests replace with a fake.
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -93,6 +94,71 @@ class CTraderApiError(Exception):
         super().__init__(f"{code}: {description}" if description else code)
 
 
+class _SyncLoopThread:
+    """Persistent background event loop for the sync-call parity wrappers.
+
+    One daemon thread per CTraderBridge instance; the loop outlives any
+    single call, so the connection built on it (transport, receive task,
+    heartbeat task) is established ONCE and reused by every subsequent
+    call. This is the hot-path rule from the engine-wiring dispatch
+    (20/11): connect() is app-auth + account-auth ≈ 2s per attempt, and
+    an engine cycle makes several bridge calls — reconnecting per call
+    (the MT5Bridge one-shot wrapper idiom, whose MT5 terminal is
+    stateless and cheap to re-open) would spend ~10s per cycle just
+    authenticating.
+
+    Deliberately NOT started in __init__: a bridge used purely from async
+    code (paper feed fetcher) never pays for a thread it does not use.
+    """
+
+    def __init__(self) -> None:
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def ensure_started(self) -> None:
+        """Idempotent start of the loop thread."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._loop = asyncio.new_event_loop()
+
+            def _run_loop() -> None:
+                asyncio.set_event_loop(self._loop)
+                self._loop.run_forever()
+
+            self._thread = threading.Thread(
+                target=_run_loop, name="ctrader-sync-loop", daemon=True,
+            )
+            self._thread.start()
+
+    @property
+    def loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        return self._loop
+
+    def is_current(self) -> bool:
+        """True when called FROM the persistent loop (deadlock hazard)."""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return self._loop is not None and running is self._loop
+
+    def submit(self, coro: Any, timeout: Optional[float]) -> Any:
+        """Run one coroutine on the persistent loop and wait for it.
+
+        Exceptions propagate to the caller exactly as a direct await would;
+        the caller decides the failure shape (None / empty DataFrame).
+        """
+        assert self._loop is not None, "submit before ensure_started()"
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout)
+        except BaseException:
+            future.cancel()  # best effort — the coroutine may already be done
+            raise
+
+
 class CTraderBridge:
     """One cTrader account connection via the Open API (JSON mode)."""
 
@@ -135,6 +201,9 @@ class CTraderBridge:
         self._spot: dict[int, dict[str, float]] = {}
         self._subscribed: set[int] = set()
         self._symbol: Optional[str] = None  # resolved default symbol name
+        # Persistent-loop facility for the sync parity wrappers (20/11
+        # engine wiring): started lazily by ensure_connected_sync().
+        self._sync_loop = _SyncLoopThread()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -661,6 +730,128 @@ class CTraderBridge:
             return None
         return spot["bid"], spot["ask"]
 
+    # XAUUSD point = 0.01 — the same convention MT5Bridge.get_spread_sync
+    # falls back to when symbol info is unavailable. Spread POINTS is the
+    # unit the engine's SWING_MAX_SPREAD gate compares against (30 = $0.30).
+    SPREAD_POINT = 0.01
+
+    async def get_spread(self, symbol: str = "XAUUSD") -> Optional[float]:
+        """Spread in POINTS from the live spot quote (MT5 shape: float).
+
+        None when no spot yet (engine skips the cycle — safe) or when the
+        quote is malformed. No MT5Bridge async counterpart exists; the
+        sync wrapper get_spread_sync delegates here and adds the
+        persistent-loop connection policy.
+        """
+        quote = await self.get_quote(symbol)
+        if quote is None:
+            return None
+        bid, ask = quote
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return None
+        return round((ask - bid) / self.SPREAD_POINT, 0)
+
+    async def position_exists(self, ticket: int) -> Optional[bool]:
+        """Is the position still open? (MT5 position_exists_sync shape).
+
+        True  — still open
+        False — gone (broker closed it via SL/TP/manual/stopout)
+        None  — cannot answer (symbol/bridge trouble) — callers must NOT
+                treat None as gone
+        """
+        try:
+            for pos in await self._reconcile():
+                if int(pos.get("positionId", 0)) == int(ticket):
+                    return True
+            return False
+        except Exception as exc:  # noqa: BLE001 — parity: errors return None
+            logger.warning("position_exists(%s) failed: %s", ticket, exc)
+            return None
+
+    async def get_deal_history(
+        self, symbol: str = "XAUUSD", days_back: int = 7,
+    ) -> list[dict]:
+        """ProtoOADealListReq — deals in a window, MT5-shaped dicts.
+
+        Same dict contract as MT5Bridge.get_deal_history (the engine's
+        reconciliation reads these keys — see _reconcile_external_close
+        and metty.core.db._match_closing_deal): ticket, order, position_id,
+        time (epoch SECONDS), type (0=BUY / 1=SELL deal), volume (lots),
+        price, profit, symbol, comment.
+
+        cTrader mapping notes:
+        - positionId IS the engine's ticket (Strategy-1 match in
+          reconciliation is the reliable one on cTrader; MT5's
+          deal.order==ticket heuristic does not hold here because orderId
+          and positionId are distinct id spaces).
+        - dealType "reason" has no cTrader equivalent — exit_reason falls
+          back to the comment pass-through the engine already handles.
+        - profit comes from closePositionDetail.grossProfit (money-scaled)
+          on closing deals, 0.0 otherwise.
+        - Paged by hasMore (server caps rows per response); the cursor
+          walks the window backward from the oldest deal received.
+
+        Error parity with MT5Bridge.get_deal_history: failures RAISE (the
+        sync wrapper converts to None so the engine skips reconciliation
+        instead of false-closing on an empty window).
+        """
+        symbol_id = self._symbol_id(symbol)
+        lot_size = self._lot_size(symbol_id)
+
+        now_ms = int(time.time() * 1000)
+        from_ms = now_ms - days_back * 86_400_000
+        deals: list[dict[str, Any]] = []
+        cursor_to = now_ms
+        max_rows = 200
+        # Iteration bound: a runaway hasMore loop must not spin forever.
+        for _ in range(64):
+            request = self._build_request(msg.DEAL_LIST_REQ, {
+                "ctidTraderAccountId": self.config.account_id,
+                "fromTimestamp": max(from_ms, cursor_to - 30 * 86_400_000),
+                "toTimestamp": cursor_to,
+                "maxRows": max_rows,
+            })
+            response = await self._await_response(request, msg.DEAL_LIST_RES)
+            chunk = response.payload.get("deal", [])
+            if not chunk:
+                break
+            for deal in chunk:
+                deals.append(self._deal_to_mt5_shape(deal, symbol_id, lot_size))
+            if not response.payload.get("hasMore"):
+                break
+            oldest = min(int(d.get("createTimestamp") or 0) for d in chunk)
+            cursor_to = oldest - 1
+            if cursor_to <= from_ms:
+                break
+        return deals
+
+    def _deal_to_mt5_shape(
+        self, deal: dict[str, Any], symbol_id: int, lot_size: float,
+    ) -> dict[str, Any]:
+        """Map one ProtoOADeal to the MT5 deal dict the engine expects."""
+        close_detail = deal.get("closePositionDetail") or {}
+        money_digits = int(
+            close_detail.get("moneyDigits") or deal.get("moneyDigits") or 2,
+        )
+        gross_profit = close_detail.get("grossProfit")
+        profit = (
+            money_to_real(gross_profit, money_digits)
+            if gross_profit is not None else 0.0
+        )
+        filled = deal.get("filledVolume") or deal.get("volume")
+        return {
+            "ticket": int(deal.get("dealId", 0)),
+            "order": int(deal.get("orderId", 0)),
+            "position_id": int(deal.get("positionId", 0)),
+            "time": float(deal.get("executionTimestamp") or 0) / 1000.0,
+            "type": 0 if deal.get("tradeSide") == msg.TradeSide.BUY else 1,
+            "volume": volume_cents_to_lots(int(filled or 0), lot_size),
+            "price": float(deal.get("executionPrice") or 0.0),
+            "profit": profit,
+            "symbol": self._symbol_names.get(symbol_id, self.config.symbol),
+            "comment": deal.get("comment") or "",
+        }
+
     async def send_order(
         self,
         symbol: str,
@@ -964,3 +1155,116 @@ class CTraderBridge:
             }
             for entry in response.payload.get("ctidTraderAccount", [])
         ]
+
+    # ------------------------------------------------------------------
+    # Sync-call parity surface (engine wiring stage 2, 20/11)
+    # ------------------------------------------------------------------
+    # LiveTrader's nine self-serve points call the bridge from SYNCHRONOUS
+    # code (get_spread_sync / fetch_account_info_sync / ...) and from
+    # short-lived asyncio.run flows (connect / send_order / close). The
+    # wrappers below keep ONE persistent connection on ONE persistent
+    # loop (hot-path rule: connect ≈ 2s of app+account auth, several
+    # calls per engine cycle — reconnecting per call would sink it).
+
+    def ensure_connected_sync(self, timeout: Optional[float] = None) -> bool:
+        """Start the persistent loop (if needed) and connect once.
+
+        Idempotent: an already-connected bridge returns True without
+        touching the wire. The FIRST caller pays the ~2s handshake; every
+        later caller in this process reuses the same connection until the
+        server drops it (the next call then reconnects exactly once).
+        """
+        if self._connected:
+            return True
+        self._sync_loop.ensure_started()
+        if self._sync_loop.is_current():
+            raise RuntimeError(
+                "ensure_connected_sync called from the persistent loop — "
+                "deadlock by construction (report this: engine wiring bug)",
+            )
+        connect_timeout = timeout or max(
+            30.0, self.config.request_timeout * 6.0,
+        )
+        try:
+            return bool(self._sync_loop.submit(self.connect(), connect_timeout))
+        except Exception as exc:  # noqa: BLE001 — connect() itself returns False
+            logger.error("cTrader sync connect failed: %s", exc)
+            return False
+
+    def run_coroutine_sync(self, coro: Any, timeout: Optional[float] = None) -> Any:
+        """Run one bridge coroutine on the persistent loop and wait.
+
+        Public for CTraderEngineAdapter: the engine's asyncio.run flows
+        await adapter methods from a THROWAWAY loop, but this bridge's
+        connection (receive task, pending futures, heartbeat) lives on
+        the persistent loop — a future created on any other loop would
+        never resolve (responses arrive on the loop that owns the
+        transport). Exceptions propagate exactly as a direct await would.
+        """
+        if self._sync_loop.is_current():
+            raise RuntimeError(
+                "run_coroutine_sync called from the persistent loop — "
+                "deadlock by construction (report this: engine wiring bug)",
+            )
+        self._sync_loop.ensure_started()
+        return self._sync_loop.submit(
+            coro, timeout or self.config.request_timeout * 2.0,
+        )
+
+    def _sync_run(self, coro: Any) -> Any:
+        """Ensure-connected then run — the body every sync wrapper shares.
+
+        Returns None on ANY failure so each wrapper can apply its own
+        MT5Bridge failure shape (None / empty DataFrame). Never raises
+        into the engine cycle.
+        """
+        try:
+            if not self.ensure_connected_sync():
+                return None
+            return self.run_coroutine_sync(coro)
+        except Exception as exc:  # noqa: BLE001 — parity: MT5 wrappers return None
+            logger.error("cTrader sync call failed: %s", exc)
+            return None
+
+    def fetch_candles_sync(
+        self,
+        symbol: str = "XAUUSD",
+        timeframe: str = "M5",
+        count: int = 500,
+    ) -> pd.DataFrame:
+        """Candles on the persistent connection (MT5Bridge shape).
+
+        MT5 failure parity: empty DataFrame (never None, never raises).
+        """
+        frame = self._sync_run(self.get_candles(symbol, timeframe, count))
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def fetch_account_info_sync(self) -> Optional[AccountInfo]:
+        """Account snapshot on the persistent connection (MT5Bridge shape)."""
+        return self._sync_run(self.get_account_info())
+
+    def get_spread_sync(self, symbol: str = "XAUUSD") -> Optional[float]:
+        """Spread points on the persistent connection (MT5Bridge shape)."""
+        return self._sync_run(self.get_spread(symbol))
+
+    def get_quote_sync(self, symbol: str = "XAUUSD") -> Optional[tuple[float, float]]:
+        """(bid, ask) on the persistent connection (MT5Bridge shape)."""
+        return self._sync_run(self.get_quote(symbol))
+
+    def position_exists_sync(self, ticket: int) -> Optional[bool]:
+        """Position-exists check on the persistent connection.
+
+        None = UNKNOWN (bridge trouble) — callers must NOT treat as gone.
+        """
+        return self._sync_run(self.position_exists(ticket))
+
+    def fetch_deal_history_sync(
+        self, symbol: str = "XAUUSD", days_back: int = 7,
+    ) -> Optional[list[dict]]:
+        """Deal history on the persistent connection (MT5Bridge shape).
+
+        None = bridge failure ("do NOT reconcile"); [] = healthy window
+        with no deals. Callers rely on that distinction — see
+        LiveTrader._get_deal_history.
+        """
+        return self._sync_run(self.get_deal_history(symbol, days_back=days_back))

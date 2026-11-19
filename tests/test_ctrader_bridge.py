@@ -163,6 +163,10 @@ class FakeTransport:
         msg.SUBSCRIBE_SPOTS_REQ: {},
         msg.RECONCILE_REQ: {"position": []},
         msg.GET_TRENDBARS_REQ: {"trendbar": []},
+        # Engine wiring (20/11): reconciliation deals — empty window by
+        # default so a stray deal-list request never hangs a test for a
+        # full request_timeout.
+        msg.DEAL_LIST_REQ: {"deal": [], "hasMore": False},
         # Enough of a broker for a bare connect() to succeed:
         msg.SYMBOLS_LIST_REQ: lambda: gold_symbols_payload(),
         msg.SYMBOL_BY_ID_REQ: lambda: symbol_by_id_payload(),

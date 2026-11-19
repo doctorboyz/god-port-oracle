@@ -90,14 +90,32 @@ _KEY_MAP_RE = re.compile(r"^\s+([A-Z][A-Z0-9_]+):\s", re.M)
 # cells — scripts/bet_engine.py reads them as f"BET_FAMILY_{safe}" with the
 # dash sanitized to an underscore). Cell ids now include letter-only forms
 # (BET_RF / BET_SF, the conditional cells 13/11) alongside the original
-# letter+digit forms. Anything else dangles unread.
-_ACCT_SUFFIX_RE = re.compile(r"(?:_P\d+|_BET_[A-Z]+\d*)$")
+# letter+digit forms. _IC1-style keys are the cTrader demo engines (wiring
+# 20/11): oracle_runner.py / live_trader.py read them via f"KEY_{account}"
+# templates exactly like P-accounts. Anything else dangles unread.
+_ACCT_SUFFIX_RE = re.compile(r"(?:_P\d+|_IC\d+|_BET_[A-Z]+\d*)$")
+
+# Compose files Direction A scans: every ENGINE compose the repo ships.
+# The cTrader demo compose (20/11) joins the farm here so its env keys get
+# the same dead-key protection (its services are per-account engines like
+# the farm's).
+_DIRECTION_A_COMPOSES = (
+    "docker-compose.paper-farm.yml",
+    "docker-compose.ctrader-demo.yml",
+)
 
 
 def _farm_compose_keys() -> dict[str, set[str]]:
-    compose = ROOT / "docker-compose.paper-farm.yml"
-    text = compose.read_text()
     keys: dict[str, set[str]] = {}
+    for compose_name in _DIRECTION_A_COMPOSES:
+        text = (ROOT / compose_name).read_text()
+        _collect_compose_keys(text, compose_name, keys)
+    return keys
+
+
+def _collect_compose_keys(
+    text: str, source_name: str, keys: dict[str, set[str]],
+) -> None:
     current = None
     for line in text.splitlines():
         svc = re.match(r"^  ([\w-]+):\s*$", line)
@@ -106,8 +124,7 @@ def _farm_compose_keys() -> dict[str, set[str]]:
         for m in re.finditer(r"(?:^|\s)([A-Z][A-Z0-9_]+)\s*(?:=|$|:)", line):
             key = m.group(1)
             if re.match(r"^[A-Z][A-Z0-9_]+$", key) and current:
-                keys.setdefault(key, set()).add(current)
-    return keys
+                keys.setdefault(key, set()).add(f"{source_name}:{current}")
 
 
 def _has_reader(key: str, corpus: str) -> bool:

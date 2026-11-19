@@ -1,0 +1,193 @@
+# P22 on cTrader demo (IC Markets) — engine wiring stage 2 (20/11).
+#
+# Two engines, one champion (mirror docker-compose.vps.yml oracle-engine-p1,
+# the P22 champion) on cTrader DEMO accounts through CTraderBridge:
+#
+#   IC1 — ctid 49633503, $2,200 face value  — control: 0.5% sizing can
+#         exceed the 0.01 min-lot floor (SL$6 → 0.0183 raw lots)
+#   IC2 — ctid 49633450, $500 face value    — regime hit by the floor
+#         (SL$6 → 0.0042 raw → floored 0.01 = 1.2%/trade)
+#
+# Baselines are USD FACE VALUE (the bridge reports USD on these accounts —
+# P0 lesson: a wrong-unit baseline kills the DD line at boot).
+#
+# Rules this file must keep (contract tests lock them):
+# - DRY_RUN=1 HARD-CODED: flipping to live is a separate compose-line
+#   change after Hermes verifies the first simulated trades (demo-level
+#   approval stands from 19/11; real accounts are NOT covered by this file
+#   and require the kill-switch rebuild first).
+# - CTRADER_HOST_TYPE_ICn=demo HARD-CODED, and the runner refuses non-demo
+#   engine wiring anyway (belt + suspenders).
+# - ${...} ONLY for credentials (CTRADER_CLIENT_ID/CLIENT_SECRET/
+#   ACCESS_TOKEN, TG_*) — everything else hard-coded so a stale host .env
+#   can never win (repo lesson: ML_FILTER_ENABLED / RISK_PER_TRADE class).
+# - One account per container (ACCOUNTS=ICn): the bridge factory is a
+#   process-wide seam — the runner guards mismatches by name, but the
+#   deployment shape keeps one engine per process by construction.
+# - No kill switch in this compose (out of scope for the demo phase);
+#   protection = broker-side SL on every order + engine risk 0.005 +
+#   TradeBlocker 10/30/0.05 + in-engine drawdown lines.
+
+services:
+  oracle-engine-ic1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oracle-engine-ic1
+    environment:
+      - TRADING_PHASE=trade
+      # DRY-RUN stage 1: Hermes verifies simulated trades + equity stamps
+      # from the bridge before flipping this line (runbook in the handoff).
+      - DRY_RUN=1
+      - ACCOUNTS=IC1
+      - DB_PATH=/app/data/oracle_ic1.db
+      - COLLECT_INTERVAL=300
+      - TRADE_INTERVAL=300
+      # P22 = MR swing only (mirror champion): scalp path off
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      # MR-only generator mode (mirror oracle-engine-p1)
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      # RANGING_HARD_BLOCK intentionally NOT set (P22 enters in ranging)
+      - H4_USE_CLOSED_BAR_ONLY=1
+      - ML_FILTER_ENABLED=0
+      - LEARNING_MODE=0
+      # ── cTrader bridge selection (the single point that matters) ──
+      - ACCOUNT_TYPE_IC1=ctrader
+      - CTRADER_ACCOUNT_ID_IC1=49633503
+      - CTRADER_HOST_TYPE_IC1=demo
+      - CTRADER_SYMBOL=XAUUSD
+      # Credentials from host .env ONLY — never in this repo
+      - CTRADER_CLIENT_ID=${CTRADER_CLIENT_ID:-}
+      - CTRADER_CLIENT_SECRET=${CTRADER_CLIENT_SECRET:-}
+      - CTRADER_ACCESS_TOKEN=${CTRADER_ACCESS_TOKEN:-}
+      # No MT5 terminal behind this container: skip rpyc boot login and
+      # A/B/C seeding (the DB holds only the IC1 row).
+      - MT5_AUTO_LOGIN=0
+      - SEED_DEFAULT_ACCOUNTS=0
+      # ── P22 champion knobs (mirror oracle-engine-p1) ──
+      - STRATEGY_ID_IC1=mr-bet-p22-IC1
+      - ATR_MULTIPLIER_IC1=2.0
+      - RR_RATIO_IC1=1.20
+      - MIN_CONFIDENCE_IC1=0.55
+      - BUY_MIN_CONFIDENCE_IC1=0.55
+      - MR_BOLL_THRESHOLD_IC1=0.85
+      - TIME_STOP_BARS_IC1=12
+      - TRAILING_TP_ENABLED_IC1=1
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_IC1=1440
+      - RISK_PER_TRADE_IC1=0.005
+      - PARTIAL_TP_ENABLED_IC1=0
+      - TP1_RATIO_IC1=0.5
+      - RR_SCALE_IN_IC1=2.5
+      # Hour gates open (mirror champion: P22 won with full occupancy)
+      - ENTRY_HOURS_IC1=
+      - BLOCKED_HOURS_IC1=
+      - SWING_MAX_SPREAD_IC1=30
+      - MR_COST_MULT_IC1=3.0
+      - SL_CAP_IC1=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_IC1=1
+      - MAX_POSITIONS_CAP_IC1=1
+      - MIN_POSITIONS_IC1=1
+      - EQUITY_PER_POSITION_IC1=2200
+      # ── USD face-value baselines (bridge reports USD) ──
+      - INITIAL_BALANCE_IC1=2200
+      - INITIAL_EQUITY_IC1=2200
+      - LEVERAGE_IC1=1000
+      - SIGNAL_GROUP_IC1=portfolio
+      # cTrader serves "XAUUSD" (no micro suffix)
+      - MT5_SYMBOL_IC1=XAUUSD
+      # In-engine drawdown lines (mirror champion)
+      - DRAWDOWN_DAILY_LIMIT_IC1=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_IC1=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_IC1=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_IC1=4
+      # TradeBlocker — mirror champion (10/30 + lot clamp 0.05)
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      # Telegram (optional, from host .env; master switch defaults off)
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - TG_CHAT_ID=${TG_CHAT_ID:-}
+      - DAILY_SUMMARY_DISABLED=1
+      - BRIDGE_STATUS_DISABLED=1
+    volumes:
+      - /opt/god-port/data/ic1:/app/data
+    restart: unless-stopped
+
+  oracle-engine-ic2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oracle-engine-ic2
+    environment:
+      - TRADING_PHASE=trade
+      - DRY_RUN=1
+      - ACCOUNTS=IC2
+      - DB_PATH=/app/data/oracle_ic2.db
+      - COLLECT_INTERVAL=300
+      - TRADE_INTERVAL=300
+      - SCALP_ENABLED=0
+      - M5_SCALP_ENABLED=0
+      - TRENDING_HARD_BLOCK=1
+      - SESSION_CONFIDENCE_MULT_DISABLED=1
+      - REGIME_VOLATILE_SKIP=1
+      - H4_USE_CLOSED_BAR_ONLY=1
+      - ML_FILTER_ENABLED=0
+      - LEARNING_MODE=0
+      # ── cTrader bridge selection ──
+      - ACCOUNT_TYPE_IC2=ctrader
+      - CTRADER_ACCOUNT_ID_IC2=49633450
+      - CTRADER_HOST_TYPE_IC2=demo
+      - CTRADER_SYMBOL=XAUUSD
+      - CTRADER_CLIENT_ID=${CTRADER_CLIENT_ID:-}
+      - CTRADER_CLIENT_SECRET=${CTRADER_CLIENT_SECRET:-}
+      - CTRADER_ACCESS_TOKEN=${CTRADER_ACCESS_TOKEN:-}
+      - MT5_AUTO_LOGIN=0
+      - SEED_DEFAULT_ACCOUNTS=0
+      # ── P22 champion knobs (mirror champion) ──
+      - STRATEGY_ID_IC2=mr-bet-p22-IC2
+      - ATR_MULTIPLIER_IC2=2.0
+      - RR_RATIO_IC2=1.20
+      - MIN_CONFIDENCE_IC2=0.55
+      - BUY_MIN_CONFIDENCE_IC2=0.55
+      - MR_BOLL_THRESHOLD_IC2=0.85
+      - TIME_STOP_BARS_IC2=12
+      - TRAILING_TP_ENABLED_IC2=1
+      - CIRCUIT_BREAKER_COOLDOWN_MINUTES_IC2=1440
+      - RISK_PER_TRADE_IC2=0.005
+      - PARTIAL_TP_ENABLED_IC2=0
+      - TP1_RATIO_IC2=0.5
+      - RR_SCALE_IN_IC2=2.5
+      - ENTRY_HOURS_IC2=
+      - BLOCKED_HOURS_IC2=
+      - SWING_MAX_SPREAD_IC2=30
+      - MR_COST_MULT_IC2=3.0
+      - SL_CAP_IC2=12.0
+      # ── position limits ──
+      - MAX_POSITIONS_IC2=1
+      - MAX_POSITIONS_CAP_IC2=1
+      - MIN_POSITIONS_IC2=1
+      - EQUITY_PER_POSITION_IC2=500
+      # ── USD face-value baselines ──
+      - INITIAL_BALANCE_IC2=500
+      - INITIAL_EQUITY_IC2=500
+      - LEVERAGE_IC2=1000
+      - SIGNAL_GROUP_IC2=portfolio
+      - MT5_SYMBOL_IC2=XAUUSD
+      - DRAWDOWN_DAILY_LIMIT_IC2=0.10
+      - DRAWDOWN_WEEKLY_LIMIT_IC2=0.20
+      - DRAWDOWN_ACCOUNT_LIMIT_IC2=0.20
+      - DRAWDOWN_COOLDOWN_HOURS_IC2=4
+      - TRADE_BLOCKER_DAILY_LIMIT=10
+      - TRADE_BLOCKER_WEEKLY_LIMIT=30
+      - TRADE_BLOCKER_HARD_MAX_LOTS=0.05
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+      - TG_CHAT_ID=${TG_CHAT_ID:-}
+      - DAILY_SUMMARY_DISABLED=1
+      - BRIDGE_STATUS_DISABLED=1
+    volumes:
+      - /opt/god-port/data/ic2:/app/data
+    restart: unless-stopped

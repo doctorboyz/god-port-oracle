@@ -52,6 +52,21 @@ PARITY_METHODS = [
     "close_position_with_fill",
 ]
 
+# Engine wiring stage 2 (20/11): the trader's nine self-serve points also
+# call ASYNC get_deal_history (shared with MT5Bridge — full signature
+# parity both ways) and six SYNC wrappers. The sync wrappers' signature
+# parity is proven in tests/test_ctrader_sync_parity_causal.py (they are
+# NOT coroutines, so they cannot ride the async machinery here).
+PARITY_METHODS.append("get_deal_history")
+
+# cTrader-only async building blocks with no MT5 async counterpart —
+# the sync wrappers delegate to them. Presence + coroutine-ness locked
+# here; behavior in test_ctrader_sync_parity_causal.py.
+CTRADER_ONLY_ASYNC = [
+    "get_spread",
+    "position_exists",
+]
+
 
 # ----------------------------------------------------------------------
 # 1. Method-name parity
@@ -66,6 +81,14 @@ def test_ctader_bridge_exposes_every_parity_method_name():
 def test_parity_methods_exist_on_mt5_bridge_reference():
     for name in PARITY_METHODS:
         assert hasattr(MT5Bridge, name), f"reference drifted: {name} gone from MT5Bridge"
+
+
+def test_ctrader_only_async_building_blocks_exist():
+    import asyncio as _asyncio
+    for name in CTRADER_ONLY_ASYNC:
+        fn = getattr(CTraderBridge, name, None)
+        assert callable(fn), f"missing cTrader async building block: {name}"
+        assert _asyncio.iscoroutinefunction(fn)
 
 
 # ----------------------------------------------------------------------
